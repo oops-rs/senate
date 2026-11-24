@@ -82,6 +82,12 @@ impl Shared {
                     .answer_with(&approval.id, decision, Some(auth.actor()), |_| Ok(()))
                     .await
                     .map_err(IpcError::bad_request)?;
+                self.observe_approval_decided(
+                    &answered.id,
+                    &session,
+                    super::observe::approval_tool(answered.kind),
+                    decision,
+                );
                 Some(answered.summary)
             }
             Runtime::Claude => {
@@ -127,6 +133,12 @@ impl Shared {
                 }
                 self.settle_claude_answer(&host_id, &candidate, decision, auth.actor())
                     .map_err(internal)?;
+                self.observe_approval_decided(
+                    &super::observe::claude_id(&host_id, &candidate),
+                    &session,
+                    super::observe::claude_tool(&candidate.tool),
+                    decision,
+                );
                 Some(candidate.tool)
             }
             Runtime::Agy | Runtime::Acp => {

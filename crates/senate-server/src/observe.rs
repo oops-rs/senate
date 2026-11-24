@@ -11,7 +11,10 @@ use senate_core::api::ThreadsQuery;
 use senate_core::docket::Awaiting;
 use senate_core::event::meta;
 use senate_core::{Address, CommitteeId, Hub, Kind, PresenceState, SenatorName, Seq};
-use senate_observe::{Capture, GrantInfo, Hint, ProjectionError, Registry, SenateSource};
+use senate_observe::{
+    Capture, CardKey, GrantInfo, Hint, LinePolicy, LocalNotice, Preview, ProjectionError, Registry,
+    SenateSource,
+};
 use senate_observe_protocol as public;
 use senate_observe_protocol::link::{AppLink, Target};
 
@@ -45,6 +48,7 @@ impl Source {
 struct CommitteeView {
     committee: public::Committee,
     senators: Vec<public::Senator>,
+    retired: Vec<public::RetiredSenator>,
     threads: Vec<public::Thread>,
     docket: Vec<public::DeskItem>,
     windows: public::Truncation,
@@ -125,6 +129,7 @@ impl SenateSource for Source {
             committees: Vec::new(),
             projects: Vec::new(),
             senators: Vec::new(),
+            retired: Vec::new(),
             threads: Vec::new(),
             desk_items: Vec::new(),
             approvals: Vec::new(),
@@ -146,6 +151,7 @@ impl SenateSource for Source {
             );
             snapshot.committees.push(row.committee);
             snapshot.senators.extend(row.senators);
+            snapshot.retired.extend(row.retired);
             snapshot.threads.extend(row.threads);
             snapshot.desk_items.extend(row.docket);
             if row.windows.open_threads || row.windows.settled_threads || row.windows.desk_items {
@@ -198,7 +204,60 @@ impl SenateSource for Source {
                 });
             }
         }
+        snapshot.capabilities.extend([
+            "cards".into(),
+            "retired_senators".into(),
+            "approval_metadata".into(),
+            "message_routing".into(),
+            "hosted_viewers".into(),
+        ]);
+        if let Some(policy) = grant.lines {
+            snapshot.capabilities.push(
+                match policy {
+                    LinePolicy::Auto => "lines_auto",
+                    LinePolicy::Published => "published_lines",
+                }
+                .into(),
+            );
+        }
         registry.merge_machine_facts(grant, &mut snapshot)?;
+        for committee in &mut snapshot.committees {
+            committee.card = registry.card(&CardKey::Committee {
+                committee_id: committee
+                    .id
+                    .parse()
+                    .map_err(|_| ProjectionError::NotReady)?,
+            });
+        }
+        for senator in &mut snapshot.senators {
+            let senator_id = senator.id.parse().map_err(|_| ProjectionError::NotReady)?;
+            let key = if senator.kind == public::SenatorKind::Person {
+                CardKey::Person { senator_id }
+            } else {
+                CardKey::Seat {
+                    committee_id: senator
+                        .committee_id
+                        .parse()
+                        .map_err(|_| ProjectionError::NotReady)?,
+                    senator_id,
+                }
+            };
+            senator.card = registry.card(&key);
+        }
+        for senator in &mut snapshot.retired {
+            senator.card = registry.card(&CardKey::Seat {
+                committee_id: senator
+                    .committee_id
+                    .parse()
+                    .map_err(|_| ProjectionError::NotReady)?,
+                senator_id: senator.id.parse().map_err(|_| ProjectionError::NotReady)?,
+            });
+        }
+        if let Some(person) = &mut snapshot.senate.person {
+            person.card = registry.card(&CardKey::Person {
+                senator_id: person.id.parse().map_err(|_| ProjectionError::NotReady)?,
+            });
+        }
         Ok(Capture { snapshot, heads })
     }
 
@@ -216,9 +275,24 @@ impl SenateSource for Source {
 
     async fn hint(
         &self,
+        grant: &GrantInfo,
         event: &senate_core::Event,
         state: &public::Snapshot,
     ) -> Result<Option<Hint>, ProjectionError> {
+        let committee = event.committee.as_str();
+        if let Some(change) = senate_core::CommitteeSeatChange::of(event) {
+            let id = change.senator.to_string();
+            let target = Target::Senator(format!("{committee}::{id}"));
+            let row = public::SenatorRef { senator_id: id };
+            return Ok(Some(Hint {
+                committee_id: Some(committee.into()),
+                link: link(&state.senate.id, target),
+                event: match change.action {
+                    senate_core::CommitteeSeatAction::Join => public::Event::SenatorJoined(row),
+                    senate_core::CommitteeSeatAction::Unseat => public::Event::SenatorLeft(row),
+                },
+            }));
+        }
         let Some(message_kind) = eligible(event) else {
             return Ok(None);
         };
@@ -234,7 +308,6 @@ impl SenateSource for Source {
         {
             return Ok(None);
         }
-        let committee = event.committee.as_str();
         let seats: BTreeSet<_> = state
             .senators
             .iter()
@@ -270,10 +343,212 @@ impl SenateSource for Source {
                     .map(|addr| visible_address(addr, &seats))
                     .collect(),
                 root_seq: root,
-                line: None,
+                line: self
+                    .registry
+                    .upgrade()
+                    .and_then(|registry| registry.line_for(grant, event)),
             }),
         }))
     }
+    async fn preview(&self, committee: &CommitteeId, seq: Seq) -> Option<Preview> {
+        let event = self.hub().ok()?.get(committee, seq).await.ok().flatten()?;
+        eligible(&event)?;
+        if let Some(root) = event.thread {
+            let root = self.hub().ok()?.get(committee, root).await.ok().flatten()?;
+            eligible(&root)?;
+        }
+        let line = senate_observe::first_line(&event.body)?;
+        Some(Preview {
+            committee: committee.clone(),
+            event_id: event.id,
+            line,
+        })
+    }
+
+    async fn notice(
+        &self,
+        grant: &GrantInfo,
+        notice: LocalNotice,
+        state: &public::Snapshot,
+    ) -> Result<Option<Hint>, ProjectionError> {
+        let registry = self.registry.upgrade().ok_or(ProjectionError::NotReady)?;
+        match notice {
+            LocalNotice::Preview { committee, seq }
+                if grant.lines == Some(LinePolicy::Published) =>
+            {
+                let Some(message) = self.visible_message(grant, state, &committee, seq).await?
+                else {
+                    return Ok(None);
+                };
+                let public::Event::MessagePosted(data) = message.event else {
+                    return Ok(None);
+                };
+                Ok(data.line.map(|line| Hint {
+                    committee_id: message.committee_id,
+                    link: message.link,
+                    event: public::Event::MessageLinePublished(public::MessageLinePublished {
+                        seq: data.seq,
+                        line,
+                    }),
+                }))
+            }
+            LocalNotice::Preview { .. } => Ok(None),
+            LocalNotice::Route {
+                committee,
+                seq,
+                senator,
+                phase,
+                reason,
+            } => {
+                let Some(message) = self.visible_message(grant, state, &committee, seq).await?
+                else {
+                    return Ok(None);
+                };
+                let route_id = registry
+                    .route_id(grant, &committee, seq, senator.as_ref())
+                    .map_err(|_| ProjectionError::NotReady)?;
+                let target = senator.map(|senator| {
+                    if visible_seat(state, &committee, &senator) {
+                        public::Address::Senator {
+                            id: senator.to_string(),
+                        }
+                    } else {
+                        public::Address::External
+                    }
+                });
+                Ok(Some(Hint {
+                    committee_id: message.committee_id,
+                    link: message.link,
+                    event: public::Event::MessageRouted(public::MessageRouted {
+                        route_id,
+                        seq: Some(wire_seq(seq)?),
+                        target,
+                        phase,
+                        reason,
+                    }),
+                }))
+            }
+            LocalNotice::Card { key, revision } => Ok(card_hint(state, key, revision)),
+            LocalNotice::ApprovalDecided {
+                native_id,
+                committee,
+                senator,
+                tool,
+                decision,
+            } => {
+                if !visible_seat(state, &committee, &senator) {
+                    return Ok(None);
+                }
+                let id = registry
+                    .approval_id(&native_id)
+                    .map_err(|_| ProjectionError::NotReady)?;
+                Ok(Some(Hint {
+                    committee_id: Some(committee.to_string()),
+                    link: link(&state.senate.id, Target::Approvals),
+                    event: public::Event::ApprovalDecided(public::ApprovalDecided {
+                        id,
+                        tool_kind: tool,
+                        decision,
+                    }),
+                }))
+            }
+        }
+    }
+}
+
+impl Source {
+    async fn visible_message(
+        &self,
+        grant: &GrantInfo,
+        state: &public::Snapshot,
+        committee: &CommitteeId,
+        seq: Seq,
+    ) -> Result<Option<Hint>, ProjectionError> {
+        if !state
+            .committees
+            .iter()
+            .any(|row| row.id == committee.as_str())
+        {
+            return Ok(None);
+        }
+        let Some(event) = self.hub()?.get(committee, seq).await.map_err(not_ready)? else {
+            return Ok(None);
+        };
+        if eligible(&event).is_none() {
+            return Ok(None);
+        }
+        self.hint(grant, &event, state).await
+    }
+}
+
+fn visible_seat(state: &public::Snapshot, committee: &CommitteeId, senator: &SenatorName) -> bool {
+    state
+        .senators
+        .iter()
+        .any(|row| row.committee_id == committee.as_str() && row.id == senator.as_str())
+}
+
+fn card_hint(state: &public::Snapshot, key: CardKey, revision: String) -> Option<Hint> {
+    let (subject, committee_id, link) = match key {
+        CardKey::Committee { committee_id } => {
+            let row = state
+                .committees
+                .iter()
+                .find(|row| row.id == committee_id.as_str())?;
+            (
+                public::CardSubject::Committee {
+                    committee_id: row.id.clone(),
+                },
+                Some(row.id.clone()),
+                row.link.clone(),
+            )
+        }
+        CardKey::Seat {
+            committee_id,
+            senator_id,
+        } => {
+            let row = state.senators.iter().find(|row| {
+                row.committee_id == committee_id.as_str() && row.id == senator_id.as_str()
+            })?;
+            (
+                public::CardSubject::Senator {
+                    committee_id: row.committee_id.clone(),
+                    senator_id: row.id.clone(),
+                },
+                Some(row.committee_id.clone()),
+                row.link.clone(),
+            )
+        }
+        CardKey::Person { senator_id } => {
+            let link = state
+                .senate
+                .person
+                .as_ref()
+                .filter(|row| row.id == senator_id.as_str())
+                .and_then(|row| row.link.clone())
+                .or_else(|| {
+                    state
+                        .senators
+                        .iter()
+                        .find(|row| {
+                            row.kind == public::SenatorKind::Person && row.id == senator_id.as_str()
+                        })
+                        .and_then(|row| row.link.clone())
+                })?;
+            (
+                public::CardSubject::Person {
+                    person_id: senator_id.to_string(),
+                },
+                None,
+                Some(link),
+            )
+        }
+    };
+    Some(Hint {
+        committee_id,
+        link,
+        event: public::Event::CardChanged(public::CardChanged { subject, revision }),
+    })
 }
 
 struct CommitteeContext<'a> {
@@ -438,6 +713,27 @@ async fn committee_view(
             });
         }
     }
+    let mut retired = Vec::new();
+    for (senator, seq) in hub.retired_seats(&committee).await.map_err(not_ready)? {
+        if seated.contains(&senator) {
+            continue;
+        }
+        let Some(event) = hub.get(&committee, seq).await.map_err(not_ready)? else {
+            continue;
+        };
+        retired.push(public::RetiredSenator {
+            id: senator.to_string(),
+            committee_id: committee.to_string(),
+            alias: aliases
+                .alias_of(&committee, &senator)
+                .map(ToString::to_string),
+            runtime: None,
+            last_active_at: None,
+            retired_at: event.ts,
+            link: None,
+            card: None,
+        });
+    }
     Ok(CommitteeView {
         committee: public::Committee {
             id: committee.to_string(),
@@ -449,6 +745,7 @@ async fn committee_view(
             card: None,
         },
         senators,
+        retired,
         threads,
         docket,
         windows,

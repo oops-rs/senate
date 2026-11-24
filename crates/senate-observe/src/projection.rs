@@ -1,7 +1,7 @@
 //! A live, bounded view of a single grant. The snapshot and replay journal
 //! are published together under the view lock.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,6 +21,7 @@ use crate::audit::Audit;
 use crate::diff::{change_hints, patches};
 use crate::grants::{Authorized, GrantInfo, lock};
 use crate::journal::{Hint, Journal, JournalError};
+use crate::{LinePolicy, LocalNotice, Preview};
 
 const VIEW_LIMIT: usize = 16;
 const STREAM_LIMIT: usize = 16;
@@ -45,7 +46,25 @@ pub trait SenateSource: Send + Sync {
         limit: usize,
     ) -> Result<Vec<Event>, ProjectionError>;
 
-    async fn hint(&self, event: &Event, state: &Snapshot) -> Result<Option<Hint>, ProjectionError>;
+    async fn hint(
+        &self,
+        grant: &GrantInfo,
+        event: &Event,
+        state: &Snapshot,
+    ) -> Result<Option<Hint>, ProjectionError>;
+
+    async fn notice(
+        &self,
+        _grant: &GrantInfo,
+        _notice: LocalNotice,
+        _state: &Snapshot,
+    ) -> Result<Option<Hint>, ProjectionError> {
+        Ok(None)
+    }
+
+    async fn preview(&self, _committee: &CommitteeId, _seq: Seq) -> Option<Preview> {
+        None
+    }
 }
 
 pub struct Capture {
@@ -79,6 +98,7 @@ pub(crate) struct Projections {
     streams: Arc<Semaphore>,
     state_budget: Arc<Semaphore>,
     shutdown: watch::Sender<bool>,
+    notices: broadcast::Sender<LocalNotice>,
 }
 
 struct View {
@@ -87,6 +107,7 @@ struct View {
     activity: Mutex<Activity>,
     wake: Notify,
     stream_limit: Arc<Semaphore>,
+    lines: Option<LinePolicy>,
 }
 
 struct Activity {
@@ -110,11 +131,37 @@ impl Projections {
             streams: Arc::new(Semaphore::new(STREAM_LIMIT)),
             state_budget: Arc::new(Semaphore::new(MAX_STATE_TOTAL as usize)),
             shutdown: watch::channel(false).0,
+            notices: broadcast::channel(256).0,
         })
     }
 
     pub(crate) fn set_source(&self, source: Arc<dyn SenateSource>) {
         *lock(&self.source) = Some(source);
+    }
+
+    pub(crate) fn source(&self) -> Option<Arc<dyn SenateSource>> {
+        lock(&self.source).clone()
+    }
+
+    pub(crate) fn is_watched(&self) -> bool {
+        self.notices.receiver_count() > 0
+    }
+
+    pub(crate) fn notice(&self, notice: LocalNotice) {
+        let _ = self.notices.send(notice);
+    }
+
+    pub(crate) fn invalidate_lines(&self) {
+        lock(&self.views).retain(|_, view| {
+            if view.lines != Some(LinePolicy::Published) {
+                return true;
+            }
+            view.signal
+                .send_replace(Signal::Failed(ProjectionError::Reset));
+            *lock(&view.journal) = None;
+            view.wake.notify_one();
+            false
+        });
     }
 
     pub(crate) fn shutdown(&self) {
@@ -147,6 +194,7 @@ impl Projections {
                     }),
                     wake: Notify::new(),
                     stream_limit: Arc::new(Semaphore::new(2)),
+                    lines: grant.info.lines,
                 });
                 let worker = self.clone();
                 let view_for_task = view.clone();
@@ -205,6 +253,7 @@ impl Projections {
         grant: &Authorized,
     ) -> Result<(), ProjectionError> {
         let mut log = source.subscribe();
+        let mut notices = self.notices.subscribe();
         let mut shutdown = self.shutdown.subscribe();
         let mut revoked = grant.revoked.clone();
         let deadline = (grant.info.expires_at - Utc::now())
@@ -226,10 +275,14 @@ impl Projections {
             view.signal.send_replace(Signal::Ready);
             first
         };
+        let mut route_history = RouteHistory::default();
         let mut reconcile = tokio::time::interval(RECONCILE);
         reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
+            if matches!(*view.signal.borrow(), Signal::Failed(_)) {
+                return Err(ProjectionError::Reset);
+            }
             if !grant.is_live() || *shutdown.borrow() {
                 return Err(ProjectionError::Unauthorized);
             }
@@ -240,7 +293,12 @@ impl Projections {
             if idle.is_some_and(|until| Instant::now() >= until) {
                 return Ok(());
             }
+            let mut local = Vec::new();
             tokio::select! {
+                notice = notices.recv() => {
+                    local.push(notice.map_err(|_| ProjectionError::Reset)?);
+                    tokio::time::sleep(COALESCE).await;
+                }
                 _ = &mut expiry => return Err(ProjectionError::Unauthorized),
                 _ = shutdown.changed() => return Err(ProjectionError::Unauthorized),
                 _ = revoked.changed() => return Err(ProjectionError::Unauthorized),
@@ -263,6 +321,13 @@ impl Projections {
                 }
             }
 
+            while local.len() < 256 {
+                match notices.try_recv() {
+                    Ok(notice) => local.push(notice),
+                    Err(broadcast::error::TryRecvError::Empty) => break,
+                    Err(_) => return Err(ProjectionError::Reset),
+                }
+            }
             let _build = self
                 .builds
                 .acquire()
@@ -270,10 +335,31 @@ impl Projections {
                 .map_err(|_| ProjectionError::NotReady)?;
             let current = capture(source, &grant.info).await?;
             check_view(&current.snapshot)?;
-            let mut hints =
-                tokio::time::timeout(BUILD_TIMEOUT, durable_hints(source, &previous, &current))
-                    .await
-                    .map_err(|_| ProjectionError::Reset)??;
+            let mut hints = tokio::time::timeout(
+                BUILD_TIMEOUT,
+                durable_hints(source, &grant.info, &previous, &current),
+            )
+            .await
+            .map_err(|_| ProjectionError::Reset)??;
+            let local_hints = tokio::time::timeout(BUILD_TIMEOUT, async {
+                let mut hints = Vec::new();
+                for notice in local {
+                    if let Some(hint) = source
+                        .notice(&grant.info, notice, &current.snapshot)
+                        .await?
+                    {
+                        hints.push(hint);
+                    }
+                }
+                Ok::<_, ProjectionError>(hints)
+            })
+            .await
+            .map_err(|_| ProjectionError::Reset)??;
+            hints.extend(
+                local_hints
+                    .into_iter()
+                    .filter(|hint| route_history.changed(&hint.event)),
+            );
             hints.extend(change_hints(&previous.snapshot, &current.snapshot));
             if current.snapshot.capabilities != previous.snapshot.capabilities
                 || previous
@@ -402,6 +488,7 @@ async fn idle_until(until: Option<Instant>) {
 
 async fn durable_hints(
     source: &dyn SenateSource,
+    grant: &GrantInfo,
     previous: &Capture,
     current: &Capture,
 ) -> Result<Vec<Hint>, ProjectionError> {
@@ -420,7 +507,7 @@ async fn durable_hints(
                 return Err(ProjectionError::Reset);
             }
             for event in &events {
-                if let Some(hint) = source.hint(event, &current.snapshot).await? {
+                if let Some(hint) = source.hint(grant, event, &current.snapshot).await? {
                     hints.push(hint);
                 }
             }
@@ -560,6 +647,32 @@ impl Drop for StreamAudit {
     }
 }
 
+#[derive(Default)]
+struct RouteHistory(VecDeque<senate_observe_protocol::MessageRouted>);
+
+impl RouteHistory {
+    fn changed(&mut self, event: &senate_observe_protocol::Event) -> bool {
+        let senate_observe_protocol::Event::MessageRouted(route) = event else {
+            return true;
+        };
+        if let Some(index) = self
+            .0
+            .iter()
+            .position(|last| last.route_id == route.route_id)
+        {
+            if self.0.get(index) == Some(route) {
+                return false;
+            }
+            self.0.remove(index);
+        }
+        self.0.push_back(route.clone());
+        if self.0.len() > 512 {
+            self.0.pop_front();
+        }
+        true
+    }
+}
+
 struct Budget {
     pool: Arc<Semaphore>,
     held: u32,
@@ -627,7 +740,12 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn hint(&self, _: &Event, _: &Snapshot) -> Result<Option<Hint>, ProjectionError> {
+        async fn hint(
+            &self,
+            _: &GrantInfo,
+            _: &Event,
+            _: &Snapshot,
+        ) -> Result<Option<Hint>, ProjectionError> {
             Ok(None)
         }
     }
@@ -651,6 +769,7 @@ mod tests {
             committees: vec![],
             projects: vec![],
             senators: vec![],
+            retired: vec![],
             threads: vec![],
             desk_items: vec![],
             approvals: vec![],
@@ -694,6 +813,8 @@ mod tests {
                     origins: vec![],
                     topology: false,
                     expires_in_days: None,
+                    lines: None,
+                    auto_confirmed: false,
                 },
                 BTreeSet::new(),
             )

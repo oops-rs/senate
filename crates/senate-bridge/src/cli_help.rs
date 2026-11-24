@@ -23,6 +23,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "memory",
             "stats",
             "observe",
+            "card",
         ],
     ),
     (

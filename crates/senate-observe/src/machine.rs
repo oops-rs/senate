@@ -25,6 +25,7 @@ pub struct MachineFacts {
     pub projects: BTreeMap<CommitteeId, PathBuf>,
     pub paired_machines: Vec<String>,
     pub parent_state: LinkState,
+    pub approvals: Vec<LocalApproval>,
 }
 
 pub struct LocalSeat {
@@ -33,6 +34,20 @@ pub struct LocalSeat {
     pub last_active_at: Option<DateTime<Utc>>,
     pub hosted: bool,
     pub viewer_attached: Option<bool>,
+    pub history: Option<LocalHistory>,
+}
+
+pub struct LocalApproval {
+    pub native_id: String,
+    pub committee: CommitteeId,
+    pub senator: SenatorName,
+    pub kind: senate_observe_protocol::ApprovalTool,
+    pub asked_at: DateTime<Utc>,
+}
+
+pub struct LocalHistory {
+    pub native_id: String,
+    pub alias: Option<String>,
 }
 
 pub(crate) fn merge(
@@ -63,6 +78,52 @@ pub(crate) fn merge(
             seat.last_active_at = seat.last_active_at.max(local.last_active_at);
         }
     }
+    for retired in &mut public.retired {
+        let key = (
+            retired
+                .committee_id
+                .parse()
+                .map_err(|_| ProjectionError::NotReady)?,
+            retired.id.parse().map_err(|_| ProjectionError::NotReady)?,
+        );
+        if let Some(local) = facts.seats.get(&key) {
+            retired.runtime.clone_from(&local.runtime);
+            retired.last_active_at = local.last_active_at;
+            if let Some(history) = &local.history {
+                retired.alias = history.alias.clone().or_else(|| retired.alias.clone());
+                let history_id = registry
+                    .history_id(&history.native_id)
+                    .map_err(|_| ProjectionError::NotReady)?;
+                retired.link = AppLink::for_senate(Target::HistoryEntry(history_id), id)
+                    .ok()
+                    .map(|link| link.to_string());
+            }
+        }
+    }
+    for approval in facts.approvals {
+        let Some(seat) = public.senators.iter_mut().find(|seat| {
+            seat.committee_id == approval.committee.as_str() && seat.id == approval.senator.as_str()
+        }) else {
+            continue;
+        };
+        if matches!(seat.state, SenatorState::Idle | SenatorState::Unknown) {
+            seat.state = SenatorState::WaitingOnPerson;
+        }
+        public.approvals.push(senate_observe_protocol::Approval {
+            id: registry
+                .approval_id(&approval.native_id)
+                .map_err(|_| ProjectionError::NotReady)?,
+            committee_id: approval.committee.to_string(),
+            senator_id: approval.senator.to_string(),
+            tool_kind: approval.kind,
+            asked_at: approval.asked_at,
+            link: AppLink::for_senate(Target::Approvals, id)
+                .ok()
+                .map(|link| link.to_string()),
+        });
+    }
+    public.approvals.sort_by(|a, b| a.id.cmp(&b.id));
+    public.approvals.dedup_by(|a, b| a.id == b.id);
     let mut projects = BTreeMap::new();
     for committee in &mut public.committees {
         let key = committee

@@ -99,6 +99,11 @@ impl Front {
     pub(crate) async fn dispatch(self: &Arc<Self>, request: Request) -> Reply {
         match request {
             Request::ObserveAdmin { command } => self.on_observe_admin(command).await,
+            Request::SetCard {
+                session,
+                target,
+                document,
+            } => wrap(self.set_observer_card(&session, target, &document).await),
             Request::RemoteControl { .. } => Reply::err(IpcError::bad_request(
                 "remote control requires the local person socket",
             )),
@@ -262,6 +267,43 @@ impl Front {
                 "Observe requires a machine-hosted Senate",
             ));
         };
+        let bad = |error: senate_observe::GrantError| IpcError::bad_request(error.to_string());
+        let command = match command {
+            AdminRequest::Preview { committee, seq } => {
+                return wrap(registry.preview(&committee, seq).await.map_err(bad));
+            }
+            AdminRequest::Publish {
+                committee,
+                seq,
+                reviewed,
+            } => {
+                return wrap(
+                    registry
+                        .publish_line(&committee, seq, reviewed)
+                        .await
+                        .map_err(bad),
+                );
+            }
+            AdminRequest::Withdraw { committee, seq } => {
+                return wrap(registry.withdraw_line(&committee, seq).await.map_err(bad));
+            }
+            AdminRequest::HistorySession { id } => {
+                return wrap((|| -> Result<Option<String>, IpcError> {
+                    let sessions = self.primary().store.all_sessions().map_err(internal)?;
+                    Ok(sessions
+                        .into_iter()
+                        .filter(|session| !session.is_live())
+                        .find_map(|session| {
+                            registry
+                                .history_id(&session.session_id)
+                                .ok()
+                                .filter(|candidate| candidate == &id)
+                                .map(|_| session.session_id)
+                        }))
+                })());
+            }
+            other => other,
+        };
         let readable = if matches!(&command, AdminRequest::Create { .. }) {
             match self.primary().api.me().await {
                 Ok(me) => me.committees.into_iter().chain(me.archived).collect(),
@@ -277,6 +319,12 @@ impl Front {
                     .map_err(|error| IpcError::bad_request(error.to_string())),
             ),
             AdminRequest::List => Reply::ok(&registry.list()),
+            AdminRequest::HistorySession { .. }
+            | AdminRequest::Preview { .. }
+            | AdminRequest::Publish { .. }
+            | AdminRequest::Withdraw { .. } => {
+                Reply::err(IpcError::internal("unexpected Observe preview request"))
+            }
             AdminRequest::Identity => wrap(
                 registry
                     .installation()

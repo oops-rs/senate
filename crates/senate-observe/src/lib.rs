@@ -2,18 +2,25 @@
 //! machine assembly mounts this router and gives the local bridge a handle.
 
 mod audit;
+mod cards;
 mod diff;
 mod grants;
 mod http;
 mod journal;
 mod machine;
+mod notices;
+mod previews;
 mod projection;
 
+pub use cards::CardKey;
 pub use grants::{
-    AdminRequest, CreateGrant, GrantInfo, Installation, IssuedGrant, Registry, Scope,
+    AdminRequest, CreateGrant, GrantError, GrantInfo, Installation, IssuedGrant, Registry, Scope,
 };
 pub use http::router;
+pub use previews::{LinePolicy, Preview, first_line};
 
 pub use journal::Hint;
-pub use machine::{LocalSeat, MachineFacts, MachineSource};
+pub use machine::{LocalApproval, LocalHistory, LocalSeat, MachineFacts, MachineSource};
 pub use projection::{Capture, ProjectionError, SenateSource};
+
+pub use notices::LocalNotice;

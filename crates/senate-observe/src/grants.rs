@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
-use senate_core::CommitteeId;
+use senate_core::{CommitteeId, SenatorName, Seq};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -16,6 +16,8 @@ use tokio::sync::watch;
 use url::Url;
 
 use crate::audit::Audit;
+use crate::cards::{CardKey, Cards};
+use crate::previews::{LinePolicy, Preview, Previews};
 use crate::projection::Projections;
 use crate::{MachineFacts, MachineSource, ProjectionError, SenateSource};
 
@@ -25,10 +27,30 @@ const DEFAULT_DAYS: u16 = 30;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum AdminRequest {
-    Create { grant: CreateGrant },
+    Create {
+        grant: CreateGrant,
+    },
     List,
     Identity,
-    Revoke { id: String },
+    HistorySession {
+        id: String,
+    },
+    Preview {
+        committee: CommitteeId,
+        seq: Seq,
+    },
+    Publish {
+        committee: CommitteeId,
+        seq: Seq,
+        reviewed: Preview,
+    },
+    Withdraw {
+        committee: CommitteeId,
+        seq: Seq,
+    },
+    Revoke {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,9 +59,13 @@ pub struct CreateGrant {
     pub committees: Option<Vec<CommitteeId>>,
     pub all_committees: bool,
     pub scope: Scope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<LinePolicy>,
     pub origins: Vec<String>,
     pub topology: bool,
     pub expires_in_days: Option<u16>,
+    #[serde(default)]
+    pub auto_confirmed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +81,8 @@ pub struct GrantInfo {
     pub name: String,
     pub committees: Option<BTreeSet<CommitteeId>>,
     pub scope: Scope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<LinePolicy>,
     pub origins: BTreeSet<String>,
     pub topology: bool,
     pub expires_at: DateTime<Utc>,
@@ -166,6 +194,8 @@ pub struct Registry {
     pub(crate) projections: Arc<Projections>,
     seed: [u8; 32],
     machine: Mutex<Option<Arc<dyn MachineSource>>>,
+    previews: Previews,
+    cards: Cards,
 }
 
 impl Registry {
@@ -199,6 +229,8 @@ impl Registry {
             projections: Projections::new(),
             seed: installation_seed(directory)?,
             machine: Mutex::new(None),
+            previews: Previews::open(directory)?,
+            cards: Cards::open(directory)?,
         }))
     }
 
@@ -253,6 +285,100 @@ impl Registry {
         crate::machine::merge(self, grant, snapshot)
     }
 
+    pub fn is_watched(&self) -> bool {
+        self.projections.is_watched()
+    }
+
+    pub fn notice(&self, notice: crate::LocalNotice) {
+        self.projections.notice(notice);
+    }
+
+    pub fn history_id(&self, native: &str) -> Result<String, GrantError> {
+        Ok(format!(
+            "obs-{}",
+            self.scoped_id(b"history", native.as_bytes())?
+        ))
+    }
+
+    pub fn approval_id(&self, native: &str) -> Result<String, GrantError> {
+        self.scoped_id(b"approval", native.as_bytes())
+    }
+
+    pub fn route_id(
+        &self,
+        grant: &GrantInfo,
+        committee: &CommitteeId,
+        seq: Seq,
+        senator: Option<&SenatorName>,
+    ) -> Result<String, GrantError> {
+        let target = senator.map_or("", SenatorName::as_str);
+        let key = format!("{}:{committee}:{seq}:{target}", grant.id);
+        self.scoped_id(b"route", key.as_bytes())
+    }
+
+    pub async fn preview(&self, committee: &CommitteeId, seq: Seq) -> Result<Preview, GrantError> {
+        let source = self
+            .projections
+            .source()
+            .ok_or(GrantError::Invalid("Observe source is unavailable"))?;
+        source
+            .preview(committee, seq)
+            .await
+            .ok_or(GrantError::Invalid(
+                "no eligible first line at that position",
+            ))
+    }
+
+    pub async fn publish_line(
+        &self,
+        committee: &CommitteeId,
+        seq: Seq,
+        reviewed: Preview,
+    ) -> Result<(), GrantError> {
+        let candidate = self.preview(committee, seq).await?;
+        if candidate != reviewed {
+            return Err(GrantError::Invalid(
+                "the reviewed line changed before publication",
+            ));
+        }
+        if self.previews.publish(candidate)? {
+            self.projections.notice(crate::LocalNotice::Preview {
+                committee: committee.clone(),
+                seq,
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn withdraw_line(&self, committee: &CommitteeId, seq: Seq) -> Result<(), GrantError> {
+        let candidate = self.preview(committee, seq).await?;
+        if self.previews.withdraw(committee, &candidate.event_id)? {
+            self.projections.invalidate_lines();
+        }
+        Ok(())
+    }
+
+    pub fn line_for(&self, grant: &GrantInfo, event: &senate_core::Event) -> Option<String> {
+        self.previews.line(grant.lines?, event)
+    }
+
+    pub fn card(&self, key: &CardKey) -> Option<senate_observe_protocol::Card> {
+        self.cards.get(key)
+    }
+
+    pub fn set_card(
+        &self,
+        key: CardKey,
+        writer: &SenatorName,
+        document: &str,
+    ) -> Result<(), GrantError> {
+        if let Some(revision) = self.cards.set(key.clone(), writer, document)? {
+            self.projections
+                .notice(crate::LocalNotice::Card { key, revision });
+        }
+        Ok(())
+    }
+
     pub fn address(&self) -> SocketAddr {
         self.address
     }
@@ -268,8 +394,19 @@ impl Registry {
                 "expected a display name of 1 to 80 characters",
             ));
         }
-        if request.scope != Scope::Metadata {
-            return Err(GrantError::Invalid("only metadata grants are available"));
+        match (request.scope, request.lines) {
+            (Scope::Metadata, None) | (Scope::Lines, Some(LinePolicy::Published)) => {}
+            (Scope::Lines, Some(LinePolicy::Auto)) if request.auto_confirmed => {}
+            (Scope::Lines, Some(LinePolicy::Auto)) => {
+                return Err(GrantError::Invalid(
+                    "automatic previews need explicit confirmation",
+                ));
+            }
+            _ => {
+                return Err(GrantError::Invalid(
+                    "a lines grant must select auto or published previews",
+                ));
+            }
         }
         let days = request.expires_in_days.unwrap_or(DEFAULT_DAYS);
         if !(1..=90).contains(&days) {
@@ -313,6 +450,7 @@ impl Registry {
             name: name.to_owned(),
             committees,
             scope: request.scope,
+            lines: request.lines,
             origins: request.origins.into_iter().collect(),
             topology: request.topology,
             expires_at: now + chrono::Duration::days(i64::from(days)),
@@ -514,6 +652,8 @@ mod tests {
             origins: vec![],
             topology: false,
             expires_in_days: None,
+            lines: None,
+            auto_confirmed: false,
         }
     }
 

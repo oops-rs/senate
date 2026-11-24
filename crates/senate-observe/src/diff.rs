@@ -40,6 +40,14 @@ pub(crate) fn patches(before: &Snapshot, after: &Snapshot) -> StatePatch {
         .into_iter()
         .map(|(committee_id, id)| SeatKey { committee_id, id })
         .collect();
+    let (retired, retired_keys) = changes(&before.retired, &after.retired, |row| {
+        (row.committee_id.clone(), row.id.clone())
+    });
+    upsert.retired = retired;
+    remove.retired = retired_keys
+        .into_iter()
+        .map(|(committee_id, id)| SeatKey { committee_id, id })
+        .collect();
     macro_rules! diff_threads {
         ($($field:ident),+ $(,)?) => { $(
             let (rows, keys) = changes(&before.$field, &after.$field, |row| (row.committee_id.clone(), row.root_seq));
@@ -63,8 +71,8 @@ pub(crate) fn patches(before: &Snapshot, after: &Snapshot) -> StatePatch {
 
 pub(crate) fn change_hints(before: &Snapshot, after: &Snapshot) -> Vec<crate::Hint> {
     use senate_observe_protocol::{
-        ChairChanged, CommitteeArchived, Event, LinkChanged, SenatorStateChanged,
-        ThreadStateChanged,
+        ApprovalAsked, ChairChanged, CommitteeArchived, Event, Hosting, LinkChanged, SenatorRef,
+        SenatorState, SenatorStateChanged, ThreadStateChanged,
     };
 
     let mut hints = Vec::new();
@@ -111,6 +119,60 @@ pub(crate) fn change_hints(before: &Snapshot, after: &Snapshot) -> Vec<crate::Hi
                     senator_id: row.id.clone(),
                     previous_state: old.state,
                     state: row.state,
+                }),
+            });
+        }
+    }
+    for row in &after.senators {
+        let Some(old) = previous_senators.get(&(&row.committee_id, &row.id)) else {
+            continue;
+        };
+        let senator = || SenatorRef {
+            senator_id: row.id.clone(),
+        };
+        let append = |hints: &mut Vec<crate::Hint>, event| {
+            hints.push(crate::Hint {
+                committee_id: Some(row.committee_id.clone()),
+                link: row.link.clone(),
+                event,
+            });
+        };
+        match (old.state, row.state) {
+            (previous, SenatorState::Paused) if previous != SenatorState::Paused => {
+                append(&mut hints, Event::SenatorPaused(senator()));
+            }
+            (SenatorState::Paused, SenatorState::Idle | SenatorState::Working) => {
+                append(&mut hints, Event::SenatorResumed(senator()));
+            }
+            _ => {}
+        }
+        if old.hosted != Hosting::Here && row.hosted == Hosting::Here {
+            append(&mut hints, Event::SenatorStarted(senator()));
+        }
+        if old.state != SenatorState::Stopped && row.state == SenatorState::Stopped {
+            append(&mut hints, Event::SenatorStopped(senator()));
+        }
+        match (old.viewer_attached, row.viewer_attached) {
+            (Some(true), Some(false) | None) => {
+                append(&mut hints, Event::ViewerDetached(senator()))
+            }
+            (Some(false) | None, Some(true)) => {
+                append(&mut hints, Event::ViewerAttached(senator()))
+            }
+            _ => {}
+        }
+    }
+    let previous_approvals: std::collections::BTreeSet<_> =
+        before.approvals.iter().map(|row| &row.id).collect();
+    for approval in &after.approvals {
+        if !previous_approvals.contains(&approval.id) {
+            hints.push(crate::Hint {
+                committee_id: Some(approval.committee_id.clone()),
+                link: approval.link.clone(),
+                event: Event::ApprovalAsked(ApprovalAsked {
+                    id: approval.id.clone(),
+                    senator_id: approval.senator_id.clone(),
+                    tool_kind: approval.tool_kind,
                 }),
             });
         }

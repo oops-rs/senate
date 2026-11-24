@@ -56,6 +56,12 @@
         "$ref": "#/$defs/Project"
       }
     },
+    "retired": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RetiredSenator"
+      }
+    },
     "schema_version": {
       "$ref": "#/$defs/V1"
     },
@@ -425,6 +431,61 @@
       "required": [
         "id",
         "name"
+      ]
+    },
+    "RetiredSenator": {
+      "type": "object",
+      "properties": {
+        "alias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "card": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Card"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "committee_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_active_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retired_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "runtime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "committee_id",
+        "retired_at"
       ]
     },
     "Senate": {

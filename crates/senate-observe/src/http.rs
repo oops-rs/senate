@@ -332,6 +332,8 @@ mod tests {
                 origins: vec![origin.into()],
                 topology: false,
                 expires_in_days: None,
+                lines: None,
+                auto_confirmed: false,
             },
             Default::default(),
         )?)

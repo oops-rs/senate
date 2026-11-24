@@ -330,6 +330,22 @@ impl Relay {
         }
     }
 
+    /// The only runtime fields required by the public approval projection.
+    pub(crate) fn observe_inputs(&self) -> Vec<(String, String, ApprovalKind, DateTime<Utc>)> {
+        lock(&self.pending)
+            .values()
+            .map(|pending| {
+                let approval = &pending.approval;
+                (
+                    approval.id.clone(),
+                    approval.session_id.clone(),
+                    approval.kind,
+                    approval.received_at,
+                )
+            })
+            .collect()
+    }
+
     /// Pending approvals, oldest first.
     pub fn list(&self) -> Vec<Approval> {
         let mut out: Vec<Approval> = lock(&self.pending)

@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Address, Approval, ApprovalDecision, ApprovalTool, Committee, Cursor, DeskItem, HoldReason,
-    LinkState, MessageKind, Navigation, Project, RoutePhase, Senate, SenateLink, Senator,
-    SenatorState, Seq, Thread, ThreadState, V1, WaitsOn, Windows,
+    LinkState, MessageKind, Navigation, Project, RetiredSenator, RoutePhase, Senate, SenateLink,
+    Senator, SenatorState, Seq, Thread, ThreadState, V1, WaitsOn, Windows,
 };
 
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
@@ -240,6 +240,7 @@ row_changes!(Upserts {
     committees: Committee,
     projects: Project,
     senators: Senator,
+    retired: RetiredSenator,
     threads: Thread,
     desk_items: DeskItem,
     approvals: Approval,
@@ -250,6 +251,7 @@ row_changes!(Removals {
     committees: IdKey,
     projects: IdKey,
     senators: SeatKey,
+    retired: SeatKey,
     threads: ThreadKey,
     desk_items: ThreadKey,
     approvals: IdKey,
