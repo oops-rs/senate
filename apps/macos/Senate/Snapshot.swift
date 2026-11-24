@@ -156,6 +156,14 @@ enum Snapshot {
                 store.place = .session(prompt.sessionId)
                 try? await Task.sleep(for: .seconds(1.5))
                 await shot("session")
+                // A note sent from the composer, shown at once at the foot
+                // until the session's own card for it arrives.
+                if ProcessInfo.processInfo.environment["SENATE_APP_SNAPSHOT_SAY"] == "1" {
+                    store.sessionDrafts[prompt.sessionId] = "Publish once the `cargo publish` prompt is answered."
+                    await store.say(to: prompt)
+                    try? await Task.sleep(for: .seconds(1))
+                    await shot("session-sent")
+                }
             }
             // Scrolled to the top, the page before is read: what is on screen
             // stays where it is (compare the two pictures).

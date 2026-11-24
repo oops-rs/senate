@@ -194,6 +194,7 @@ final class ConversationPage: NSObject {
                 if let t = store.timeline, t.sessionId == id {
                     _ = (t.rows, t.loading, t.hasOlder, t.loadingOlder, t.working, t.available)
                 }
+                _ = store.sentNotes[id]
             case .thread:
                 _ = (store.thread, store.threadError)
             #if DEBUG
@@ -221,9 +222,25 @@ final class ConversationPage: NSObject {
         guard let source else { return nil }
         switch source {
         case let .session(id):
-            guard let t = store?.timeline, t.sessionId == id else { return ([], [:]) }
+            guard let store, let t = store.timeline, t.sessionId == id else { return ([], [:]) }
             let rows = t.loading ? [] : t.rows
-            return (rows.map { row in Row(id: row.id, value: row) { [unowned self] in encode(row, session: id, committee: t.committee) } },
+            // Notes sent from the composer and not delivered yet, at the
+            // foot, until the session's own card for each arrives.
+            let me = store.state.person.map { "[senator::\($0)]" }
+            let sent = t.loading ? [] : store.unconfirmed(id, in: t.items)
+            let pending = sent.enumerated().map { i, note in
+                let queued = note.queued(now: Clock.shared.now)
+                return Row(id: UInt64.max - UInt64(sent.count - i), value: "\(note.committee)#\(note.seq)#\(queued)") { [unowned self] in
+                    [
+                        "id": UInt64.max - UInt64(sent.count - i), "kind": "senate", "thinking": [String](),
+                        "pending": queued ? L("session.note_queued") : L("session.note_sending"),
+                        "senate": ["from": me.map { Mentions.shared.plain($0, committee: note.committee) } ?? "",
+                                   "kindLabel": L("session.note_kind"), "committee": note.committee] as [String: Any],
+                        "md": markdown("p/\(id)/\(note.committee)/\(note.seq)", Mentions.shared.plain(note.text, committee: note.committee)),
+                    ]
+                }
+            }
+            return (rows.map { row in Row(id: row.id, value: row) { [unowned self] in encode(row, session: id, committee: t.committee) } } + pending,
                     ["hasOlder": t.hasOlder, "loadingOlder": t.loadingOlder, "working": t.working])
         case let .thread(committee, root):
             guard let view = store?.thread, view.committee == committee, view.root == root else { return ([], [:]) }

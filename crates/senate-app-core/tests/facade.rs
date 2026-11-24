@@ -561,9 +561,14 @@ async fn sessions_by_committee_their_timelines_and_the_composer() {
     assert!(!deltas[3].working);
 
     // The composer: a note to lead on refund-v2, as alice.
-    core.say("s-claude".into(), "Ship it.".into())
+    // It comes back as the log took it: the card that will show it in the
+    // session's conversation carries the same committee and seq.
+    let sent = core
+        .say("s-claude".into(), "Ship it.".into())
         .await
         .unwrap();
+    assert_eq!(sent.committee, "refund-v2");
+    assert_eq!(sent.seq, 300);
     let said = world
         .lock()
         .unwrap()

@@ -75,6 +75,15 @@ pub trait CoreListener: Send + Sync {
     fn on_prompt_waiting(&self, session: HostedSession);
 }
 
+/// A note the person sent a session from the app, as the committee log
+/// took it: the session's conversation shows it as a card with this
+/// committee and seq once delivered.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SentNote {
+    pub committee: String,
+    pub seq: u64,
+}
+
 /// What to notify when something comes back to the person.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct PersonNote {
@@ -715,7 +724,7 @@ impl AppCore {
     /// Say something to the senator of a session, as the person: a note
     /// to it in its committee's log (`senate tell`), which the daemon
     /// delivers to the session. Nothing is typed into its terminal.
-    pub async fn say(&self, session_id: String, body: String) -> Result<(), CoreError> {
+    pub async fn say(&self, session_id: String, body: String) -> Result<SentNote, CoreError> {
         let (to, committee) = {
             let driver = self.driver()?;
             let model = driver.model();
@@ -740,12 +749,25 @@ impl AppCore {
                 message: text::empty_reply(self.locale()),
             });
         }
-        self.act(Action::Say {
-            committee,
-            to,
-            body,
+        let posted = self
+            .on_runtime(move |driver| async move {
+                driver
+                    .act(Action::Say {
+                        committee,
+                        to,
+                        body,
+                    })
+                    .await
+            })
+            .await?;
+        let posted: senate_bridge::ipc::Posted =
+            serde_json::from_value(posted).map_err(|e| CoreError::Failed {
+                message: e.to_string(),
+            })?;
+        Ok(SentNote {
+            committee: posted.committee.to_string(),
+            seq: posted.seq.0,
         })
-        .await
     }
 
     /// Stage one attachment for a running hosted session, returning the

@@ -87,6 +87,11 @@ final class CoreStore {
     private(set) var threadError: String?
     /// The open session's conversation, as read and followed.
     var timeline: SessionTimeline?
+    /// Notes sent to a session from its composer, by session id, not yet
+    /// in its conversation: shown at its foot until the session's own card
+    /// for them (the same committee and seq) arrives. Kept across pages,
+    /// not across a restart.
+    private(set) var sentNotes: [String: [SentLocal]] = [:]
     /// Sessions' conversations left for a page pushed above them, by
     /// session id: Back shows them as they were.
     @ObservationIgnored var parked: [String: SessionTimeline] = [:]
@@ -793,11 +798,38 @@ final class CoreStore {
             actionError = L("error.empty_reply")
             return
         }
+        var sent: SentNote?
         if await run("say:\(session.sessionId)", { core in
-            try await core.say(sessionId: session.sessionId, body: body)
-        }) {
+            sent = try await core.say(sessionId: session.sessionId, body: body)
+        }), let sent {
             sessionDrafts[session.sessionId] = nil
+            let id = session.sessionId
+            sentNotes[id, default: []].append(
+                SentLocal(committee: sent.committee, seq: sent.seq, text: body, at: Date())
+            )
+            // Not delivered by then: shown as queued.
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(21))
+                if let notes = self?.sentNotes[id] { self?.sentNotes[id] = notes }
+            }
         }
+    }
+
+    /// The notes sent to a session still to show: those its conversation
+    /// does not carry yet (as a card with the same committee and seq).
+    /// What it carries is dropped.
+    func unconfirmed(_ sessionId: String, in items: [TimelineEntry]) -> [SentLocal] {
+        guard let notes = sentNotes[sessionId], !notes.isEmpty else { return [] }
+        let carried = Set(items.compactMap { item -> String? in
+            guard case let .senate(m) = item.body, let c = m.committee, let seq = m.seq else { return nil }
+            return "\(c)#\(seq)"
+        })
+        let left = notes.filter { !carried.contains("\($0.committee)#\($0.seq)") }
+        if left.count != notes.count {
+            // Not during the view update that asked: on the next turn.
+            Task { @MainActor in self.sentNotes[sessionId] = left.isEmpty ? nil : left }
+        }
+        return left
     }
 
     func restore(_ session: HostedSession) async {
@@ -993,4 +1025,16 @@ extension RosterMember: @retroactive Identifiable {
 
 extension SeatLine: @retroactive Identifiable {
     public var id: String { agent }
+}
+
+/// A note sent to a session from the app, until its conversation shows it.
+struct SentLocal: Equatable {
+    let committee: String
+    let seq: UInt64
+    let text: String
+    let at: Date
+
+    /// Not delivered after a little while: the session is not taking it
+    /// now (stopped, busy); it waits in its queue.
+    func queued(now: Date) -> Bool { now.timeIntervalSince(at) > 20 }
 }
