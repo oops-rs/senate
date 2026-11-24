@@ -65,6 +65,8 @@ pub trait SenateSource: Send + Sync {
 
     fn idle(&self) {}
 
+    fn stream_opened(&self) {}
+
     async fn preview(&self, _committee: &CommitteeId, _seq: Seq) -> Option<Preview> {
         None
     }
@@ -193,8 +195,17 @@ impl Projections {
     }
 
     pub(crate) fn invalidate_lines(&self) {
+        self.invalidate(|view| view.lines == Some(LinePolicy::Published));
+    }
+
+    #[cfg(feature = "replay")]
+    pub(crate) fn invalidate_views(&self) {
+        self.invalidate(|_| true);
+    }
+
+    fn invalidate(&self, applies: impl Fn(&View) -> bool) {
         lock(&self.views).retain(|_, view| {
-            if view.lines != Some(LinePolicy::Published) {
+            if !applies(view) {
                 return true;
             }
             view.signal
@@ -422,6 +433,7 @@ impl Projections {
             let patch = patches(&previous.snapshot, &current.snapshot);
             if patch != Default::default() {
                 hints.push(Hint {
+                    at: Some(current.snapshot.as_of),
                     committee_id: None,
                     link: None,
                     event: senate_observe_protocol::Event::StatePatch(Box::new(patch)),
@@ -505,6 +517,9 @@ impl Projections {
             _reservation: Reservation::new(view, global, local),
             last_poll: Instant::now(),
         };
+        if let Some(source) = self.source() {
+            source.stream_opened();
+        }
         Ok(Sse::new(stream::unfold(stream, next_frame))
             .keep_alive(
                 KeepAlive::new()
@@ -572,6 +587,7 @@ async fn durable_hints(
     for committee in &current.snapshot.committees {
         if !known.contains(&committee.id) {
             hints.push(Hint {
+                at: None,
                 committee_id: Some(committee.id.clone()),
                 link: committee.link.clone(),
                 event: senate_observe_protocol::Event::CommitteeCreated(
@@ -913,6 +929,7 @@ mod tests {
         let first = journal.snapshot();
         let seq = "42".parse().map_err(|_| ProjectionError::NotReady)?;
         let hint = |contents: String| Hint {
+            at: None,
             committee_id: Some("senate".into()),
             link: None,
             event: Event::MessagePosted(MessagePosted {

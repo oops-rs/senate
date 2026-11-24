@@ -84,6 +84,7 @@ pub(crate) fn change_hints(before: &Snapshot, after: &Snapshot) -> Vec<crate::Hi
         };
         if old.archived != row.archived {
             hints.push(crate::Hint {
+                at: None,
                 committee_id: Some(row.id.clone()),
                 link: row.link.clone(),
                 event: Event::CommitteeArchived(CommitteeArchived {
@@ -93,6 +94,7 @@ pub(crate) fn change_hints(before: &Snapshot, after: &Snapshot) -> Vec<crate::Hi
         }
         if old.chair_id != row.chair_id {
             hints.push(crate::Hint {
+                at: None,
                 committee_id: Some(row.id.clone()),
                 link: row.link.clone(),
                 event: Event::CommitteeChairChanged(ChairChanged {
@@ -113,6 +115,7 @@ pub(crate) fn change_hints(before: &Snapshot, after: &Snapshot) -> Vec<crate::Hi
         };
         if old.state != row.state {
             hints.push(crate::Hint {
+                at: None,
                 committee_id: Some(row.committee_id.clone()),
                 link: row.link.clone(),
                 event: Event::SenatorStateChanged(SenatorStateChanged {
@@ -132,6 +135,7 @@ pub(crate) fn change_hints(before: &Snapshot, after: &Snapshot) -> Vec<crate::Hi
         };
         let append = |hints: &mut Vec<crate::Hint>, event| {
             hints.push(crate::Hint {
+                at: None,
                 committee_id: Some(row.committee_id.clone()),
                 link: row.link.clone(),
                 event,
@@ -167,6 +171,7 @@ pub(crate) fn change_hints(before: &Snapshot, after: &Snapshot) -> Vec<crate::Hi
     for approval in &after.approvals {
         if !previous_approvals.contains(&approval.id) {
             hints.push(crate::Hint {
+                at: None,
                 committee_id: Some(approval.committee_id.clone()),
                 link: approval.link.clone(),
                 event: Event::ApprovalAsked(ApprovalAsked {
@@ -188,6 +193,7 @@ pub(crate) fn change_hints(before: &Snapshot, after: &Snapshot) -> Vec<crate::Hi
         };
         if old.state != row.state || old.waits_on != row.waits_on {
             hints.push(crate::Hint {
+                at: None,
                 committee_id: Some(row.committee_id.clone()),
                 link: row.link.clone(),
                 event: Event::ThreadStateChanged(ThreadStateChanged {
@@ -205,6 +211,7 @@ pub(crate) fn change_hints(before: &Snapshot, after: &Snapshot) -> Vec<crate::Hi
             && old.state != row.state
         {
             hints.push(crate::Hint {
+                at: None,
                 committee_id: None,
                 link: row.link.clone(),
                 event: Event::LinkChanged(LinkChanged {
@@ -229,6 +236,7 @@ pub(crate) fn change_hints(before: &Snapshot, after: &Snapshot) -> Vec<crate::Hi
             for release in releases {
                 if !previous.iter().any(|old| old.tag == release.tag) {
                     hints.push(crate::Hint {
+                        at: None,
                         committee_id: None,
                         link: None,
                         event: Event::ProjectReleaseSeen(

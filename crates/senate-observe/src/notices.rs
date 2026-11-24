@@ -8,6 +8,7 @@ use crate::CardKey;
 
 #[derive(Clone)]
 pub enum LocalNotice {
+    Playback(Box<senate_observe_protocol::EventFrame>),
     Route {
         committee: CommitteeId,
         seq: Seq,

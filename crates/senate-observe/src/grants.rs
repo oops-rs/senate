@@ -301,6 +301,11 @@ impl Registry {
         self.scoped_id(b"tool", format!("{}:{id}", grant.id).as_bytes())
     }
 
+    #[cfg(feature = "replay")]
+    pub(crate) fn invalidate_views(&self) {
+        self.projections.invalidate_views();
+    }
+
     pub fn is_watched(&self) -> bool {
         self.projections.is_watched()
     }

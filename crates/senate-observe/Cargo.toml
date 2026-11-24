@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Machine-owned read-only Senate observation service"
 
+[features]
+replay = []
+
 [dependencies]
 async-trait = { workspace = true }
 base64 = "0.22"

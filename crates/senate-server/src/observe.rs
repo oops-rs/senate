@@ -295,6 +295,7 @@ impl SenateSource for Source {
             let target = Target::Senator(format!("{committee}::{id}"));
             let row = public::SenatorRef { senator_id: id };
             return Ok(Some(Hint {
+                at: None,
                 committee_id: Some(committee.into()),
                 link: link(&state.senate.id, target),
                 event: match change.action {
@@ -341,6 +342,7 @@ impl SenateSource for Source {
             |root| Target::Thread(committee.to_owned(), root),
         );
         Ok(Some(Hint {
+            at: None,
             committee_id: Some(committee.into()),
             link: link(&state.senate.id, target),
             event: public::Event::MessagePosted(public::MessagePosted {
@@ -383,6 +385,7 @@ impl SenateSource for Source {
     ) -> Result<Option<Hint>, ProjectionError> {
         let registry = self.registry.upgrade().ok_or(ProjectionError::NotReady)?;
         match notice {
+            LocalNotice::Playback(_) => Ok(None),
             LocalNotice::Preview { committee, seq }
                 if grant.lines == Some(LinePolicy::Published) =>
             {
@@ -394,6 +397,7 @@ impl SenateSource for Source {
                     return Ok(None);
                 };
                 Ok(data.line.map(|line| Hint {
+                    at: None,
                     committee_id: message.committee_id,
                     link: message.link,
                     event: public::Event::MessageLinePublished(public::MessageLinePublished {
@@ -427,6 +431,7 @@ impl SenateSource for Source {
                     }
                 });
                 Ok(Some(Hint {
+                    at: None,
                     committee_id: message.committee_id,
                     link: message.link,
                     event: public::Event::MessageRouted(public::MessageRouted {
@@ -461,6 +466,7 @@ impl SenateSource for Source {
                     tool_kind,
                 };
                 Ok(Some(Hint {
+                    at: None,
                     committee_id: Some(committee.to_string()),
                     link: link(
                         &state.senate.id,
@@ -488,6 +494,7 @@ impl SenateSource for Source {
                     .approval_id(&native_id)
                     .map_err(|_| ProjectionError::NotReady)?;
                 Ok(Some(Hint {
+                    at: None,
                     committee_id: Some(committee.to_string()),
                     link: link(&state.senate.id, Target::Approvals),
                     event: public::Event::ApprovalDecided(public::ApprovalDecided {
@@ -590,6 +597,7 @@ fn card_hint(state: &public::Snapshot, key: CardKey, revision: String) -> Option
         }
     };
     Some(Hint {
+        at: None,
         committee_id,
         link,
         event: public::Event::CardChanged(public::CardChanged { subject, revision }),

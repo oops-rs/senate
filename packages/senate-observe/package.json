@@ -1,0 +1,8 @@
+{
+  "name": "@senate/observe",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": { ".": { "types": "./src/index.d.ts", "default": "./src/index.js" } },
+  "files": ["src"],
+  "scripts": { "generate": "node generate.mjs", "test": "node generate.mjs --check && node --test" }
+}

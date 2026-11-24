@@ -118,7 +118,9 @@ impl Previews {
 }
 
 pub fn first_line(body: &str) -> Option<String> {
-    let line = body.lines().next()?;
+    let line = body
+        .split(['\r', '\n', '\u{0085}', '\u{2028}', '\u{2029}'])
+        .next()?;
     let clean: String = line.chars().filter(|character| {
         !character.is_control() && !matches!(character,
             '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'

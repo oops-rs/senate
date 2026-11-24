@@ -176,10 +176,16 @@ fn valid_authority(request: &Request, bound: SocketAddr) -> bool {
         .authority()
         .map(|authority| authority.as_str());
     (host.is_some() || authority.is_some())
-        && [host, authority]
-            .into_iter()
-            .flatten()
-            .all(|value| value.parse::<SocketAddr>() == Ok(bound))
+        && [host, authority].into_iter().flatten().all(|value| {
+            value.parse::<SocketAddr>() == Ok(bound)
+                || (bound.port() == 80
+                    && value
+                        == if bound.is_ipv4() {
+                            bound.ip().to_string()
+                        } else {
+                            format!("[{}]", bound.ip())
+                        })
+        })
 }
 
 fn single<'a>(headers: &'a HeaderMap, name: &HeaderName) -> Result<Option<&'a str>, ()> {

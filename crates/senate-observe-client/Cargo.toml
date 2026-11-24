@@ -1,0 +1,21 @@
+[package]
+name = "senate-observe-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rust client for the Senate Observe v1 HTTP and SSE API"
+
+[dependencies]
+bytes.workspace = true
+futures.workspace = true
+getrandom = "0.4"
+reqwest.workspace = true
+senate-observe-protocol.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[lints]
+workspace = true

@@ -2668,6 +2668,7 @@ dependencies = [
  "senate-core",
  "senate-markdown",
  "senate-observe",
+ "senate-observe-client",
  "senate-observe-protocol",
  "senate-remote-admin",
  "serde",
@@ -2776,6 +2777,20 @@ dependencies = [
  "tokio",
  "tower",
  "url",
+]
+
+[[package]]
+name = "senate-observe-client"
+version = "0.12.3"
+dependencies = [
+ "bytes",
+ "futures",
+ "getrandom 0.4.3",
+ "reqwest",
+ "senate-observe-protocol",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

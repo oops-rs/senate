@@ -12,6 +12,8 @@ mod notices;
 mod previews;
 mod projection;
 mod releases;
+#[cfg(feature = "replay")]
+mod replay;
 
 pub use cards::CardKey;
 pub use grants::{
@@ -25,3 +27,6 @@ pub use machine::{LocalApproval, LocalHistory, LocalSeat, MachineFacts, MachineS
 pub use projection::{Capture, ProjectionError, SenateSource, ToolDemand};
 
 pub use notices::LocalNotice;
+
+#[cfg(feature = "replay")]
+pub use replay::{Recording, ReplayError};
