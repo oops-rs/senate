@@ -10,7 +10,7 @@ mod common;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
-use common::{Harness, RECORD_HOSTED_ARGV, fast_timing, path};
+use common::{FakeServer, Harness, RECORD_HOSTED_ARGV, fast_timing, path};
 use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
 use senate_bridge::ipc::{
     self, DefaultSecretary, DefaultSecretaryState, EnsureAction, HostedRuntime, Request, SpawnReply,
@@ -22,6 +22,13 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// alice's machine, where alice is the Speaker; Claude Code is a fixture.
 async fn machine() -> Harness {
+    machine_presided_by("senator::alice", None).await
+}
+
+/// A machine whose Senate's Speaker is `speaker` (a senator id: with a
+/// path, a senator of the Senate above), registered under `parent` when
+/// given: that server is its uplink.
+async fn machine_presided_by(speaker: &str, parent: Option<&FakeServer>) -> Harness {
     let mut h = Harness::new().await;
     h.config.hosted_session_limit = Some(4);
     h.dir = tempfile::tempdir_in("/tmp").unwrap();
@@ -48,10 +55,17 @@ async fn machine() -> Harness {
         .lock()
         .unwrap()
         .roster
-        .name_speaker(Some(senate_core::SpeakerName::id(SenatorId::here(path(
-            "alice",
-        )))))
+        .name_speaker(Some(senate_core::SpeakerName::id(
+            speaker.parse::<SenatorId>().unwrap(),
+        )))
         .unwrap();
+    if let Some(parent) = parent {
+        h.server.state.inner.lock().unwrap().parent = Some("acme".parse().unwrap());
+        h.config.uplink = Some(senate_bridge::config::Uplink {
+            url: parent.url.clone(),
+            token: "tok-alice".into(),
+        });
+    }
     h.daemon = Some(
         start_with_host_binary(
             DaemonOptions {
@@ -449,5 +463,125 @@ async fn an_agent_cannot_start_the_default_secretary() {
     );
     let state: DefaultSecretary = call(&h, &Request::DefaultSecretary).await;
     assert_eq!(state.state, DefaultSecretaryState::NotRecorded);
+    h.stop().await;
+}
+
+/// A machine's Senate registered as a child, presided over by its person as
+/// a senator of the Senate above: its desk is kept here, under the person's
+/// handle, and the default secretary works it. Nothing of it is written to
+/// the Senate above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_presided_over_by_its_person_keeps_its_own_desk() {
+    let parent = FakeServer::start(&[("tok-alice", "alice")], &["refund-v2"]).await;
+    let mut h = machine_presided_by("/acme::senator::alice", Some(&parent)).await;
+    let office = h
+        .server
+        .state
+        .inner
+        .lock()
+        .unwrap()
+        .roster
+        .office()
+        .unwrap();
+    assert_eq!(office.kind, senate_core::SenatorKind::Person);
+    assert_eq!(
+        office.speaker_here(),
+        None,
+        "the Speaker is the parent's senator"
+    );
+
+    let started: DefaultSecretary = call(&h, &Request::EnsureSecretary).await;
+    assert_eq!(started.action, Some(EnsureAction::Started));
+    let senator = started.senator.clone().unwrap();
+    {
+        let child = h.server.state.inner.lock().unwrap();
+        assert_eq!(
+            child.secretaries.get(&path("alice")),
+            Some(&vec![senator.clone()])
+        );
+        assert!(
+            child
+                .roster
+                .office()
+                .unwrap()
+                .agent_workers()
+                .any(|w| w == &senator)
+        );
+    }
+    // The desk lists it, as this Senate's desk.
+    let desk: ipc::DeskReply = call(&h, &Request::Desk { set: None }).await;
+    assert_eq!(desk.speaker, path("alice"));
+    assert_eq!(desk.secretaries, std::slice::from_ref(&senator));
+    // Asked again: the same one.
+    let again: DefaultSecretary = call(&h, &Request::EnsureSecretary).await;
+    assert_eq!(again.action, Some(EnsureAction::AlreadyRunning));
+    // What `senate secretary ask` sends after the ensure: a request to it.
+    let sent = senate_bridge::speak::send(
+        &h.socket(),
+        CommitteeId::new("office").unwrap(),
+        ipc::SayKind::Request,
+        senator.as_str(),
+        "Make agy the chair of ibot".into(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sent.posted.committee, CommitteeId::new("office").unwrap());
+    let asked = h.server.last_event("office");
+    assert_eq!(asked.body, "Make agy the chair of ibot");
+    assert!(
+        asked.to.iter().any(|a| a.as_senator() == Some(&senator)),
+        "{:?}",
+        asked.to
+    );
+
+    // Its desk tools act for this Senate's office: it opens a committee
+    // for a project here.
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let project = h.dir.path().join("ibot");
+    std::fs::create_dir_all(&project).unwrap();
+    let opened: ipc::DeskOpenReply =
+        call(&h, &open(as_session(&rows, &senator), "ibot", &project)).await;
+    assert!(
+        opened.opened.is_some() && opened.chair.is_some(),
+        "{opened:?}"
+    );
+    assert_eq!(
+        h.server.events("ibot")[0].from,
+        senate_core::Address::Speaker
+    );
+
+    // Nothing crossed upward: no desk change, no event in the Senate above.
+    {
+        let above = parent.state.inner.lock().unwrap();
+        assert!(above.secretaries.is_empty(), "{:?}", above.secretaries);
+        assert!(
+            above.events.values().all(Vec::is_empty),
+            "{:?}",
+            above.events.keys().collect::<Vec<_>>()
+        );
+    }
+    h.stop().await;
+}
+
+/// A child whose Speaker is an agent of the Senate above has no desk here:
+/// the default secretary and a desk appointment are refused, saying where
+/// that desk is kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_presided_over_by_an_agent_above_has_no_desk_here() {
+    let parent = FakeServer::start(&[("tok-alice", "alice")], &["refund-v2"]).await;
+    let mut h = machine_presided_by("/acme::senator::claude-up", Some(&parent)).await;
+    let message = refused(&h, &Request::EnsureSecretary).await;
+    assert!(
+        message.contains("[/acme::senator::claude-up], is an agent of the Senate /acme")
+            && message.contains("appoint its secretaries there"),
+        "{message}"
+    );
+    let message = refused(&h, &Request::Desk { set: None }).await;
+    assert!(
+        message.contains("is an agent of the Senate /acme"),
+        "{message}"
+    );
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert!(rows.rows.is_empty(), "nothing started");
     h.stop().await;
 }

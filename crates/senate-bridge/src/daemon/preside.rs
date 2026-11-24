@@ -324,7 +324,7 @@ impl Shared {
             } => owner.clone(),
             _ => self
                 .office()
-                .and_then(|o| o.speaker_here().cloned())
+                .and_then(|o| o.desk_owner().cloned())
                 .filter(|s| people.is_person(s))
                 .map(|s| s.name().clone())
                 .unwrap_or_else(|| self.config.person.clone()),

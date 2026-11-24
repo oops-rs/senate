@@ -1218,8 +1218,11 @@ impl Shared {
         self.refresh_me().await;
         let speaker = self
             .office()
-            .and_then(|o| o.speaker_here().cloned())
-            .ok_or_else(|| IpcError::bad_request(roles_text::desk_elsewhere(self.locale)))?;
+            .and_then(|o| o.desk_owner().cloned())
+            .ok_or_else(|| {
+                let speaker = self.office().map(|o| o.speaker);
+                IpcError::bad_request(roles_text::desk_elsewhere(speaker.as_ref(), self.locale))
+            })?;
         let all = match set {
             Some(list) => {
                 let mut seen = std::collections::BTreeSet::new();
@@ -1422,7 +1425,7 @@ impl Shared {
         if self.desk_role(agent).is_some() {
             let person = self
                 .office()
-                .and_then(|o| o.speaker_here().cloned())
+                .and_then(|o| o.desk_owner().cloned())
                 .filter(|s| people.is_person(s))
                 .map(|s| s.name().clone())
                 .unwrap_or_else(|| self.config.person.clone());
@@ -1825,14 +1828,36 @@ pub(crate) mod roles_text {
         }
     }
 
-    pub(crate) fn desk_elsewhere(locale: Locale) -> String {
-        locale
-            .pick(
-                "这个 Senate 的 Speaker 不在这里（或还不知道是谁），它的 desk 要在它所在的 Senate 设置。",
-                "This Senate's Speaker is not a senator here (or is not known yet): its desk is set \
-                 where it presides.",
-            )
-            .to_owned()
+    /// No desk is kept in this Senate: its Speaker (`speaker`, when known)
+    /// is an agent of another Senate, whose desk is there.
+    pub(crate) fn desk_elsewhere(
+        speaker: Option<&senate_core::SenatorId>,
+        locale: Locale,
+    ) -> String {
+        match (speaker, locale) {
+            (Some(speaker), Locale::Zh) => {
+                let senate = speaker
+                    .senate()
+                    .map_or_else(|| "另一个 Senate".to_owned(), |s| format!("Senate {s}"));
+                format!(
+                    "这个 Senate 的 Speaker [{speaker}] 是 {senate} 的 agent，不是这里的人：它的 desk 在 {senate}，在那里设置它的 secretary。"
+                )
+            }
+            (Some(speaker), Locale::En) => {
+                let senate = speaker.senate().map_or_else(
+                    || "another Senate".to_owned(),
+                    |s| format!("the Senate {s}"),
+                );
+                format!(
+                    "This Senate's Speaker, [{speaker}], is an agent of {senate}, not a person here: \
+                     its desk is kept in {senate}; appoint its secretaries there."
+                )
+            }
+            (None, Locale::Zh) => "这个 Senate 还没有已知的 Speaker，所以没有 desk。".to_owned(),
+            (None, Locale::En) => {
+                "This Senate has no Speaker known yet, so it has no desk.".to_owned()
+            }
+        }
     }
 
     pub(crate) fn desk_named_twice(senator: &SenatorName, locale: Locale) -> String {

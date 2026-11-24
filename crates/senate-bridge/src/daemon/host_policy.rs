@@ -114,7 +114,7 @@ impl Shared {
             .await
             .map_err(|_| IpcError::new(codes::SERVER, "could not verify Senate roles in time"))?
             .map_err(server_error)?;
-        let desk = me.office.as_ref().and_then(|o| o.speaker_here()).cloned();
+        let desk = me.office.as_ref().and_then(|o| o.desk_owner()).cloned();
         // The empty selector is the person's CLI. The MCP shim must supply
         // its session identity for every hosted-session action.
         if selector.session_id.is_none() && selector.claude_pid.is_none() {
@@ -276,7 +276,11 @@ impl Shared {
         let desk = appoint_secretary
             .then(|| {
                 auth.desk.as_ref().ok_or_else(|| {
-                    IpcError::bad_request("the Speaker’s desk is not in this Senate")
+                    let speaker = self.office().map(|o| o.speaker);
+                    IpcError::bad_request(super::roles::roles_text::desk_elsewhere(
+                        speaker.as_ref(),
+                        self.locale,
+                    ))
                 })
             })
             .transpose()?;
