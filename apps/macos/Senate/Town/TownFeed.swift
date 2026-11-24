@@ -75,8 +75,12 @@ final class TownActivityFeed {
     private var retry: Task<Void, Never>?
     private var running = false
 
-    init(store: CoreStore, deliver: @escaping ([TownEvent]) -> Void) {
+    /// The entries as they came, for a town that maps them itself (the web Town).
+    private let entries: (([TownActivityEntry]) -> Void)?
+
+    init(store: CoreStore, entries: (([TownActivityEntry]) -> Void)? = nil, deliver: @escaping ([TownEvent]) -> Void) {
         self.store = store
+        self.entries = entries
         self.deliver = deliver
     }
 
@@ -116,7 +120,9 @@ final class TownActivityFeed {
         }
         cursors.merge(batch.cursors) { max($0, $1) }
         for entry in batch.events { cursors[entry.committee] = max(cursors[entry.committee] ?? 0, entry.seq) }
-        let events = TownActivity.events(batch.events.map(TownActivityEntry.init))
+        let mapped = batch.events.map(TownActivityEntry.init)
+        if !mapped.isEmpty { entries?(mapped) }
+        let events = TownActivity.events(mapped)
         if !events.isEmpty { deliver(events) }
     }
 

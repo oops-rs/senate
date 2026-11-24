@@ -5995,6 +5995,57 @@
         }
       }
     },
+    "town.access_body": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Town reads only what Observe shares: committees, senators and their states, and that messages move, never their text. Revoke it any time with senate observe token revoke."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "小镇只读取 Observe 公开的内容：委员会、议员及其状态，以及消息在流转，从不读取正文。可随时用 senate observe token revoke 撤销。"
+          }
+        }
+      }
+    },
+    "town.access_button": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许"
+          }
+        }
+      }
+    },
+    "town.access_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Let Town see this Senate"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "让小镇看到这个 Senate"
+          }
+        }
+      }
+    },
     "town.activity": {
       "extractionState": "manual",
       "localizations": {

@@ -568,6 +568,37 @@ impl AppCore {
         Ok(s.into())
     }
 
+    /// A new observer grant for a scene the person turns on in this app (the
+    /// Town): metadata only, every committee now and later, and this Senate's
+    /// direct links (topology), for 30 days. The person-only path the
+    /// `senate observe token create` command uses; the daemon checks the
+    /// caller. The bearer comes back once: keep it in the Keychain.
+    pub async fn observe_grant(&self, name: String) -> Result<ObserveGrant, CoreError> {
+        let request = Request::ObserveAdmin {
+            command: senate_observe::AdminRequest::Create {
+                grant: senate_observe::CreateGrant {
+                    name,
+                    committees: None,
+                    all_committees: true,
+                    scope: senate_observe::Scope::Metadata,
+                    lines: None,
+                    origins: Vec::new(),
+                    topology: true,
+                    expires_in_days: Some(30),
+                },
+            },
+        };
+        let issued: senate_observe::IssuedGrant = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        Ok(ObserveGrant {
+            url: issued.url,
+            token: issued.token,
+            id: issued.grant.id,
+            expires_at: issued.grant.expires_at.to_rfc3339(),
+        })
+    }
+
     /// Local personal activity for two inclusive ISO calendar dates and an
     /// IANA timezone. The report is local to this machine.
     pub async fn stats(
@@ -1293,6 +1324,17 @@ mod tests {
             ]
         );
     }
+}
+
+/// An observer grant issued to this app ([`AppCore::observe_grant`]): the
+/// Observe base URL and the bearer, shown once.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ObserveGrant {
+    pub url: String,
+    pub token: String,
+    pub id: String,
+    /// RFC 3339.
+    pub expires_at: String,
 }
 
 /// The machine's default secretary ([`AppCore::default_secretary`]).

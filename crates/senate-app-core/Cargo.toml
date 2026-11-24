@@ -42,6 +42,8 @@ tracing-subscriber = { workspace = true }
 cc = "1"
 
 [dev-dependencies]
+axum = { workspace = true }
+senate-observe = { workspace = true, features = ["replay"] }
 tempfile = { workspace = true }
 
 [lints]
