@@ -125,7 +125,7 @@ struct SessionActions: View {
         } else if h.paused {
             action(L("sessions.resume"), "play", help: L("sessions.resume_help"), filled: true) { await store.resume(h) }
         } else {
-            action(L("sessions.restore"), "arrow.counterclockwise", help: L("sessions.restore_help"), filled: true) {
+            action(L("sessions.restore"), "arrow.counterclockwise", help: L("sessions.restore_help"), filled: true, decisive: true) {
                 await store.restore(h)
             }
         }
@@ -134,11 +134,20 @@ struct SessionActions: View {
     @ViewBuilder
     private func action(
         _ title: String, _ symbol: String, help: String, filled: Bool = false, danger: Bool = false,
+        decisive: Bool = false,
         _ run: @escaping () async -> Void
     ) -> some View {
         switch style {
         case .toolbar:
-            Button { Task { await run() } } label: { Label(title, systemImage: symbol) }
+            // A familiar action is its icon; the page's one decisive
+            // action (Restore) keeps its words.
+            Button { Task { await run() } } label: {
+                if decisive {
+                    Label(title, systemImage: symbol).labelStyle(.titleAndIcon)
+                } else {
+                    Label(title, systemImage: symbol)
+                }
+            }
                 .help(help)
         case .buttons:
             Button(title) { Task { await run() } }
