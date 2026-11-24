@@ -1,0 +1,23 @@
+{
+  "name": "senate-town",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Town: the Senate's live activity as a little town, in Phaser, for the app's web view and a plain browser.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "map": "node tools/make-map.mjs",
+    "build": "node tools/build.mjs",
+    "test": "vitest run",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "phaser": "3.90.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "tile-extruder": "3.0.0",
+    "typescript": "7.0.2",
+    "vitest": "5.1.1"
+  }
+}

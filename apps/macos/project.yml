@@ -63,6 +63,12 @@ targets:
         excludes:
           - Info.plist
           - Senate.entitlements
+          - Web/town
+      # The web Town (built from TownWeb/ by `npm run build`), as one
+      # folder in the bundle: the page's files keep their paths.
+      - path: Senate/Web/town
+        type: folder
+        buildPhase: resources
     info:
       path: Senate/Info.plist
       properties:

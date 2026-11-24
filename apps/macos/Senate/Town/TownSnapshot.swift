@@ -17,7 +17,8 @@ enum TownSnapshot {
         // SENATE_APP_TOWN_HOLD=<s>: stay on the quiet town that long (to
         // measure what a still town costs), then go on.
         if let hold = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_HOLD"].flatMap(Double.init) {
-            print("snapshot: holding the quiet town \(hold) s")
+            let web = TownWebPage.shown.map { ($0.web.value(forKey: "_webProcessIdentifier") as? Int) ?? 0 } ?? 0
+            print("snapshot: holding the quiet town \(hold) s app=\(ProcessInfo.processInfo.processIdentifier) web=\(web)")
             try? await Task.sleep(for: .seconds(hold))
         }
         if TownScript.requested == nil {
@@ -33,6 +34,17 @@ enum TownSnapshot {
             await shot("town-busy")
             try? await Task.sleep(for: .seconds(2))
             await shot("town-busy-later")
+        }
+        if let page = TownWebPage.shown {
+            let stats = await page.evaluate("return window.town.stats()")
+            print("snapshot: town page \(String(describing: stats))")
+            // A hover card, then a click through to the senator's session.
+            _ = await page.evaluate("return window.town.probe(false)")
+            await shot("town-hover")
+            _ = await page.evaluate("return window.town.probe(true)")
+            await shot("town-clicked")
+            store.select(.town)
+            try? await Task.sleep(for: .seconds(1))
         }
         NotificationCenter.default.post(name: TownModel.showListNote, object: true)
         await shot("town-list")

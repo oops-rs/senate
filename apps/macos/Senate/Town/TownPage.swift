@@ -183,8 +183,12 @@ struct TownPage: View {
         }
     }
 
-    private var map: some View {
-        TownMap(model: model, open: open)
+    @ViewBuilder private var map: some View {
+        if TownWebPage.enabled {
+            TownWebMap(store: store, state: model.script ?? TownState(store: store))
+        } else {
+            TownMap(model: model, open: open)
+        }
     }
 
     private func controls(list: Bool) -> some View {
@@ -312,6 +316,40 @@ private struct TownMap: View {
                         .allowsHitTesting(false)
                 }
             }
+    }
+}
+
+/// The web Town (Phaser in a web view) in place of the SpriteKit map: fed
+/// the same state; its page maps the activity and asks what to open.
+private struct TownWebMap: View {
+    let store: CoreStore
+    let state: TownState
+    @State private var page: TownWebPage?
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Group {
+            if let page {
+                TownWebView(page: page)
+                    .ignoresSafeArea(edges: .top)
+                    .accessibilityLabel(L("town.map_label"))
+                    .accessibilityHint(L("town.map_hint"))
+            } else {
+                Color.clear
+            }
+        }
+        .onAppear {
+            let page = self.page ?? TownWebPage(store: store)
+            self.page = page
+            TownWebPage.shown = page
+            page.setOptions(reduceMotion: reduceMotion, dark: scheme == .dark, visible: true)
+            page.show(state)
+        }
+        .onDisappear { page?.setOptions(visible: false) }
+        .onChange(of: state) { page?.show(state) }
+        .onChange(of: scheme) { page?.setOptions(dark: scheme == .dark) }
+        .onChange(of: reduceMotion) { page?.setOptions(reduceMotion: reduceMotion) }
     }
 }
 
