@@ -265,3 +265,97 @@ extension ConversationPageTests {
         #expect(current == "m2", "the match in that command is the current one")
     }
 }
+
+extension ConversationPageTests {
+    /// A long session: messages with code and tables, and runs of commands.
+    static func longSession(_ seqs: ClosedRange<UInt64>) -> [TimelineEntry] {
+        seqs.map { seq in
+            switch seq % 5 {
+            case 0, 1:
+                return TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
+                    callId: "c\(seq)", name: "Bash", kind: "shell", status: "completed", statusLabel: "completed",
+                    title: "cargo test step \(seq)", cwd: nil, output: "ok \(seq)", exitCode: 0, diff: nil)))
+            case 2:
+                return TimelineEntry(seq: seq, at: nil, truncated: false, body: .user(text: "Message \(seq): go on."))
+            default:
+                let text = """
+                    ## Reply \(seq)
+
+                    Some prose for \(seq), long enough to wrap over a line or two in the reading column.
+
+                    ```swift
+                    let value\(seq) = \(seq)
+                    print(value\(seq))
+                    ```
+
+                    | a | b |
+                    |---|---|
+                    | \(seq) | \(seq * 2) |
+                    """
+                return TimelineEntry(seq: seq, at: nil, truncated: false, body: .assistant(text: text))
+            }
+        }
+    }
+
+    /// Older rows arrive while the reader is scrolled near the top, and
+    /// went on scrolling while they loaded: the row they are looking at
+    /// stays where it is on screen, even when the older page's last
+    /// commands join the first group shown (its row is new).
+    @Test func olderRowsKeepTheRowInViewWhereItIs() async throws {
+        let page = ConversationPage(store: nil)
+        for _ in 0..<500 where !page.isReady { try await Task.sleep(for: .milliseconds(20)) }
+        // The view starts with a command (51); the older page ends with one
+        // (50): together they are a group, a row the page has not seen.
+        let current = ConversationRows.rows(Self.longSession(51...120))
+        ConversationPage.fixtureRows["older"] = current
+        page.show(.fixtureRows("older"))
+        for _ in 0..<200 {
+            if await page.evaluate("return document.querySelectorAll('.row').length") as? Int == current.count { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        _ = await page.evaluate("await window.senate.renderAll(); return true")
+        // Near the top, then a little further while the older page loads.
+        _ = await page.evaluate("document.scrollingElement.scrollTop = 600; return true")
+        try await Task.sleep(for: .milliseconds(50))
+        _ = await page.evaluate("document.scrollingElement.scrollTop = 420; return true")
+        try await Task.sleep(for: .milliseconds(50))
+        let probe = """
+            const rows = Array.from(document.querySelectorAll('#rows > .row'));
+            const r = rows.find(r => r.getBoundingClientRect().top >= 0);
+            return r.dataset.id + '@' + Math.round(r.getBoundingClientRect().top)
+            """
+        let before = await page.evaluate(probe) as? String ?? ""
+        let id = before.split(separator: "@").first.map(String.init) ?? ""
+
+        ConversationPage.fixtureRows["older"] = ConversationRows.rows(Self.longSession(1...120))
+        page.pushFixture()
+        try await Task.sleep(for: .milliseconds(100))
+        let after = await page.evaluate("""
+            const r = document.querySelector('#rows > [data-id="\(id)"]');
+            return r ? '\(id)@' + Math.round(r.getBoundingClientRect().top) : 'gone'
+            """) as? String
+        let top = { (s: String?) in s.flatMap { Int($0.split(separator: "@").last ?? "") } }
+        #expect(after?.hasPrefix(id + "@") == true, "still on the page: \(after ?? "nil")")
+        if let was = top(before), let now = top(after) {
+            #expect(abs(now - was) <= 1, "the row in view stays put: \(before) → \(after ?? "nil")")
+        }
+        let count = await page.evaluate("return document.querySelectorAll('#rows > .row').length") as? Int
+        #expect(count == ConversationRows.rows(Self.longSession(1...120)).count)
+    }
+}
+
+extension ConversationPageTests {
+    /// What counts as rows read above: the page's rows following on, with
+    /// none, one or two of its first rows absorbed into a new row above.
+    @Test func prependedRowsAreToldApartFromAReset() {
+        #expect(ConversationPage.prepended([10, 11, 12], [1, 2, 10, 11, 12]) ?? (-1, -1) == (0, 2))
+        #expect(ConversationPage.prepended([10, 11, 12], [1, 2, 10, 11, 12, 13]) ?? (-1, -1) == (0, 2))
+        // The first row (a command) joined a group that starts above it.
+        #expect(ConversationPage.prepended([51, 52, 53], [1, 50, 52, 53]) ?? (-1, -1) == (1, 2))
+        // Nothing read above, or rows in another order: not a prepend.
+        #expect(ConversationPage.prepended([10, 11], [10, 11, 12]) == nil)
+        #expect(ConversationPage.prepended([10, 11, 12], [1, 11, 10, 12]) == nil)
+        #expect(ConversationPage.prepended([10, 11, 12], [1, 12]) ?? (-1, -1) == (2, 1), "two absorbed")
+        #expect(ConversationPage.prepended([10, 11, 12, 13], [1, 13]) == nil, "more than two: start again")
+    }
+}
