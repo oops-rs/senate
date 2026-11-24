@@ -16,7 +16,10 @@ pub(super) struct HostAuthority {
     committee_scope: Option<CommitteeId>,
     may_appoint: bool,
     committees: Vec<CommitteeId>,
+    /// The archived committees: refused by name, with how to unarchive.
+    archived: Vec<CommitteeId>,
     desk: Option<SenatorName>,
+    locale: Locale,
 }
 
 impl HostAuthority {
@@ -35,6 +38,12 @@ impl HostAuthority {
                 codes::NOT_PRESIDING,
                 "only the Speaker's office may start a chair or secretary, or manage a hosted senator in another committee",
             ));
+        }
+        if self.archived.contains(committee) {
+            return Err(IpcError::bad_request(super::archived_refusal(
+                committee,
+                self.locale,
+            )));
         }
         if !self.committees.contains(committee) {
             return Err(IpcError::bad_request(format!(
@@ -129,6 +138,8 @@ impl Shared {
                 may_appoint: speaker,
                 desk,
                 committees: me.committees,
+                archived: me.archived,
+                locale: self.locale,
             });
         }
         let session = self.resolve(selector)?;
@@ -150,6 +161,8 @@ impl Shared {
                 may_appoint: true,
                 desk,
                 committees: me.committees,
+                archived: me.archived,
+                locale: self.locale,
             });
         }
         let committee = session.committee().ok_or_else(not_hosting)?;
@@ -172,6 +185,8 @@ impl Shared {
             may_appoint: false,
             desk: None,
             committees: me.committees,
+            archived: me.archived,
+            locale: self.locale,
         })
     }
 

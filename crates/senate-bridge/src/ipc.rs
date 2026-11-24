@@ -1153,6 +1153,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
     },
+    /// Archive or unarchive a committee (`senate committees archive`): the
+    /// Speaker in person; refused from inside a coding session's process
+    /// tree, and while a hosted session on it runs here.
+    ArchiveCommittee {
+        committee: CommitteeId,
+        archived: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EventId>,
+    },
+    /// The archived committees (`senate committees --archived`, the app's
+    /// Show archived).
+    ArchivedCommittees,
     /// The machine's default secretary, changing nothing (`senate setup
     /// doctor`, the app).
     DefaultSecretary,

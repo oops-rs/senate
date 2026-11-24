@@ -592,6 +592,17 @@ impl ApiClient {
         Ok(checked(resp).await?.json().await?)
     }
 
+    /// Archive or unarchive `committee` (the Speaker in person).
+    pub(crate) async fn set_committee_archive(
+        &self,
+        committee: &CommitteeId,
+        request: &api::SetCommitteeArchive,
+    ) -> Result<api::CommitteeArchiveInfo, ApiClientError> {
+        let url = self.url(&api::committee_archive_path(committee));
+        let resp = self.authed(self.http.put(url)).json(request).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
     pub async fn set_committee_seat(
         &self,
         committee: &CommitteeId,

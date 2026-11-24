@@ -705,7 +705,9 @@ impl Actor for CommitteeActor {
                 // (presence, the unarchive) pass.
                 if state.archive.archived().is_some()
                     && event.thread.is_none()
-                    && event.from != senate_core::Address::Committee
+                    && (event.from != senate_core::Address::Committee
+                        // Relayed in from another Senate: not the server's own.
+                        || event.meta.contains_key(senate_core::meta::ORIGIN))
                     && event.kind != Kind::Presence
                 {
                     reply_or_log(reply, Err(LogError::Invalid(state.archived_refusal())));

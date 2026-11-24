@@ -1424,7 +1424,7 @@ impl ServerHub {
 
     /// The committees with a log, split into the open ones and the
     /// archived ones ([`senate_core::CommitteeArchive`]), each in log order.
-    pub(crate) async fn committees_by_archive(
+    pub async fn committees_by_archive(
         &self,
     ) -> Result<(Vec<CommitteeId>, Vec<CommitteeId>), HubError> {
         let mut open = Vec::new();
