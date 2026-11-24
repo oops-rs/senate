@@ -179,6 +179,23 @@ enum Snapshot {
                     NotificationCenter.default.post(name: scrollToItem, object: mcp.seq)
                     try? await Task.sleep(for: .milliseconds(300))
                     await shot("session-mcp")
+                    // Back navigation: a thread opened from the session is
+                    // pushed; Back shows the session where it was, in the
+                    // same web page (no reload).
+                    if let thread = store.inboxThreads.first {
+                        // A mark on the page: still there after Back means no reload.
+                        let measure = "const s = document.scrollingElement; return [window.__mark, s.scrollTop, s.scrollHeight, document.querySelectorAll('.output').length].join(' ')"
+                        _ = await store.page.evaluate("window.__mark = 'same-page'; return true")
+                        let before = await store.page.evaluate(measure) as? String
+                        store.openThread(committee: thread.committee, root: thread.root)
+                        try? await Task.sleep(for: .seconds(1.5))
+                        await shot("nav-pushed")
+                        store.back()
+                        try? await Task.sleep(for: .seconds(1.5))
+                        await shot("nav-back")
+                        let after = await store.page.evaluate(measure) as? String
+                        print("snapshot: back (page mark, scroll, height, open outputs): \(before ?? "nil") → \(after ?? "nil")")
+                    }
                 }
             }
             if let working = sessions.first(where: { $0.status == .working && $0.readable }) {

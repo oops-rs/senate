@@ -806,3 +806,41 @@ extension CoreStoreTests {
         #expect(Mentions.id("[senator::claude-f6d10eaa-48f6]") == "claude-f6d10eaa-48f6")
     }
 }
+
+extension CoreStoreTests {
+    /// The window's navigation: a page opened from another is pushed, Back
+    /// pops it (past what no longer exists), the sidebar starts again.
+    @Test func pagesArePushedAndBackPopsThem() async throws {
+        let store = store()
+        store.select(.section(.inbox))
+        #expect(store.path.isEmpty && !store.canGoBack)
+
+        store.place = .committee("refund-v2")
+        store.openThread(committee: "refund-v2", root: 118)
+        #expect(store.path == [.committee("refund-v2"), .thread("refund-v2:118")])
+        #expect(store.place == .thread("refund-v2:118"))
+
+        #expect(store.back())
+        #expect(store.place == .committee("refund-v2"))
+        #expect(store.path == [.committee("refund-v2")])
+
+        // A new page after going back replaces what was ahead.
+        store.place = .section(.approvals)
+        #expect(store.path == [.committee("refund-v2"), .section(.approvals)])
+
+        // A session no longer on this machine is passed over.
+        store.place = .session("gone")
+        store.place = .committee("docs")
+        #expect(store.back())
+        #expect(store.place == .section(.approvals), "past the session that is gone")
+
+        // The system's Back sets the path: the page shown follows.
+        store.path = [.committee("refund-v2")]
+        #expect(store.place == .committee("refund-v2"))
+
+        // The sidebar: a new root, nothing to go back to.
+        store.select(.section(.history))
+        #expect(store.path.isEmpty && store.root == .section(.history) && store.place == .section(.history))
+        #expect(!store.back())
+    }
+}

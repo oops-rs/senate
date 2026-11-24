@@ -2251,6 +2251,23 @@
         }
       }
     },
+    "nav.back": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Back"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "返回"
+          }
+        }
+      }
+    },
     "notify.codex_approval": {
       "extractionState": "manual",
       "localizations": {

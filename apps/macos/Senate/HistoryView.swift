@@ -383,7 +383,10 @@ struct PastSessionPage: View {
         .confirmationDialog(L("past.forget_title", row?.name ?? sessionId), isPresented: $confirmForget) {
             Button(L("past.forget_confirm"), role: .destructive) {
                 Task {
-                    if let row, await store.history.forget(row) { store.place = .section(.history) }
+                    if let row, await store.history.forget(row) {
+                        // Gone: back to where it was opened from, else History.
+                        if !store.back() { store.select(.section(.history)) }
+                    }
                 }
             }
         } message: {
