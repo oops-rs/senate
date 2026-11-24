@@ -1183,6 +1183,11 @@ async fn threads(
 ) -> Result<Json<ThreadsPage>, ApiFailure> {
     let committee = committee_path(path)?;
     let params = query(params)?;
+    if params.include_discussions && params.agent.is_none() {
+        return Ok(Json(
+            state.hub.committee_threads(&committee, &params).await?,
+        ));
+    }
     let board = state.hub.tasks(&committee).await?;
     let threads = match &params.agent {
         Some(agent) => board.threads_for(

@@ -188,6 +188,45 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
         try record("thread \(committee) \(thread)")
         return threadView ?? ThreadView(committee: committee, root: thread, title: "", state: nil, stateLabel: nil, kindLabel: "", events: [])
     }
+    var committeeThreadRows: [CommitteeThread] = []
+    private var activityListeners: [UInt64: ActivityListener] = [:]
+    private var nextActivityWatch: UInt64 = 1
+
+    func committeeThreads(committee: String, includeArchived: Bool, limit: UInt32?, cursor: String?) async throws -> CommitteeThreadPage {
+        try record("committee-threads \(committee)")
+        let before = cursor.flatMap(UInt64.init) ?? UInt64.max
+        let rows = committeeThreadRows.filter {
+            $0.committee == committee && $0.lastSeq < before && (includeArchived || $0.state != "archived")
+        }.sorted { $0.lastSeq > $1.lastSeq }
+        let page = Array(rows.prefix(max(1, Int(limit ?? 40))))
+        return CommitteeThreadPage(
+            rows: page, nextCursor: rows.count > page.count ? page.last.map { String($0.lastSeq) } : nil)
+    }
+
+    func watchActivity(committees: [String]?, after: [String: UInt64], listener: ActivityListener) throws -> UInt64 {
+        try record("watch-activity")
+        return lock.withLock {
+            let id = nextActivityWatch
+            nextActivityWatch += 1
+            activityListeners[id] = listener
+            return id
+        }
+    }
+
+    func stopActivity(id: UInt64) {
+        lock.withLock {
+            _calls.append("unwatch-activity \(id)")
+            activityListeners.removeValue(forKey: id)
+        }
+    }
+
+    func pushActivity(_ batch: ActivityBatch) {
+        let listeners = lock.withLock { Array(activityListeners.values) }
+        for listener in listeners {
+            listener.onBatch(batch: batch)
+        }
+    }
+
     /// What `timeline` returns, by session id.
     var timelines: [String: TimelinePage] = [:]
     /// The listener of the session watched last.
@@ -304,7 +343,9 @@ func committee(_ name: String, chair: String? = nil, live: Bool = false, members
     RosterCommittee(
         committee: name, chairId: chair, chairDisplayName: chair, chairLive: live,
         activeMembers: UInt32(members.filter(\.1).count), pending: 0,
-        members: members.map { RosterMember(senatorId: $0.0, displayName: $0.0, active: $0.1) })
+        members: members.map { RosterMember(senatorId: $0.0, displayName: $0.0, active: $0.1,
+                                               runtime: nil, sessionState: $0.1 ? "idle" : "away",
+                                               statusTitle: nil, sessionId: nil) })
 }
 
 /// A session on this machine; hosted (with a prompt) when `prompt` is set.

@@ -1094,12 +1094,19 @@ async fn threads(
         return r;
     }
     let inner = st.inner.lock().unwrap();
-    let mut board = senate_core::TaskBoard::new(inner.roster.people());
+    let mut board = if q.include_discussions {
+        senate_core::TaskBoard::with_discussions(inner.roster.people())
+    } else {
+        senate_core::TaskBoard::new(inner.roster.people())
+    };
     for e in inner.events.get(&committee).cloned().unwrap_or_default() {
         board.observe(&e);
     }
     let threads = match &q.agent {
         Some(agent) => board.threads_for(agent, q.state),
+        None if q.include_discussions => {
+            board.committee_threads(q.state, q.include_archived, q.before, q.limit.unwrap_or(41))
+        }
         None => board.threads(q.state),
     };
     Json(senate_core::api::ThreadsPage {

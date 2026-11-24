@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 
 use senate_bridge::approvals::Approval;
 use senate_bridge::ipc::{
-    self, ApprovalsReply, ApproveReply, ClientError, DocketReply, InboxReply, MAX_LINE, Posted,
-    Reply, Request, SessionRow, SessionSelector, SessionsReply, TimelineUpdate, WatchEvent,
+    self, ActivityBatch, ApprovalsReply, ApproveReply, ClientError, DocketReply, InboxReply,
+    MAX_LINE, Posted, Reply, Request, SessionRow, SessionSelector, SessionsReply, TimelineUpdate,
+    WatchEvent,
 };
 use senate_core::alias::KnownAliases;
 use senate_core::{CommitteeId, Locale, SenatorName};
@@ -169,6 +170,65 @@ impl Link {
             Some(e) => ClientError::Remote(e),
             None => ClientError::Protocol("timeline_watch: no update".into()),
         })
+    }
+}
+
+impl Link {
+    pub(crate) async fn activity_watch(
+        &self,
+        request: &Request,
+    ) -> Result<ActivityStream, ClientError> {
+        let stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(&self.socket))
+            .await
+            .map_err(|_| ClientError::Timeout)?
+            .map_err(|source| ClientError::Connect {
+                path: self.socket.clone(),
+                source,
+            })?;
+        let mut lines = WatchStream {
+            reader: BufReader::new(stream),
+        };
+        let mut line =
+            serde_json::to_vec(request).map_err(|e| ClientError::Protocol(e.to_string()))?;
+        line.push(b'\n');
+        lines.reader.get_mut().write_all(&line).await?;
+        let first = tokio::time::timeout(READ_TIMEOUT, lines.line())
+            .await
+            .map_err(|_| ClientError::Timeout)??
+            .ok_or_else(|| ClientError::Protocol("connection closed".into()))?;
+        if let Ok(batch) = serde_json::from_str::<ActivityBatch>(&first) {
+            return Ok(ActivityStream {
+                lines,
+                first: Some(batch),
+            });
+        }
+        Err(serde_json::from_str::<Reply>(&first)
+            .ok()
+            .and_then(|reply| reply.error)
+            .map_or_else(
+                || ClientError::Protocol("activity_watch: no batch or refusal".into()),
+                ClientError::Remote,
+            ))
+    }
+}
+
+pub(crate) struct ActivityStream {
+    lines: WatchStream,
+    first: Option<ActivityBatch>,
+}
+
+impl ActivityStream {
+    pub(crate) async fn next(&mut self) -> Result<Option<ActivityBatch>, ClientError> {
+        if let Some(batch) = self.first.take() {
+            return Ok(Some(batch));
+        }
+        self.lines
+            .line()
+            .await?
+            .map(|line| {
+                serde_json::from_str(&line).map_err(|e| ClientError::Protocol(e.to_string()))
+            })
+            .transpose()
     }
 }
 

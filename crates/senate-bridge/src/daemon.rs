@@ -167,6 +167,7 @@ use crate::session::{self, Runtime, Session, SessionState};
 use crate::state::{ItemKey, ItemStatus, QueueItem, SessionUpsert, Store, StoreError};
 use crate::stream::{self, CommitteeWorker};
 
+mod activity;
 mod approval_guard;
 pub mod default_secretary;
 mod desk_decision;
@@ -515,6 +516,7 @@ pub(crate) struct Shared {
     pub(crate) ladder: Ladder,
     pub(crate) timing: Timing,
     streams: Mutex<BTreeMap<Seat, CommitteeWorker>>,
+    activity: activity::ActivityHub,
     /// Wakes the batcher.
     pub(crate) work: Notify,
     /// Wakes the supervisor.
@@ -972,6 +974,7 @@ impl Shared {
             uplink,
             timing: common.timing,
             streams: Mutex::new(BTreeMap::new()),
+            activity: activity::ActivityHub::default(),
             work: Notify::new(),
             committees_changed: Notify::new(),
             generation: RwLock::new(0),
@@ -2022,6 +2025,7 @@ impl Shared {
         event: &Event,
         dirty: &Notify,
     ) -> Result<(), StoreError> {
+        self.activity.publish(event, true);
         if self.observe_chair(event) {
             self.seed_chair(&event.committee).await;
         }
@@ -3211,6 +3215,8 @@ impl Shared {
             Request::RemoteControl { .. } => Reply::err(IpcError::bad_request("local device management only")),
             Request::Profiles => wrap(Ok(&self.config.profiles)),
             Request::Sessions => wrap(self.on_sessions(false).await),
+            Request::CommitteeThreads { committee, include_archived, limit, cursor } =>
+                wrap(self.on_committee_threads(committee, include_archived, limit, cursor).await),
             Request::Stats { from, to, tz } => wrap(self.on_stats(from, to, &tz).await),
             Request::SessionHistory { committee, before, limit } =>
                 wrap(self.on_history(committee, before, limit).await),
@@ -3497,7 +3503,7 @@ impl Shared {
             Request::SessionDrop { .. } => Reply::err(IpcError::bad_request(
                 "attachments require an upload connection on the local person socket",
             )),
-            Request::Watch { .. } | Request::TimelineWatch { .. } => Reply::err(IpcError::bad_request(
+            Request::Watch { .. } | Request::TimelineWatch { .. } | Request::ActivityWatch { .. } => Reply::err(IpcError::bad_request(
                 "watch turns a connection into a stream; send it as the connection's request",
             )),
         }
@@ -6363,6 +6369,31 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         tokio::select! {
                             () = Box::pin(session_drop::serve(&shared, peer, request, reader, write)) => {}
                             _ = shutdown.changed() => {}
+                        }
+                        return;
+                    }
+                    Ok(Request::ActivityWatch { committees, after }) => {
+                        match shared
+                            .refuse_agent_caller(
+                                peer,
+                                "Read committee activity from your own terminal or the Senate app",
+                            )
+                            .await
+                        {
+                            Ok(()) => {
+                                Box::pin(activity::serve(
+                                    shared.primary(),
+                                    committees,
+                                    after,
+                                    reader,
+                                    write,
+                                    shutdown,
+                                ))
+                                .await
+                            }
+                            Err(error) => {
+                                send_ipc_line(&mut write, &Reply::err(error)).await;
+                            }
                         }
                         return;
                     }
