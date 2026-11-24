@@ -261,33 +261,49 @@ impl Shared {
 
     /// An ordinary hook can share the binding read lock with delivery.
     /// Recheck ownership under the write lock before changing the native ID.
-    pub(super) async fn bind_claude_hook(
+    pub(super) async fn bind_hosted_hook(
         &self,
         report: &HookReport,
         next: &mut SessionUpsert,
     ) -> Result<(tokio::sync::RwLockReadGuard<'_, ()>, Option<Session>), IpcError> {
         let paths = Paths::new(&self.home);
         let binding = self.session_bindings.read().await;
-        let candidates = self.hosted_claude_reports(&paths, report)?;
+        let candidates = self.hosted_hook_reports(&paths, report)?;
         if candidates
             .iter()
             .any(|(native, _, _)| *native != report.session_id)
         {
             drop(binding);
             let write = self.session_bindings.write().await;
-            let candidates = self.hosted_claude_reports(&paths, report)?;
-            let switched = self.reconcile_hosted_claude_hook(&paths, report, next, &candidates)?;
+            let candidates = self.hosted_hook_reports(&paths, report)?;
+            let switched = self.reconcile_hosted_hook(&paths, report, next, &candidates)?;
             return Ok((tokio::sync::RwLockWriteGuard::downgrade(write), switched));
         }
-        self.reconcile_hosted_claude_hook(&paths, report, next, &candidates)?;
+        self.reconcile_hosted_hook(&paths, report, next, &candidates)?;
         Ok((binding, None))
     }
 
-    fn hosted_claude_reports(
+    fn hosted_hook_reports(
         &self,
         paths: &Paths,
         report: &HookReport,
     ) -> Result<Vec<(String, EventId, bool)>, IpcError> {
+        if report.runtime == Runtime::Agy {
+            let Some(host) = report.host.as_ref() else {
+                return Ok(Vec::new());
+            };
+            let Some(native) = self.store.session_for_host(host).map_err(internal)? else {
+                // A new launch is named before its first published binding.
+                return Ok(Vec::new());
+            };
+            let owner = self.store.session(&native).map_err(internal)?;
+            let verified = owner.is_some_and(|session| session.runtime == Runtime::Agy)
+                && host::child_pid(paths, host).is_some_and(|pid| {
+                    report.ancestor_pids.contains(&pid) && session::pid_alive(pid)
+                })
+                && host::running(paths, host).map_err(IpcError::internal)?;
+            return Ok(vec![(native, host.clone(), verified)]);
+        }
         if report.claude_pid.is_none() && report.ancestor_pids.is_empty() {
             return Ok(Vec::new());
         }
@@ -317,7 +333,7 @@ impl Shared {
         Ok(candidates)
     }
 
-    fn reconcile_hosted_claude_hook(
+    fn reconcile_hosted_hook(
         &self,
         paths: &Paths,
         report: &HookReport,
@@ -334,7 +350,7 @@ impl Shared {
             }
             [(native, id, true)] => (native, id),
             _ => {
-                let reason = "could not attribute the Claude context change to one hosted TUI";
+                let reason = "could not attribute the context change to one hosted TUI";
                 for (native, id, _) in candidates {
                     if *native != report.session_id {
                         report_unverified_switch(paths, id, &report.session_id, reason);
@@ -343,6 +359,23 @@ impl Shared {
                 return Err(IpcError::bad_request(reason));
             }
         };
+        if report.runtime == Runtime::Agy && report.event != HookEvent::SessionStart {
+            if self
+                .store
+                .hosted_native_retired(&report.session_id)
+                .map_err(internal)?
+                != Some(true)
+                && let Err(error) = host::note_unbound_context(paths, id, &report.session_id)
+            {
+                tracing::warn!(%error, "recording an unbound agy context");
+            }
+
+            // PreInvocation and delayed hooks can still carry the ID of
+            // the previous conversation. They never move the terminal.
+            return Err(IpcError::bad_request(
+                "a hosted agy conversation change requires SessionStart",
+            ));
+        }
         if self.hosts.unpublished(native) {
             return Err(IpcError::bad_request(
                 "the hosted launch is still being published",
@@ -359,7 +392,8 @@ impl Shared {
         {
             // An out-of-order prompt from a superseded context is not an
             // explicit request to resume that context.
-            if report.event != HookEvent::SessionStart || report.source.as_deref() != Some("resume")
+            if report.event != HookEvent::SessionStart
+                || (report.runtime == Runtime::Claude && report.source.as_deref() != Some("resume"))
             {
                 let reason = "a previously registered native ID requires a verified resume hook";
                 report_unverified_switch(paths, id, &report.session_id, reason);
@@ -382,12 +416,17 @@ impl Shared {
         let seat = Address::senator(&first.agent).in_text();
         let old_native = &first.session_id;
         let new_native = &report.session_id;
+        let runtime = if first.runtime == Runtime::Claude {
+            "Claude"
+        } else {
+            first.runtime.as_str()
+        };
         let mut detail = match self.locale {
             Locale::En => format!(
-                "Hosted Claude seat {seat} in `{committee}` changed session context from native ID `{old_native}` to `{new_native}`."
+                "Hosted {runtime} seat {seat} in `{committee}` changed session context from native ID `{old_native}` to `{new_native}`."
             ),
             Locale::Zh => format!(
-                "委员会 `{committee}` 的托管 Claude 席位 {seat} 已更换会话上下文，原生 ID 从 `{old_native}` 切换到 `{new_native}`。"
+                "委员会 `{committee}` 的托管 {runtime} 席位 {seat} 已更换会话上下文，原生 ID 从 `{old_native}` 切换到 `{new_native}`。"
             ),
         };
         if headed_by_seat {
@@ -411,6 +450,12 @@ impl Shared {
         match self.store.switch_hosted_session(&first, next, id, &notice) {
             Ok(session) => {
                 host::clear_context_reports(paths, id);
+                self.no_longer_working(&first.session_id);
+                lock(&self.agy_idle).remove(&first.session_id);
+                self.note_delivered(&first.session_id);
+                if let Err(error) = self.remember_history_name(&first) {
+                    tracing::warn!(%error, "recording the retired conversation's display name");
+                }
                 self.host_notices_ready.notify_one();
                 Ok(Some(session))
             }
@@ -419,6 +464,99 @@ impl Shared {
             }
             Err(error) => Err(internal(error)),
         }
+    }
+
+    pub(super) async fn repair_agy_binding(
+        &self,
+        host_or_name: &str,
+        to: &AliasName,
+    ) -> Result<crate::ipc::RebindHostReply, IpcError> {
+        let first = match host_or_name.parse::<EventId>() {
+            Ok(host) => self
+                .store
+                .session_for_host(&host)
+                .map_err(internal)?
+                .map(|native| self.store.session(&native))
+                .transpose()
+                .map_err(internal)?
+                .flatten()
+                .ok_or_else(|| IpcError::bad_request("no session owns that terminal host"))?,
+            Err(_) => {
+                let senator: AliasName = host_or_name
+                    .parse()
+                    .map_err(|_| IpcError::bad_request("use a host ID or senator name"))?;
+                self.find_local_senator(&senator, None).await?
+            }
+        };
+        let next = self.find_local_senator(to, None).await?;
+        let _binding = self.session_bindings.write().await;
+        let paths = Paths::new(&self.home);
+        let id = self
+            .store
+            .session_host(&first.session_id)
+            .map_err(internal)?
+            .ok_or_else(|| IpcError::bad_request("the old seat has no terminal host"))?;
+        if first.runtime != Runtime::Agy
+            || next.runtime != Runtime::Agy
+            || !next.is_live()
+            || !host::running(&paths, &id).map_err(IpcError::internal)?
+            || self.hosts.unpublished(&first.session_id)
+            || self.hosts.unpublished(&next.session_id)
+        {
+            return Err(IpcError::bad_request(
+                "repair needs a running hosted agy and a live agy conversation",
+            ));
+        }
+        let child = host::child_pid(&paths, &id)
+            .filter(|pid| session::pid_alive(*pid))
+            .ok_or_else(|| IpcError::bad_request("the hosted agy process is gone"))?;
+        let observed = lock(&self.agy_host_observed).get(&id).is_some_and(|proof| {
+            proof.pid == child
+                && proof.session_id == next.session_id
+                && proof.at.elapsed() <= AGY_HOST_PROOF_TTL
+        });
+        if !observed && !session::agy_owned_presence(child, &next.session_id).await {
+            return Err(IpcError::bad_request(
+                "could not verify that conversation in this terminal. Send a prompt in the new conversation, then retry rebind",
+            ));
+        }
+        let committee = next
+            .committee()
+            .ok_or_else(|| IpcError::bad_request("the new seat has no recorded committee"))?;
+        let notice = NewEvent::new(
+            committee.clone(),
+            Kind::Note,
+            Address::senior(&self.config.person),
+            format!(
+                "Repaired hosted agy terminal {id}. {} now owns it. The previous native conversation was retired; undelivered work stays with {}.",
+                Address::senator(&next.agent).in_text(),
+                Address::senator(&first.agent).in_text()
+            ),
+        );
+        let (undelivered, threads) = self
+            .store
+            .repair_agy_host(&first, &next, &id, child, &notice)
+            .map_err(|error| match error {
+                StoreError::HostedNativeConflict => IpcError::bad_request(error.to_string()),
+                _ => internal(error),
+            })?;
+        host::clear_context_reports(&paths, &id);
+        self.no_longer_working(&first.session_id);
+        lock(&self.agy_idle).remove(&first.session_id);
+        self.note_delivered(&first.session_id);
+        if let Err(error) = self.remember_history_name(&first) {
+            tracing::warn!(%error, "recording the retired conversation's display name");
+        }
+        self.committees_changed.notify_one();
+        self.host_notices_ready.notify_one();
+        self.publish(WatchEvent::Sessions);
+        Ok(crate::ipc::RebindHostReply {
+            retired: first.agent,
+            current: next.agent,
+            session_id: next.session_id,
+            undelivered,
+            threads,
+        })
     }
 
     pub(super) async fn flush_host_notices(&self) {
@@ -1340,9 +1478,9 @@ fn intake_error(error: Intake) -> IpcError {
 
 fn report_unverified_switch(paths: &Paths, host: &EventId, native: &str, reason: &str) {
     if let Err(error) = host::note_unverified_switch(paths, host, native) {
-        tracing::warn!(%error, %host, "recording a refused hosted Claude context change");
+        tracing::warn!(%error, %host, "recording a refused hosted context change");
     }
-    tracing::warn!(%host, %native, %reason, "keeping the existing hosted Claude binding");
+    tracing::warn!(%host, %native, %reason, "keeping the existing hosted binding");
 }
 
 fn refuse_verified_conflict(paths: &Paths, host: &EventId, report: &HookReport) -> IpcError {
@@ -1351,10 +1489,11 @@ fn refuse_verified_conflict(paths: &Paths, host: &EventId, report: &HookReport) 
     // A verified context transition can leave the inbox pointing at the
     // rejected conversation. A prompt alone can be a delayed report.
     if report.event == HookEvent::SessionStart
-        && matches!(report.source.as_deref(), Some("clear" | "resume"))
+        && (report.runtime == Runtime::Agy
+            || matches!(report.source.as_deref(), Some("clear" | "resume")))
         && let Err(error) = host::note_unbound_context(paths, host, &report.session_id)
     {
-        tracing::warn!(%error, %host, "recording an unbound Claude context");
+        tracing::warn!(%error, %host, "recording an unbound hosted context");
     }
     IpcError::bad_request(reason)
 }

@@ -52,6 +52,7 @@ pub(super) fn answers_a_prompt(request: &Request) -> bool {
 /// for any other request.
 pub(super) fn person_only(request: &Request) -> Option<&'static str> {
     Some(match request {
+        Request::RebindHost { .. } => "Run `senate session rebind` from your own terminal",
         Request::Timeline { .. }
         | Request::SessionHistory { .. }
         | Request::Stats { .. }
@@ -87,6 +88,47 @@ pub(super) fn person_only(request: &Request) -> Option<&'static str> {
 }
 
 impl Front {
+    /// Replace the hook's claimed ancestry with the Unix peer's actual
+    /// process path before letting it name or rebind a hosted agy.
+    pub(super) async fn verify_agy_host_hook(
+        &self,
+        peer: Option<u32>,
+        report: &mut HookReport,
+    ) -> Result<(), IpcError> {
+        let wrong_host =
+            || IpcError::bad_request("the agy hook caller is not inside the claimed terminal host");
+        let peer = peer.ok_or_else(wrong_host)?;
+        let paths = Paths::new(&self.primary().home);
+        let host = report.host.as_ref().ok_or_else(wrong_host)?;
+        let child = host::child_pid(&paths, host).ok_or_else(wrong_host)?;
+        // Avoid process queries for obviously unrelated claims. The
+        // supplied list is only a hint and is replaced before dispatch.
+        if !report.ancestor_pids.contains(&child) {
+            return Err(wrong_host());
+        }
+        let _permit = self
+            .process_checks
+            .acquire()
+            .await
+            .expect("process check budget is never closed");
+        let ancestors = session::ancestor_pids(peer, 16, Duration::from_millis(250)).await;
+        if !ancestors.contains(&child) {
+            return Err(wrong_host());
+        }
+        report.ancestor_pids = ancestors.into_iter().skip(1).collect();
+        let mut observed = lock(&self.primary().agy_host_observed);
+        observed.retain(|_, proof| proof.at.elapsed() <= AGY_HOST_PROOF_TTL);
+        observed.insert(
+            host.clone(),
+            AgyHostObservation {
+                pid: child,
+                session_id: report.session_id.clone(),
+                at: Instant::now(),
+            },
+        );
+        Ok(())
+    }
+
     /// Serve `request` unless its caller is inside a coding session's
     /// process tree ([`person_only`]).
     pub(super) async fn guarded_dispatch(

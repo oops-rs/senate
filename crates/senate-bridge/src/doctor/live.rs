@@ -30,6 +30,7 @@ pub struct Probe {
 /// What was asked and answered.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Live {
+    pub agy_host_splits: Vec<(senate_core::SenatorName, senate_core::SenatorName)>,
     /// This `senate`'s version.
     pub version: String,
     /// Why senate.toml could not be read, if it could not.
@@ -165,6 +166,10 @@ pub async fn gather(paths: &Paths) -> Live {
         Err(_) => None,
     };
     let mut live = Live {
+        agy_host_splits: Store::open_read_only(&paths.state_db())
+            .ok()
+            .and_then(|store| store.agy_host_splits(paths).ok())
+            .unwrap_or_default(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         config: Ok(()),
         daemon,
@@ -381,6 +386,15 @@ pub fn live(live: &Live, l: Locale) -> Vec<Check> {
             ),
             Some(SERVICE_INSTALL),
         )),
+    }
+    for (old, next) in &live.agy_host_splits {
+        let command = format!("senate session rebind {old} --to {next}");
+        checks.push(Check::warn(
+            "session.agy_split",
+            l.pick(format!("托管 agy 会话记录分离：{old} 拥有终端，{next} 在同一进程树中。"),
+                format!("Split hosted agy registration. {old} owns the terminal and {next} is in its process tree.")),
+            Some(command),
+        ));
     }
     if let Some(sessions) = &live.sessions {
         checks.extend(session_checks(sessions, l));

@@ -493,6 +493,50 @@ pub fn agy_conversation_open(session_id: &str) -> Option<bool> {
     agy_conversation_open_in(&dirs::home_dir()?, session_id)
 }
 
+/// Evidence for repairing an older registration without a fresh hook:
+/// the hosted TUI owns the runtime's advisory conversation lock.
+pub(crate) async fn agy_owned_presence(pid: u32, session: &str) -> bool {
+    let Some(conversation) = Runtime::Agy.native_id(session) else {
+        return false;
+    };
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let lock = home
+        .join(".gemini/antigravity-cli/presence")
+        .join(format!("{conversation}.lock"));
+    if !crate::testenv::confined(&lock) || agy_conversation_open_in(&home, session) != Some(true) {
+        return false;
+    }
+    // Darwin lsof does not label flock locks. Require the one hosted PID
+    // to be the only process with this file open, and verify the advisory
+    // lock before and after the descriptor snapshot.
+    let program = if cfg!(target_os = "macos") {
+        "/usr/sbin/lsof"
+    } else {
+        "lsof"
+    };
+    let mut query = tokio::process::Command::new(program);
+    query
+        .args(["-nP", "-Fp", "--"])
+        .arg(lock)
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let Ok(Ok(output)) = tokio::time::timeout(Duration::from_secs(2), query.output()).await else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut owners = text
+        .lines()
+        .filter_map(|line| line.strip_prefix('p'))
+        .filter_map(|raw| raw.parse::<u32>().ok());
+    output.status.success()
+        && owners.next() == Some(pid)
+        && owners.all(|owner| owner == pid)
+        && agy_conversation_open_in(&home, session) == Some(true)
+}
+
 fn agy_conversation_open_in(home: &Path, session_id: &str) -> Option<bool> {
     let conversation = Runtime::Agy.native_id(session_id)?;
     let path = home

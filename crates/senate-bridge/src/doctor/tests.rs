@@ -581,8 +581,22 @@ fn session(label: &str, running: bool, prompt: bool) -> SessionRow {
     }
 }
 
+#[test]
+fn doctor_gives_the_exact_legacy_agy_repair_command() {
+    let mut live = healthy();
+    live.agy_host_splits = vec![("agy-old".parse().unwrap(), "agy-new".parse().unwrap())];
+    let checks = super::live::live(&live, EN);
+    let split = by_id(&checks, "session.agy_split");
+    assert_eq!(split.status, Status::Warn);
+    assert_eq!(
+        split.fix.as_deref(),
+        Some("senate session rebind agy-old --to agy-new")
+    );
+}
+
 fn healthy() -> Live {
     Live {
+        agy_host_splits: Vec::new(),
         version: "0.4.0".into(),
         config: Ok(()),
         daemon: Ok(status_reply("0.4.0")),

@@ -889,6 +889,31 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
             );
         }
         assert!(!shared.exists(), "shared marker survived {native_end:?}");
+        if native_end == NativeEnd::AlreadyEnded {
+            // /new and /clear are handled by the shared app-server. Its
+            // hook cannot claim this terminal from CWD or a new ID alone.
+            let new = serde_json::from_value::<ipc::HookReport>(serde_json::json!({
+                "event":"session_start","runtime":"codex","source":"clear",
+                "session_id":"new-remote-thread","cwd":h.store().session(id).unwrap().unwrap().cwd
+            }))
+            .unwrap();
+            let reply: ipc::HookReply = call(&h, &Request::SessionHook(new)).await;
+            assert_ne!(restored.senator, reply.session.agent);
+            let sessions: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+            assert!(sessions.rows.iter().any(|row| row.session_id == id));
+            assert!(
+                !sessions
+                    .rows
+                    .iter()
+                    .any(|row| row.session_id == "new-remote-thread")
+            );
+            let status = senate_bridge::status::collect(&h.paths).await.unwrap();
+            assert!(
+                senate_bridge::status::render(&status, chrono::Utc::now())
+                    .contains("still delivers to the original thread")
+            );
+        }
+
         let pid = std::fs::read_to_string(socket.parent().unwrap().join("owner")).unwrap();
         let group = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
         rustix::process::kill_process_group(group, rustix::process::Signal::TERM).unwrap();
@@ -4170,6 +4195,8 @@ async fn a_hosted_agy_that_never_names_its_conversation_is_rolled_back() {
 /// `.fixture-hold` exists, starts a turn as agy's does: its PreInvocation
 /// hook (output appended to `.fixture-prompts`), then its Stop hook, again
 /// while Stop says to go on. It ends its seed turn the same way.
+const AGY_SWITCHED: &str = "a9d49af4-cc85-445f-9f85-e80aae712e71";
+
 fn agy_turn_fixture(dir: &std::path::Path, conversation: &str) -> PathBuf {
     let fixture = dir.join("fixture-agy-turns");
     std::fs::write(
@@ -4208,6 +4235,18 @@ while IFS= read -r line; do
     case "$line" in
         paint) printf 'fixture TUI\n' ;;
         q) exit 0 ;;
+        new-context|resume-context)
+            case "$line" in
+                new-context) conversation={AGY_SWITCHED} ;;
+                resume-context) conversation={conversation} ;;
+            esac
+            input | {BIN:?} hook session-start --runtime agy > .fixture-switch.tmp
+            mv .fixture-switch.tmp .fixture-switch
+            ;;
+        check-process)
+            {BIN:?} stats > .fixture-guard.tmp 2>&1
+            mv .fixture-guard.tmp .fixture-guard
+            ;;
         *)
             printf '%s\n' "$line" >> .fixture-typed
             [ -e .fixture-hold ] || turn
@@ -4220,6 +4259,283 @@ done
     .unwrap();
     std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
     fixture
+}
+
+async fn hosted_agy_for_switch() -> (Harness, SpawnReply, PathBuf) {
+    let mut h = Harness::new().await;
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let project = h.workdir("agy-switch", None);
+    let old = "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
+    let fixture = agy_turn_fixture(h.dir.path(), old);
+    std::fs::write(
+        h.paths.config(),
+        format!("[agy]\nbin = {:?}\n", fixture.to_str().unwrap()),
+    )
+    .unwrap();
+    h.config.committees.push(committee());
+    start(&mut h).await;
+    let seat: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            attempt_id: None,
+            session: Default::default(),
+            runtime: Some(HostedRuntime::Agy),
+            profile: None,
+            committee: committee(),
+            alias: Some(path("switcher")),
+            cwd: project.clone(),
+            chair: false,
+            secretary: false,
+            prompt: None,
+            model: Default::default(),
+        },
+    )
+    .await;
+    let api = senate_bridge::client::ApiClient::new(&h.config.server_url, &h.config.token).unwrap();
+    api.set_chair(&committee(), &seat.senator).await.unwrap();
+    (h, seat, project)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_agy_session_start_moves_the_conversation_and_can_resume_the_previous_id() {
+    let (mut h, seat, project) = hosted_agy_for_switch().await;
+    let before: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let original = before
+        .rows
+        .iter()
+        .find(|row| row.session_id == seat.session_id)
+        .unwrap();
+
+    // A real in-terminal SessionStart, from a child of the fixture TUI.
+    attach(&h, "switcher", b"new-context\r\x1d").await;
+    let new = format!("agy:{AGY_SWITCHED}");
+    eventually("the published conversation changed", TIMEOUT, || {
+        let row = h.store().session(&new).unwrap()?;
+        (row.agent == seat.senator && project.join(".fixture-switch").exists()).then_some(())
+    })
+    .await;
+    let after: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let current = after.rows.iter().find(|row| row.session_id == new).unwrap();
+    assert_eq!(current.host_id, original.host_id);
+    assert_eq!(current.alias, original.alias);
+    assert!(current.chair);
+    assert!(
+        after
+            .rows
+            .iter()
+            .all(|row| row.session_id != seat.session_id)
+    );
+    assert!(
+        h.store()
+            .session(&seat.session_id)
+            .unwrap()
+            .is_some_and(|s| !s.is_live())
+    );
+    let history: ipc::SessionHistoryReply = call(
+        &h,
+        &Request::SessionHistory {
+            committee: Some(committee()),
+            before: None,
+            limit: None,
+        },
+    )
+    .await;
+    assert!(
+        history
+            .rows
+            .iter()
+            .any(|row| row.session_id == seat.session_id)
+    );
+    let old = ipc::request::<ipc::AttachInfo>(
+        &h.socket(),
+        &Request::AttachInfo {
+            target: ipc::AttachTarget::Session {
+                session_id: seat.session_id.clone(),
+            },
+        },
+        TIMEOUT,
+        TIMEOUT,
+    )
+    .await;
+    assert!(
+        matches!(old, Err(ipc::ClientError::Remote(error)) if error.code == ipc::codes::NO_SESSION)
+    );
+    let tty: PathBuf = call(
+        &h,
+        &Request::Attach {
+            senator: seat.senator.clone().into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        tty.canonicalize().unwrap(),
+        original.tty.canonicalize().unwrap()
+    );
+    attach(&h, "switcher", b"check-process\r\x1d").await;
+    let guarded = eventually("the process-tree check", TIMEOUT, || {
+        std::fs::read_to_string(project.join(".fixture-guard")).ok()
+    })
+    .await;
+    assert!(guarded.contains("process tree"));
+    assert!(guarded.contains(seat.senator.as_str()));
+    attach(&h, "switcher", b"resume-context\r\x1d").await;
+    eventually("the old conversation was resumed", TIMEOUT, || {
+        h.store()
+            .session(&seat.session_id)
+            .unwrap()
+            .filter(|s| s.is_live())
+    })
+    .await;
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_a_legacy_hosted_agy_split_preserves_each_seats_authority_and_queue() {
+    use senate_bridge::{
+        agent::AgentSource,
+        session::{CommitteeSource, Runtime},
+        state::SessionUpsert,
+    };
+    use senate_core::{Address, Kind, NewEvent};
+    let (mut h, old, project) = hosted_agy_for_switch().await;
+    let before: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let host = &before.rows[0];
+    let child: u32 = std::fs::read_to_string(host.tty.parent().unwrap().join("owner"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let native = format!("agy:{AGY_SWITCHED}");
+    let selected = path(&format!("agy-{AGY_SWITCHED}"));
+    // The exact split shape produced by the older bridge.
+    h.store()
+        .upsert_session(&SessionUpsert {
+            session_id: native.clone(),
+            cwd: project,
+            git_root: None,
+            branch: None,
+            inferred_committee: Some((committee(), CommitteeSource::Join)),
+            socket: None,
+            token: None,
+            claude_pid: None,
+            transcript_path: None,
+            ancestor_pids: vec![child],
+            runtime: Runtime::Agy,
+            agent: selected.clone(),
+            agent_source: AgentSource::Session,
+        })
+        .unwrap();
+    let client =
+        senate_bridge::client::ApiClient::new(&h.config.server_url, &h.config.token).unwrap();
+    client
+        .set_alias(&selected, &path("selected-seat"), Some(&committee()), false)
+        .await
+        .unwrap();
+    client.set_chair(&committee(), &selected).await.unwrap();
+    assert_eq!(
+        h.store().agy_host_splits(&h.paths).unwrap(),
+        [(old.senator.clone(), selected.clone())]
+    );
+    let change = Request::RebindHost {
+        host: host.host_id.to_string(),
+        to: selected.clone().into(),
+    };
+    let denied = ipc::request::<ipc::RebindHostReply>(&h.socket(), &change, TIMEOUT, TIMEOUT).await;
+    assert!(
+        matches!(denied, Err(ipc::ClientError::Remote(error)) if error.message.contains("could not verify"))
+    );
+    // A reported PID is a hint. A request from outside the terminal cannot
+    // use that PID as proof.
+    let forged = serde_json::from_value::<ipc::HookReport>(serde_json::json!({
+        "event":"session_start","runtime":"agy","session_id":native,"cwd":h.dir.path(),
+        "ancestor_pids":[child],"host":host.host_id,
+    }))
+    .unwrap();
+    let denied = ipc::request::<ipc::HookReply>(
+        &h.socket(),
+        &Request::SessionHook(forged),
+        TIMEOUT,
+        TIMEOUT,
+    )
+    .await;
+    assert!(
+        matches!(denied, Err(ipc::ClientError::Remote(error)) if error.message.contains("not inside"))
+    );
+
+    attach(&h, "switcher", b"new-context\r\x1d").await;
+    eventually("the verified conflicting hook returned", TIMEOUT, || {
+        host.tty
+            .parent()
+            .unwrap()
+            .join("unbound-context")
+            .exists()
+            .then_some(())
+    })
+    .await;
+    let item = h.server.append_silently(
+        NewEvent::new(
+            committee(),
+            Kind::Question,
+            Address::senior(&h.config.person),
+            "undelivered work",
+        )
+        .to(Address::senator(&old.senator)),
+    );
+    h.store().enqueue(&old.senator, &item).unwrap();
+    h.store()
+        .hold_pending_for_hooks(
+            &[(old.senator.clone(), committee(), item.seq)],
+            &old.session_id,
+        )
+        .unwrap();
+    let repaired: ipc::RebindHostReply = call(&h, &change).await;
+    assert_eq!(repaired.session_id, native);
+    assert_eq!(repaired.current, selected);
+    assert_eq!(repaired.undelivered, 1);
+    let listed: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let row = listed
+        .rows
+        .iter()
+        .find(|row| row.session_id == repaired.session_id)
+        .unwrap();
+    assert_eq!(row.alias, Some(path("selected-seat")));
+    assert_eq!(
+        client.chair(&committee()).await.unwrap().chair,
+        Some(selected.clone())
+    );
+    assert_eq!(repaired.threads[0].seq, item.seq);
+    assert_eq!(
+        h.store()
+            .item(&old.senator, &committee(), item.seq)
+            .unwrap()
+            .unwrap()
+            .session_id,
+        None
+    );
+    assert!(h.store().agy_host_splits(&h.paths).unwrap().is_empty());
+    let stopped = ipc::request::<ipc::StopReply>(
+        &h.socket(),
+        &Request::Stop {
+            session: Default::default(),
+            senator: old.senator.clone().into(),
+            force: true,
+        },
+        TIMEOUT,
+        TIMEOUT,
+    )
+    .await;
+    assert!(
+        matches!(stopped,Err(ipc::ClientError::Remote(error)) if error.code == ipc::codes::NO_SESSION)
+    );
+    attach(&h, selected.as_str(), b"check-process\r\x1d").await;
+    let guarded = eventually("the repaired process-tree check", TIMEOUT, || {
+        std::fs::read_to_string(before.rows[0].dir.join(".fixture-guard")).ok()
+    })
+    .await;
+    assert!(guarded.contains(selected.as_str()));
+    h.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

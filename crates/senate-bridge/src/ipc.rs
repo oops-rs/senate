@@ -299,6 +299,22 @@ pub enum HookEvent {
     UserPromptSubmit,
 }
 
+/// Which seat now owns a repaired terminal and what work stayed behind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebindHostReply {
+    pub retired: SenatorName,
+    pub current: SenatorName,
+    pub session_id: String,
+    pub undelivered: usize,
+    pub threads: Vec<RebindThread>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RebindThread {
+    pub committee: CommitteeId,
+    pub seq: Seq,
+}
+
 /// What a SessionStart / UserPromptSubmit hook saw.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookReport {
@@ -979,6 +995,11 @@ pub enum Request {
         /// The runtime's model and effort; unset, its own default.
         #[serde(flatten)]
         model: HostedModel,
+    },
+    /// Person-only repair of a legacy split hosted agy registration.
+    RebindHost {
+        host: String,
+        to: AliasName,
     },
     Restore {
         #[serde(default)]

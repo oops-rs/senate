@@ -832,6 +832,15 @@ remove `history/session-search.sqlite` and its SQLite sidecars while the
 daemon is stopped, then start it again.
 
 
+
+#### Changing conversations inside a hosted terminal
+
+A verified Claude or agy context switch follows the new conversation while keeping the terminal's Senate seat and its queued deliveries. The earlier conversation remains in History and can be resumed through the runtime.
+
+For a legacy split agy registration, `senate setup doctor` shows the repair command. Run `senate session rebind <old-senator-or-host-id> --to <new-senator>` from your own terminal. Repair checks that the new conversation belongs to the same running agy process. If the check needs a recent hook, send a prompt in the new conversation and retry. The terminal follows the selected senator's seat, and the command lists work still waiting for the old senator.
+
+Hosted Codex uses a shared app-server. After changing conversation in its TUI, exit the terminal and use `senate session restore` to return to the registered thread.
+
 ### Personal activity statistics
 
 `senate stats --since 14d` shows recorded activity for the last 14 local calendar days. Add `--json` for daily runtime and committee breakdowns, usage that the runtimes recorded, and indexing progress. The daemon builds the daily counts in the background using the existing local history index and readable committee logs.

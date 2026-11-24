@@ -737,6 +737,68 @@ fn flatten_names(conn: &mut Connection, path: Option<&Path>) -> Result<(), Store
     Ok(())
 }
 
+fn retire_hosted(
+    tx: &rusqlite::Transaction<'_>,
+    first: &Session,
+    next: &str,
+    id: &EventId,
+    notice: &NewEvent,
+    same_seat: bool,
+) -> Result<(), StoreError> {
+    let changed = tx.execute(
+        "UPDATE sessions SET state = 'ended', host_id = NULL,
+                        socket = NULL, token = NULL, claude_pid = NULL, last_seen = ?4
+                     WHERE session_id = ?1 AND host_id = ?2 AND agent = ?3",
+        params![
+            first.session_id,
+            id.to_string(),
+            agent_text(&first.agent),
+            now_ms()
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::Corrupt(
+            "hosted binding changed during the switch".into(),
+        ));
+    }
+    tx.execute(
+        "INSERT OR REPLACE INTO hosted_native_seats (session_id, retired) VALUES (?1, 1)",
+        [&first.session_id],
+    )?;
+    // The same TUI runs on: so does its model.
+    tx.execute(
+                    "INSERT OR REPLACE INTO hosted_models (session_id, model, effort, verification_warning)
+                     SELECT ?2, model, effort, verification_warning FROM hosted_models WHERE session_id = ?1",
+                    params![first.session_id, next],
+                )?;
+    tx.execute(
+        "DELETE FROM session_ancestors WHERE session_id = ?1",
+        [&first.session_id],
+    )?;
+    if same_seat {
+        // The queue still belongs to this senator. Only the
+        // pointers to a particular native session change.
+        tx.execute(
+            "UPDATE queue SET session_id = ?2
+                     WHERE session_id = ?1 AND agent = ?3 AND status = 'queued'",
+            params![first.session_id, next, agent_text(&first.agent)],
+        )?;
+        tx.execute(
+            "UPDATE owners SET session_id = ?2
+                     WHERE session_id = ?1 AND agent = ?3",
+            params![first.session_id, next, agent_text(&first.agent)],
+        )?;
+    } else {
+        tx.execute(
+            "UPDATE queue SET status='pending',session_id=NULL
+                         WHERE session_id=?1 AND agent=?2 AND status='queued'",
+            params![first.session_id, agent_text(&first.agent)],
+        )?;
+    }
+    queue_host_notice(tx, notice, None)?;
+    Ok(())
+}
+
 impl Store {
     /// Open (creating if needed) the daemon's database, mode 0600.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
@@ -1378,6 +1440,17 @@ impl Store {
 
     /// None is an ordinary session, false is the seat's current native ID,
     /// true is a superseded native ID that must not start another host.
+    pub(crate) fn retired_hosted_sessions(
+        &self,
+    ) -> Result<std::collections::HashSet<String>, StoreError> {
+        let conn = self.conn();
+        let mut query =
+            conn.prepare("SELECT session_id FROM hosted_native_seats WHERE retired=1")?;
+        Ok(query
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     pub(crate) fn hosted_native_retired(
         &self,
         session_id: &str,
@@ -1417,6 +1490,67 @@ impl Store {
                 model: None,
             }),
         )
+    }
+
+    pub(crate) fn repair_agy_host(
+        &self,
+        first: &Session,
+        next: &Session,
+        id: &EventId,
+        child: u32,
+        notice: &NewEvent,
+    ) -> Result<(usize, Vec<crate::ipc::RebindThread>), StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        if first.runtime != Runtime::Agy
+            || next.runtime != Runtime::Agy
+            || first.session_id == next.session_id
+            || first.agent == next.agent
+        {
+            return Err(StoreError::HostedNativeConflict);
+        }
+        // Retire first to preserve the unique host constraint. All work
+        // rolls back if the selected live target has changed.
+        retire_hosted(&tx, first, &next.session_id, id, notice, false)?;
+        let changed = tx.execute(
+            "UPDATE sessions SET host_id=?1 WHERE session_id=?2 AND agent=?3
+             AND host_id IS NULL AND runtime='agy' AND state='live' AND EXISTS(
+               SELECT 1 FROM session_ancestors WHERE session_id=?2 AND pid=?4
+             )",
+            params![
+                id.to_string(),
+                next.session_id,
+                agent_text(&next.agent),
+                i64::from(child)
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::HostedNativeConflict);
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO hosted_native_seats VALUES (?1,0)",
+            [&next.session_id],
+        )?;
+        let (count, threads) = {
+            let mut query = tx.prepare(
+                "SELECT committee,coalesce(json_extract(event,'$.thread'),seq)
+                 FROM queue WHERE agent=?1 AND status NOT IN ('delivered','cancelled')",
+            )?;
+            let mut count = 0;
+            let mut threads = std::collections::BTreeSet::new();
+            for thread in query.query_map([agent_text(&first.agent)], |row| {
+                Ok(crate::ipc::RebindThread {
+                    committee: committee_col(row, 0)?,
+                    seq: seq_from(row.get(1)?),
+                })
+            })? {
+                count += 1;
+                threads.insert(thread?);
+            }
+            (count, threads.into_iter().collect())
+        };
+        tx.commit()?;
+        Ok((count, threads))
     }
 
     pub(crate) fn session_for_host(&self, id: &EventId) -> Result<Option<String>, StoreError> {
@@ -1576,9 +1710,9 @@ impl Store {
                 let collision = tx
                     .query_row(
                         "SELECT 1 FROM sessions AS s WHERE s.session_id = ?1 AND
-                         (s.agent != ?2 OR s.runtime != 'claude' OR
+                         (s.agent != ?2 OR s.runtime != ?3 OR
                           s.state = 'live' OR s.host_id IS NOT NULL)",
-                        params![s.session_id, agent_text(&first.agent)],
+                        params![s.session_id, agent_text(&first.agent), s.runtime.as_str()],
                         |_| Ok(()),
                     )
                     .optional()?
@@ -1586,48 +1720,7 @@ impl Store {
                 if collision {
                     return Err(StoreError::HostedNativeConflict);
                 }
-                let changed = tx.execute(
-                    "UPDATE sessions SET state = 'ended', host_id = NULL,
-                        socket = NULL, token = NULL, claude_pid = NULL
-                     WHERE session_id = ?1 AND host_id = ?2 AND agent = ?3",
-                    params![
-                        first.session_id,
-                        hosted.id.to_string(),
-                        agent_text(&first.agent)
-                    ],
-                )?;
-                if changed != 1 {
-                    return Err(StoreError::Corrupt(
-                        "hosted binding changed during the switch".into(),
-                    ));
-                }
-                tx.execute(
-                    "INSERT OR REPLACE INTO hosted_native_seats (session_id, retired) VALUES (?1, 1)",
-                    [&first.session_id],
-                )?;
-                // The same TUI runs on: so does its model.
-                tx.execute(
-                    "INSERT OR REPLACE INTO hosted_models (session_id, model, effort, verification_warning)
-                     SELECT ?2, model, effort, verification_warning FROM hosted_models WHERE session_id = ?1",
-                    params![first.session_id, s.session_id],
-                )?;
-                tx.execute(
-                    "DELETE FROM session_ancestors WHERE session_id = ?1",
-                    [&first.session_id],
-                )?;
-                // The queue still belongs to this senator. Only the
-                // pointers to a particular native session change.
-                tx.execute(
-                    "UPDATE queue SET session_id = ?2
-                     WHERE session_id = ?1 AND agent = ?3 AND status = 'queued'",
-                    params![first.session_id, s.session_id, agent_text(&first.agent)],
-                )?;
-                tx.execute(
-                    "UPDATE owners SET session_id = ?2
-                     WHERE session_id = ?1 AND agent = ?3",
-                    params![first.session_id, s.session_id, agent_text(&first.agent)],
-                )?;
-                queue_host_notice(&tx, notice, None)?;
+                retire_hosted(&tx, first, &s.session_id, hosted.id, notice, true)?;
             }
             tx.execute(
                 "INSERT INTO sessions (session_id, cwd, git_root, branch, inferred_committee,
@@ -1696,7 +1789,7 @@ impl Store {
                         params![s.session_id, model.model, model.effort, model.verification_warning],
                     )?;
                 }
-                if s.runtime == Runtime::Claude {
+                if matches!(s.runtime, Runtime::Claude | Runtime::Agy) {
                     tx.execute(
                         "INSERT OR REPLACE INTO hosted_native_seats (session_id, retired) VALUES (?1, 0)",
                         [&s.session_id],
@@ -1740,6 +1833,39 @@ impl Store {
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], session_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Candidates for doctor; changing a binding requires fresh ownership
+    /// evidence in addition to these recorded ancestors.
+    pub fn agy_host_splits(
+        &self,
+        paths: &crate::Paths,
+    ) -> Result<Vec<(SenatorName, SenatorName)>, StoreError> {
+        let mut splits = Vec::new();
+        let live = self.live_sessions()?;
+        for (old, id) in self.hosted_sessions()? {
+            if old.runtime != Runtime::Agy || !crate::host::running(paths, &id)? {
+                continue;
+            }
+            let Some(pid) =
+                crate::host::child_pid(paths, &id).filter(|pid| crate::session::pid_alive(*pid))
+            else {
+                continue;
+            };
+            let ancestors = self.sessions_below(pid)?;
+            for next in live.iter().filter(|next| {
+                next.runtime == Runtime::Agy
+                    && next.agent != old.agent
+                    && ancestors.contains(&next.session_id)
+            }) {
+                if self.session_host(&next.session_id)?.is_none() {
+                    splits.push((old.agent.clone(), next.agent.clone()));
+                }
+            }
+        }
+        splits.sort_unstable();
+        splits.dedup();
+        Ok(splits)
     }
 
     /// Every session on record, ended ones too (kept until explicitly removed), most
