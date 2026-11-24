@@ -45,6 +45,7 @@ name = "membership"
 required-features = ["testing"]
 
 [dev-dependencies]
+senate-observe-protocol.workspace = true
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }

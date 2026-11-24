@@ -9,6 +9,7 @@ description = "The Senate server: supervision tree over the log, HTTP/SSE API fo
 
 [dependencies]
 senate-observe.workspace = true
+senate-observe-protocol.workspace = true
 senate-core = { workspace = true }
 senate-log = { workspace = true }
 anyhow = { workspace = true }

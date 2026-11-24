@@ -177,6 +177,7 @@ mod host_policy;
 mod hosted_approvals;
 mod hosts;
 mod model_catalog;
+mod observe;
 mod pause;
 #[path = "daemon/stats.rs"]
 mod personal_stats;
@@ -829,6 +830,11 @@ async fn start_bridge(
         }
     };
     let mut front = Front::new(shared.clone(), relay, watch, app_clients);
+    if let Some(registry) = &observe {
+        registry.attach_machine(Arc::new(observe::Source {
+            shared: Arc::downgrade(&shared),
+        }));
+    }
     front.observe = observe;
     front.remote = remote.as_ref().map(|(service, _)| service.clone());
     let front = Arc::new(front);

@@ -9,8 +9,8 @@ use axum::routing::any;
 use axum::{Json, Router};
 use senate_observe_protocol::{Cursor, EVENTS_PATH, ErrorBody, ErrorResponse, STATE_PATH};
 
-use crate::Registry;
 use crate::grants::AuthError;
+use crate::{ProjectionError, Registry};
 
 const MAX_HEADERS_BYTES: usize = 8 * 1024;
 const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
@@ -88,28 +88,53 @@ async fn observe(State(registry): State<Arc<Registry>>, request: Request) -> Res
     if !grant.is_live() {
         return auth_failure(AuthError::Unauthorized);
     }
-    let cursor = single(headers, &LAST_EVENT_ID);
-    if !matches!(cursor, Ok(None))
-        && (!stream
-            || !cursor
-                .is_ok_and(|value| value.is_some_and(|value| value.parse::<Cursor>().is_ok())))
-    {
-        return cors(bad_request(), origin, false);
-    }
-    registry.audit.record(
-        if stream { "events" } else { "state" },
-        "not_ready",
-        Some(&grant.info.id),
-    );
-    cors(
-        failure(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "not_ready",
-            "Observe projection is not ready",
-        ),
-        origin,
-        false,
-    )
+    let cursor = match single(headers, &LAST_EVENT_ID) {
+        Ok(None) => None,
+        Ok(Some(value)) if stream => match value.parse::<Cursor>() {
+            Ok(cursor) => Some(cursor),
+            Err(_) => return cors(bad_request(), origin, false),
+        },
+        _ => return cors(bad_request(), origin, false),
+    };
+    let id = grant.info.id.clone();
+    let result = if stream {
+        registry
+            .projections
+            .events(grant, cursor, registry.audit.clone())
+            .await
+    } else {
+        registry
+            .projections
+            .snapshot(&grant)
+            .await
+            .and_then(|json| {
+                if !grant.is_live() {
+                    return Err(ProjectionError::Unauthorized);
+                }
+                Ok((
+                    [(header::CONTENT_TYPE, "application/json")],
+                    json.to_string(),
+                )
+                    .into_response())
+            })
+    };
+    let response = match result {
+        Ok(response) => {
+            registry.audit.record(
+                if stream { "events" } else { "state" },
+                if stream { "opened" } else { "read" },
+                Some(&id),
+            );
+            response
+        }
+        Err(error) => {
+            if matches!(error, ProjectionError::Reset) {
+                registry.audit.record("events", "reset", Some(&id));
+            }
+            projection_failure(error)
+        }
+    };
+    cors(response, origin, false)
 }
 
 fn preflight(registry: &Registry, headers: &HeaderMap, origin: Option<&str>) -> Response {
@@ -231,6 +256,34 @@ fn auth_failure(error: AuthError) -> Response {
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
             response
         }
+    }
+}
+
+fn projection_failure(error: ProjectionError) -> Response {
+    match error {
+        ProjectionError::NotReady => {
+            let mut response = failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "not_ready",
+                "Observe projection is not ready",
+            );
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
+            response
+        }
+        ProjectionError::TooLarge => failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "view_too_large",
+            "Use an observer grant with fewer committees",
+        ),
+        ProjectionError::Reset => failure(
+            StatusCode::CONFLICT,
+            "resync_required",
+            "Fetch a new Observe snapshot",
+        ),
+        ProjectionError::RateLimited => auth_failure(AuthError::AuthenticatedRate),
+        ProjectionError::Unauthorized => auth_failure(AuthError::Unauthorized),
     }
 }
 

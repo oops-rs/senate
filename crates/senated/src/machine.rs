@@ -850,11 +850,39 @@ mod tests {
         Timing::default()
     }
 
+    async fn first_observed_event(
+        stream: &mut reqwest::Response,
+        seq: senate_core::Seq,
+    ) -> anyhow::Result<senate_observe_protocol::EventFrame> {
+        use senate_observe_protocol::{Event, EventFrame};
+
+        let mut buffer = Vec::new();
+        while let Some(bytes) = stream.chunk().await? {
+            buffer.extend_from_slice(&bytes);
+            assert!(buffer.len() <= 128 * 1024);
+            while let Some(end) = buffer.windows(2).position(|bytes| bytes == b"\n\n") {
+                let raw: Vec<_> = buffer.drain(..end + 2).collect();
+                let frame = std::str::from_utf8(&raw)?;
+                assert!(!frame.contains("canary"));
+                let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data: ")) else {
+                    continue;
+                };
+                let event: EventFrame = serde_json::from_str(data)?;
+                if matches!(&event.event, Event::MessagePosted(message) if message.seq.0.get() == seq.0)
+                {
+                    return Ok(event);
+                }
+            }
+        }
+        anyhow::bail!("observation stream closed before the committed event")
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn observer_credentials_are_only_accepted_on_the_machine_observe_routes()
     -> anyhow::Result<()> {
         use senate_bridge::ipc::{IpcClient, Request};
         use senate_observe::{AdminRequest, CreateGrant, IssuedGrant, Scope};
+        use senate_observe_protocol::{Event, Snapshot};
         use std::time::Duration;
 
         let dir = tempfile::tempdir()?;
@@ -885,38 +913,77 @@ mod tests {
             }
         })
         .await??;
-        let issued: IssuedGrant = ipc
-            .call(
-                &Request::ObserveAdmin {
-                    command: AdminRequest::Create {
-                        grant: CreateGrant {
-                            name: "test scene".into(),
-                            committees: None,
-                            all_committees: true,
-                            scope: Scope::Metadata,
-                            origins: vec![],
-                            topology: false,
-                            expires_in_days: None,
-                        },
-                    },
+        let visible: senate_core::CommitteeId = "visible".parse()?;
+        let hidden: senate_core::CommitteeId = "hidden".parse()?;
+        let local = senate_core::Address::senior(&Name::new("alice")?);
+        let append = |committee, body| {
+            senate_core::NewEvent::new(committee, senate_core::Kind::Note, local.clone(), body)
+        };
+        for committee in [&visible, &hidden] {
+            top.daemon
+                .hub
+                .append(append(committee.clone(), "bootstrap-canary"))
+                .await?;
+        }
+        let issue = |name: &str| Request::ObserveAdmin {
+            command: AdminRequest::Create {
+                grant: CreateGrant {
+                    name: name.into(),
+                    committees: Some(vec![visible.clone()]),
+                    all_committees: false,
+                    scope: Scope::Metadata,
+                    origins: vec![],
+                    topology: false,
+                    expires_in_days: None,
                 },
-                wait,
-            )
-            .await?;
+            },
+        };
+        let issued: IssuedGrant = ipc.call(&issue("first scene"), wait).await?;
+        let other: IssuedGrant = ipc.call(&issue("second scene"), wait).await?;
         let http = reqwest::Client::builder()
             .no_proxy()
             .timeout(wait)
             .build()?;
         let state = format!("{}/v1/observe/state", top.url);
         assert_eq!(issued.url, top.url);
-        assert_eq!(
-            http.get(&state)
-                .bearer_auth(&issued.token)
-                .send()
-                .await?
-                .status(),
-            503
-        );
+        let snapshot = http
+            .get(&state)
+            .bearer_auth(&issued.token)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        assert!(!snapshot.contains("bootstrap-canary"));
+        assert!(!snapshot.contains("hidden"));
+        let snapshot: Snapshot = serde_json::from_str(&snapshot)?;
+        assert_eq!(snapshot.committees.len(), 1);
+        assert_eq!(snapshot.committees[0].id, "visible");
+        let events = format!("{}/v1/observe/events", top.url);
+        let resume = |bearer: &str| {
+            http.get(&events)
+                .bearer_auth(bearer)
+                .header("last-event-id", snapshot.cursor.as_str())
+        };
+        assert_eq!(resume(&other.token).send().await?.status(), 409);
+
+        let committed = top
+            .daemon
+            .hub
+            .append(append(visible.clone(), "first-line-canary\nbody-canary"))
+            .await?;
+        top.daemon
+            .hub
+            .append(append(hidden, "hidden-canary"))
+            .await?;
+        let mut stream = resume(&issued.token).send().await?.error_for_status()?;
+        let expected = committed.event.seq;
+        let pong = first_observed_event(&mut stream, expected).await?;
+        let Event::MessagePosted(message) = pong.event else {
+            anyhow::bail!("expected message event");
+        };
+        assert_eq!(message.line, None);
+        assert_eq!(pong.committee_id.as_deref(), Some("visible"));
         assert_eq!(
             http.get(&state)
                 .bearer_auth(&top.token)
@@ -949,6 +1016,14 @@ mod tests {
                 .await?
                 .status(),
             401
+        );
+        assert!(
+            tokio::time::timeout(wait, async {
+                while stream.chunk().await?.is_some() {}
+                Ok::<(), reqwest::Error>(())
+            })
+            .await?
+            .is_ok()
         );
         machine.shutdown().await;
         Ok(())
