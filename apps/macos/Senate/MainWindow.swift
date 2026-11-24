@@ -447,25 +447,20 @@ private struct AccountRow: View {
 
     var body: some View {
         let state = store.state
-        let name = state.person ?? "Senate"
+        let name = store.profile.name(state.person)
         let selected = store.place == .section(.senates)
         Button {
             showing.toggle()
         } label: {
+            // Who you are: your picture (with the online dot) and name; the
+            // Senate's address is on the profile page.
             HStack(spacing: 10) {
-                Avatar(name: name, online: state.online, size: 28)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(verbatim: name)
-                        .font(Theme.Fonts.label)
-                        .foregroundStyle(Theme.onSurface)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Text(verbatim: Profile.place(state))
-                        .font(Theme.Fonts.meta)
-                        .foregroundStyle(Theme.onSurfaceVariant)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
+                Avatar(name: name, online: state.online, size: 28, picture: store.profile.picture)
+                Text(verbatim: name)
+                    .font(Theme.Fonts.label)
+                    .foregroundStyle(Theme.onSurface)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, Theme.Space.s)
@@ -479,7 +474,7 @@ private struct AccountRow: View {
         .onHover { hovered = $0 }
         .help(state.online ? (state.senates.first?.serverUrl ?? "") : (state.offlineReason ?? ""))
         .accessibilityLabel(L("sidebar.account"))
-        .accessibilityValue("\(name), \(Profile.place(state))")
+        .accessibilityValue("\(name), \(state.online ? L("a11y.online") : L("a11y.offline"))")
         .accessibilityHint(L("sidebar.account_hint"))
         .accessibilityAddTraits(selected ? .isSelected : [])
         .popover(isPresented: $showing, arrowEdge: .top) {
@@ -534,11 +529,11 @@ private struct AccountPopover: View {
 
     var body: some View {
         let state = store.state
-        let name = state.person ?? "Senate"
+        let name = store.profile.name(state.person)
         let actions = actions
         VStack(alignment: .leading, spacing: Theme.Space.s) {
             HStack(spacing: Theme.Space.m) {
-                Avatar(name: name, online: state.online, size: 36)
+                Avatar(name: name, online: state.online, size: 36, picture: store.profile.picture)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(verbatim: name)
                         .font(Theme.Fonts.heading)
@@ -619,21 +614,36 @@ private struct AccountPopover: View {
 /// The person's initial on the accent, with a dot for online or not.
 struct Avatar: View {
     let name: String
-    let online: Bool
+    /// The online dot; nil: none.
+    let online: Bool?
     var size: CGFloat = 28
+    /// The picture set in the app (LocalProfile); nil: the initial.
+    var picture: NSImage?
 
     var body: some View {
-        Text(verbatim: String(name.prefix(1)).uppercased())
-            .font(.system(size: size * 0.46, weight: .semibold))
-            .foregroundStyle(Theme.onPrimaryContainer)
-            .frame(width: size, height: size)
-            .background(Theme.primaryContainer, in: Circle())
-            .overlay(alignment: .bottomTrailing) {
+        Group {
+            if let picture {
+                Image(nsImage: picture)
+                    .resizable()
+                    .interpolation(.high)
+                    .clipShape(Circle())
+            } else {
+                Text(verbatim: String(name.prefix(1)).uppercased())
+                    .font(.system(size: size * 0.46, weight: .semibold))
+                    .foregroundStyle(Theme.onPrimaryContainer)
+                    .frame(width: size, height: size)
+                    .background(Theme.primaryContainer, in: Circle())
+            }
+        }
+        .frame(width: size, height: size)
+        .overlay(alignment: .bottomTrailing) {
+            if let online {
                 StatusDot(online: online, size: size * 0.32)
                     .overlay { Circle().stroke(Theme.sidebar, lineWidth: 2) }
                     .offset(x: 2, y: 2)
             }
-            .accessibilityHidden(true)
+        }
+        .accessibilityHidden(true)
     }
 }
 

@@ -103,6 +103,8 @@ final class CoreStore {
     @ObservationIgnored private var openWindow: OpenWindowAction?
     @ObservationIgnored private(set) var openSettings: OpenSettingsAction?
     @ObservationIgnored private let notifier = Notifier()
+    /// The name and picture set in this app.
+    let profile = LocalProfile()
     /// The conversation page: one web view, kept, for sessions and threads.
     @ObservationIgnored lazy var page = ConversationPage(store: self)
     @ObservationIgnored private let defaults: UserDefaults

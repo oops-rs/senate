@@ -88,6 +88,7 @@ private struct SecretaryIntro: View {
             ToolbarItem(placement: .primaryAction) {
                 Button { Task { await store.restoreSecretary() } } label: {
                     Label(L("secretary.restore"), systemImage: "arrow.counterclockwise")
+                        .labelStyle(.titleAndIcon)
                 }
                 .help(L("secretary.restore"))
                 .disabled(!store.state.online || store.isBusy("session:office::secretary"))

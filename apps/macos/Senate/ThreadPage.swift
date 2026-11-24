@@ -77,6 +77,7 @@ struct ThreadPage: View {
         ToolbarItemGroup(placement: .primaryAction) {
             Button { Task { await store.take(row) } } label: {
                 Label(L("inbox.take"), systemImage: "hand.raised")
+                    .labelStyle(.titleAndIcon)
             }
                 .help(L("inbox.take_help"))
                 .disabled(row.takeover != nil || busy || !store.state.online)

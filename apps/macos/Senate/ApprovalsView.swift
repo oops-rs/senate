@@ -336,13 +336,16 @@ private struct DeskEntryDetail: View {
         if let detail, outcome == nil, actionError == nil, detail.blocked == nil {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { Task { await submit(nil) } } label: {
-                    Label(L("desk.forward"), systemImage: "arrowshape.turn.up.right")
+                    Label(L("desk.forward_title"), systemImage: "arrowshape.turn.up.right")
+                        .labelStyle(.titleAndIcon)
                 }
+                .buttonStyle(.borderedProminent)
                 .accessibilityIdentifier("desk-forward")
                 .help(L("desk.forward"))
                 .disabled(busy || !store.state.online)
                 Button { refusing = true } label: {
-                    Label(L("desk.refuse"), systemImage: "hand.raised.slash")
+                    Label(L("desk.refuse_title"), systemImage: "hand.raised.slash")
+                        .labelStyle(.titleAndIcon)
                 }
                 .help(L("desk.refuse"))
                 .disabled(busy || !store.state.online)
