@@ -60,3 +60,7 @@ a, img { -webkit-user-drag: none; }
 .group-members { margin: 6px 0 0 12px; padding-left: 10px; border-left: 2px solid var(--outline); }
 .group-members > .row { margin: 6px 0; }
 .group-head .count, .group-head .kind { -webkit-user-select: none; user-select: none; }
+/* The conversation's top edge, under the page's header: what scrolls
+   under it fades out rather than being cut. */
+body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; height: 14px; z-index: 5; pointer-events: none;
+  background: linear-gradient(var(--surface), transparent); }
