@@ -254,8 +254,6 @@ impl Front {
         }
     }
 
-    /// Register the session, and tell a presiding session what it presides
-    /// over.
     async fn on_observe_admin(&self, command: senate_observe::AdminRequest) -> Reply {
         use senate_observe::AdminRequest;
 
@@ -279,6 +277,11 @@ impl Front {
                     .map_err(|error| IpcError::bad_request(error.to_string())),
             ),
             AdminRequest::List => Reply::ok(&registry.list()),
+            AdminRequest::Identity => wrap(
+                registry
+                    .installation()
+                    .map_err(|error| IpcError::bad_request(error.to_string())),
+            ),
             AdminRequest::Revoke { id } => wrap(
                 registry
                     .revoke(&id)
@@ -292,6 +295,7 @@ impl Front {
         }
     }
 
+    /// Register the session, and tell a presiding session what it presides over.
     async fn on_hook(&self, report: HookReport, native: bool) -> Result<HookReply, IpcError> {
         let codex = report.runtime == Runtime::Codex;
         let target = self.primary().clone();

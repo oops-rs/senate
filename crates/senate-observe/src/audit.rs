@@ -37,6 +37,14 @@ impl Audit {
         self.write(serde_json::json!({"at": chrono::Utc::now(), "route": route, "decision": decision, "grant_id": id}));
     }
 
+    pub(crate) fn stream_closed(&self, id: &str, frames: u64, bytes: u64) {
+        let _guard = lock(&self.denied);
+        self.write(serde_json::json!({
+            "at": chrono::Utc::now(), "route": "events", "decision": "closed", "grant_id": id,
+            "frames": frames, "bytes": bytes,
+        }));
+    }
+
     fn write(&self, entry: serde_json::Value) {
         let old = self.path.with_extension("previous.jsonl");
         for path in [&old, &self.path] {

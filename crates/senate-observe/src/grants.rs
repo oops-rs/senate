@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, KeyInit, Mac};
 use senate_core::CommitteeId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,6 +16,8 @@ use tokio::sync::watch;
 use url::Url;
 
 use crate::audit::Audit;
+use crate::projection::Projections;
+use crate::{MachineFacts, MachineSource, ProjectionError, SenateSource};
 
 const MAX_GRANTS: usize = 64;
 const DEFAULT_DAYS: u16 = 30;
@@ -24,6 +27,7 @@ const DEFAULT_DAYS: u16 = 30;
 pub enum AdminRequest {
     Create { grant: CreateGrant },
     List,
+    Identity,
     Revoke { id: String },
 }
 
@@ -54,6 +58,12 @@ pub struct GrantInfo {
     pub origins: BTreeSet<String>,
     pub topology: bool,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Installation {
+    pub id: String,
+    pub url: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -101,6 +111,7 @@ impl ActiveGrant {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Authorized {
     pub(crate) info: GrantInfo,
     pub(crate) revoked: watch::Receiver<bool>,
@@ -151,7 +162,10 @@ pub struct Registry {
     grants: Mutex<BTreeMap<String, ActiveGrant>>,
     unauthenticated: Mutex<Bucket>,
     preflights: Mutex<Bucket>,
-    pub(crate) audit: Audit,
+    pub(crate) audit: Arc<Audit>,
+    pub(crate) projections: Arc<Projections>,
+    seed: [u8; 32],
+    machine: Mutex<Option<Arc<dyn MachineSource>>>,
 }
 
 impl Registry {
@@ -181,8 +195,62 @@ impl Registry {
             ),
             unauthenticated: Mutex::new(Bucket::new(120, 20)),
             preflights: Mutex::new(Bucket::new(120, 20)),
-            audit: Audit::new(directory.join("observe-audit.jsonl")),
+            audit: Arc::new(Audit::new(directory.join("observe-audit.jsonl"))),
+            projections: Projections::new(),
+            seed: installation_seed(directory)?,
+            machine: Mutex::new(None),
         }))
+    }
+
+    pub fn attach_senate(&self, source: Arc<dyn SenateSource>) {
+        self.projections.set_source(source);
+    }
+
+    pub fn shutdown_observation(&self) {
+        self.projections.shutdown();
+    }
+
+    pub fn attach_machine(&self, source: Arc<dyn MachineSource>) {
+        *lock(&self.machine) = Some(source);
+    }
+
+    pub fn installation(&self) -> Result<Installation, GrantError> {
+        Ok(Installation {
+            id: self.installation_id()?,
+            url: format!("http://{}", self.address),
+        })
+    }
+
+    pub fn installation_id(&self) -> Result<String, GrantError> {
+        self.scoped_id(b"senate", b"")
+    }
+
+    pub(crate) fn project_id(&self, root: &Path) -> Result<String, GrantError> {
+        self.scoped_id(b"project", root.as_os_str().as_encoded_bytes())
+    }
+
+    fn scoped_id(&self, domain: &[u8], value: &[u8]) -> Result<String, GrantError> {
+        let mut hash =
+            Hmac::<Sha256>::new_from_slice(&self.seed).map_err(|_| GrantError::Random)?;
+        hash.update(domain);
+        hash.update(&[0]);
+        hash.update(value);
+        Ok(hex::encode(&hash.finalize().into_bytes()[..16]))
+    }
+
+    pub(crate) fn machine_facts(&self) -> Result<MachineFacts, ProjectionError> {
+        let source = lock(&self.machine)
+            .clone()
+            .ok_or(ProjectionError::NotReady)?;
+        source.read()
+    }
+
+    pub fn merge_machine_facts(
+        &self,
+        grant: &GrantInfo,
+        snapshot: &mut senate_observe_protocol::Snapshot,
+    ) -> Result<(), ProjectionError> {
+        crate::machine::merge(self, grant, snapshot)
     }
 
     pub fn address(&self) -> SocketAddr {
@@ -367,6 +435,29 @@ impl Authorized {
     pub(crate) fn is_live(&self) -> bool {
         !*self.revoked.borrow() && self.info.expires_at > Utc::now()
     }
+}
+
+fn installation_seed(directory: &Path) -> Result<[u8; 32], GrantError> {
+    let path = directory.join("observe-installation.key");
+    let mut seed = [0; 32];
+    match File::open(&path) {
+        Ok(file) => file.take(seed.len() as u64).read_exact(&mut seed)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            getrandom::fill(&mut seed).map_err(|_| GrantError::Random)?;
+            let mut temp = tempfile::NamedTempFile::new_in(directory)?;
+            temp.write_all(&seed)?;
+            temp.as_file().sync_all()?;
+            match temp.persist_noclobber(&path) {
+                Ok(_) => {}
+                Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                    File::open(path)?.read_exact(&mut seed)?;
+                }
+                Err(error) => return Err(error.error.into()),
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(seed)
 }
 
 fn digest(token: &str) -> [u8; 32] {

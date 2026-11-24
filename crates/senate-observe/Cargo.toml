@@ -8,6 +8,10 @@ repository.workspace = true
 description = "Machine-owned read-only Senate observation service"
 
 [dependencies]
+async-trait = { workspace = true }
+base64 = "0.22"
+futures = { workspace = true }
+hmac = "0.13"
 axum = { workspace = true }
 chrono = { workspace = true }
 getrandom = "0.4"
@@ -16,11 +20,11 @@ senate-core = { workspace = true }
 senate-observe-protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
+sha2 = "0.11"
 subtle = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 url = "2"
 
 [dev-dependencies]

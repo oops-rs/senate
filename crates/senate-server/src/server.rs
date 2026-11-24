@@ -314,8 +314,9 @@ impl ServerBuilder {
         });
         let observe = observe.filter(|registry| embedded && registry.address() == local_addr);
         let observe_enabled = observe.is_some();
-        if let Some(registry) = observe {
-            app = app.merge(senate_observe::router(registry));
+        if let Some(registry) = &observe {
+            registry.attach_senate(Arc::new(crate::observe::Source::new(&hub, registry)));
+            app = app.merge(senate_observe::router(registry.clone()));
         }
         let (stop_http, stopped) = oneshot::channel::<()>();
         let http_task = tokio::spawn(async move {
@@ -323,6 +324,9 @@ impl ServerBuilder {
                 // Either an explicit shutdown or `Running` was dropped.
                 if stopped.await.is_err() {
                     tracing::debug!("server handle dropped; shutting down HTTP");
+                }
+                if let Some(registry) = observe {
+                    registry.shutdown_observation();
                 }
             };
             if embedded && local_addr.ip().is_loopback() {
