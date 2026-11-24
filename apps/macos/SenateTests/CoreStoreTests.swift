@@ -984,3 +984,26 @@ extension CoreStoreTests {
         #expect(Thumbnails.url(for: "/bounded/\(Thumbnails.capacity + 19).png", home: nil) != nil)
     }
 }
+
+extension CoreStoreTests {
+    /// The heatmap has every day of the year, Monday first, days without
+    /// activity at zero; its colour has four steps; numbers read as time.
+    @Test func statsHeatmapAndNumbers() {
+        let today = DateComponents(calendar: Calendar(identifier: .gregorian), year: 2026, month: 11, day: 24).date!
+        let day = { (d: String, secs: UInt64) in
+            StatsDay(date: d, sessions: 1, sessionsStarted: 1, activeSecs: secs, prompts: 1, agentTurns: 1,
+                     toolCalls: 1, commands: 0, edits: 0, mcpCalls: 0, messages: 0, threadsOpened: 0,
+                     threadsClosed: 0, threadsTaken: 0, threadsAnswered: 0, approvalsDecided: 0)
+        }
+        let cells = Heatmap.cells([day("2026-11-24", 3600), day("2026-11-20", 600)], through: today)
+        #expect(cells.count == 365)
+        #expect(cells.last?.id == "2026-11-24" && cells.last?.secs == 3600)
+        #expect(cells.first(where: { $0.id == "2026-11-20" })?.secs == 600)
+        #expect(cells.filter { $0.secs > 0 }.count == 2)
+        // 24 November 2026 is a Tuesday: the second row.
+        #expect(cells.last?.weekday == 1)
+        #expect(Heatmap.level(3600, 3600) == 1 && Heatmap.level(600, 3600) == 0.3 && Heatmap.level(0, 0) == 0)
+        #expect(StatsRange.day(today, minus: 6) == "2026-11-18")
+        #expect(Headline.duration(2340) == "39m" && Headline.duration(7260) == "2h 1m")
+    }
+}
