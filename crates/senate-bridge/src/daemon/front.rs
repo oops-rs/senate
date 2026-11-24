@@ -283,8 +283,11 @@ impl Front {
     }
 
     #[cfg(target_os = "macos")]
-    pub(super) async fn dispatch_app_confirmation(&self, request: Request) -> Reply {
-        match request {
+    pub(super) async fn dispatch_app_confirmation(
+        &self,
+        request: crate::app_confirmation::ConfirmedRequest,
+    ) -> Reply {
+        match request.into_request() {
             Request::RebindHost { host, to } => {
                 wrap(self.primary().repair_agy_binding(&host, &to).await)
             }

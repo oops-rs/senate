@@ -243,6 +243,38 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)]
+    fn kernel_generation_and_hosted_coalition_are_independent_checks() {
+        let mut audit = [0_u32; 8];
+        let mut words = audit.len() as u32;
+        // TASK_AUDIT_TOKEN returns eight words for our current task.
+        let status = unsafe {
+            libc::task_info(
+                libc::mach_task_self(),
+                15,
+                audit.as_mut_ptr().cast(),
+                &mut words,
+            )
+        };
+        assert_eq!(status, libc::KERN_SUCCESS);
+        assert_eq!(words, 8);
+        let pid = i32::try_from(audit[5]).unwrap();
+        let own_coalition = coalition(pid, Some(audit[7])).unwrap();
+        let request = Sha256::digest(b"fixture").into();
+        let eligible = Scope::default();
+        assert!(eligible.issue(audit, request).is_some());
+
+        let hosted = Scope {
+            hosted: HashSet::from([own_coalition]),
+            ..Scope::default()
+        };
+        assert!(hosted.issue(audit, request).is_none());
+
+        audit[7] ^= 1;
+        assert!(eligible.issue(audit, request).is_none());
+    }
+
+    #[test]
     fn proof_matches_one_exact_request_and_is_consumed() {
         let scope = Scope::default();
         let sender = kernel_process::inspect(std::process::id())

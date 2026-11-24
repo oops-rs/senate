@@ -15,7 +15,7 @@ pub struct Prompt {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) use queue::{EnqueueError, Queue};
+pub(crate) use queue::{ConfirmedRequest, EnqueueError, Queue};
 
 #[cfg(target_os = "macos")]
 mod queue {
@@ -40,17 +40,25 @@ mod queue {
         waiting: BTreeMap<EventId, Pending>,
     }
 
+    pub(crate) struct ConfirmedRequest(Request);
+
+    impl ConfirmedRequest {
+        pub(crate) fn into_request(self) -> Request {
+            self.0
+        }
+    }
+
     struct Pending {
         request: Request,
         display: String,
         created: Instant,
-        result: oneshot::Sender<Option<Request>>,
+        result: oneshot::Sender<Option<ConfirmedRequest>>,
     }
 
     pub(crate) struct Ticket {
         id: EventId,
         queue: Arc<Queue>,
-        pub(crate) reply: oneshot::Receiver<Option<Request>>,
+        pub(crate) reply: oneshot::Receiver<Option<ConfirmedRequest>>,
     }
 
     #[derive(Debug, Eq, PartialEq)]
@@ -114,8 +122,15 @@ mod queue {
             })
         }
 
+        #[cfg(debug_assertions)]
+        pub(crate) fn confirm_fixture(&self) -> Option<bool> {
+            self.poll()
+                .first()
+                .map(|prompt| self.respond(&prompt.id, true))
+        }
+
         // Only messages from the code-authenticated app reach these methods.
-        pub(crate) fn poll(&self) -> Vec<Prompt> {
+        pub(super) fn poll(&self) -> Vec<Prompt> {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             let now = Instant::now();
             state.last_app_poll = Some(now);
@@ -130,7 +145,7 @@ mod queue {
                 .collect()
         }
 
-        pub(crate) fn respond(&self, id: &EventId, approved: bool) -> bool {
+        pub(super) fn respond(&self, id: &EventId, approved: bool) -> bool {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.expire(Instant::now());
             let Some(pending) = state.waiting.remove(id) else {
@@ -138,7 +153,7 @@ mod queue {
             };
             pending
                 .result
-                .send(approved.then_some(pending.request))
+                .send(approved.then_some(ConfirmedRequest(pending.request)))
                 .is_ok()
         }
     }
@@ -171,7 +186,10 @@ mod queue {
             assert_ne!(first.id, second.id);
             assert!(!queue.respond(&EventId::new(), true));
             assert!(queue.respond(&first.id, true));
-            assert!(matches!(first.reply.try_recv(), Ok(Some(Request::Ping))));
+            assert!(matches!(
+                first.reply.try_recv(),
+                Ok(Some(ConfirmedRequest(Request::Ping)))
+            ));
             assert!(!queue.respond(&first.id, true));
             assert!(queue.respond(&second.id, false));
             assert!(matches!(second.reply.try_recv(), Ok(None)));

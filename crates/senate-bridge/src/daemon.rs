@@ -658,8 +658,8 @@ impl DaemonHandle {
         let queue = &self.front.app_confirmations;
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Some(prompt) = queue.poll().first() {
-                    return queue.respond(&prompt.id, true);
+                if let Some(confirmed) = queue.confirm_fixture() {
+                    return confirmed;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
