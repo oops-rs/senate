@@ -330,6 +330,9 @@ pub struct World {
     pub secretary: senate_bridge::ipc::DefaultSecretaryState,
     /// The archived committees, as `archived_committees` reads them.
     pub archived: Vec<senate_core::CommitteeId>,
+    /// Notes said to a session are taken but not delivered (it is not
+    /// taking them now): the app shows them as queued.
+    pub hold_says: bool,
     /// Roots of threads that are settled: readable, in no inbox.
     pub settled: Vec<u64>,
 }
@@ -379,6 +382,7 @@ impl World {
             secretary: senate_bridge::ipc::DefaultSecretaryState::NotRecorded,
             history: Vec::new(),
             archived: Vec::new(),
+            hold_says: false,
             settled: Vec::new(),
         }
     }
@@ -764,6 +768,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             ..
         } => {
             // Delivered to the session it names: its timeline shows it.
+            let hold = w.hold_says;
             let ids: Vec<String> = w
                 .sessions
                 .rows
@@ -778,7 +783,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 .filter(|(_, p)| to.iter().any(|a| a.as_senator() == Some(p)))
                 .map(|(id, _)| id)
                 .collect();
-            for id in ids {
+            for id in ids.into_iter().filter(|_| !hold) {
                 let items = w.timelines.entry(id).or_default();
                 let seq = items.last().map_or(1, |i| i.seq + 1);
                 items.push(item(

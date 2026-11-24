@@ -188,8 +188,11 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     func stopTimeline(sessionId: String) {
         lock.withLock { _calls.append("unwatch \(sessionId)") }
     }
-    func say(sessionId: String, body: String) async throws {
+    /// What `say` answers: the log's committee and seq for the note.
+    var nextSent = SentNote(committee: "refund-v2", seq: 300)
+    func say(sessionId: String, body: String) async throws -> SentNote {
         try record("say \(sessionId) \(body)")
+        return nextSent
     }
     func pauseSession(label: String) async throws { try record("pause \(label)") }
 

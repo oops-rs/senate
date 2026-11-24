@@ -427,6 +427,8 @@
         const head = el("div", "senate-head");
         head.appendChild(el("span", "from", s.from || ""));
         head.appendChild(el("span", "meta", "  " + (s.kindLabel || "") + "  " + (s.committee || "") + (s.thread ? " · #" + s.thread : "")));
+        // Sent from here, not in the session's conversation yet.
+        if (row.pending) { d.classList.add("pending"); head.appendChild(el("span", "pending-mark", "  " + row.pending)); }
         d.appendChild(head);
         const content = el("div", "senate-body");
         content.appendChild(body(row.md));
