@@ -38,7 +38,7 @@ struct SessionPage: View {
                     ),
                     label: L("session.say"),
                     placeholder: L("session.say_placeholder", session.displayName),
-                    footnote: L("session.saying_as", store.state.person ?? "?", session.committee ?? ""),
+                    hint: L("session.saying_as", store.state.person ?? "?", session.committee ?? ""),
                     busy: store.isBusy("say:\(session.sessionId)"),
                     online: store.state.online
                 ) {
@@ -401,10 +401,7 @@ struct SessionToolbar: ToolbarContent {
                     .disabled(store.isBusy("session:\(h.label)") || !store.state.online)
                     Divider()
                 }
-                if let h = s.hosted {
-                    Button(L("mention.copy", h.label)) { Mentions.copyText(h.label) }
-                }
-                Button(L("mention.copy", s.sessionId)) { Mentions.copyText(s.sessionId) }
+                CopySenator(label: s.hosted?.label, mention: s.mention)
             } label: {
                 Label(L("thread.more"), systemImage: "ellipsis")
             }

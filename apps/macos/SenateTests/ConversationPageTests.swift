@@ -190,7 +190,7 @@ extension ConversationPageTests {
         let call = { (seq: UInt64, title: String, status: String) in
             TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
                 callId: "c\(seq)", name: "Bash", kind: "shell", status: status, statusLabel: status,
-                title: title, cwd: nil, output: "output of \(title)", exitCode: status == "failed" ? 1 : 0, diff: nil)))
+                title: title, cwd: nil, output: "output of \(title)", exitCode: status == "failed" ? 1 : 0, diff: nil, mcp: nil)))
         }
         let rows = ConversationRows.rows([
             call(1, "cargo build", "completed"), call(2, "cargo test needle", "failed"), call(3, "git status", "running"),
@@ -239,7 +239,7 @@ extension ConversationPageTests {
         let call = { (seq: UInt64, title: String) in
             TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
                 callId: "c\(seq)", name: "Bash", kind: "shell", status: "completed", statusLabel: "completed",
-                title: title, cwd: nil, output: "output of \(title)", exitCode: 0, diff: nil)))
+                title: title, cwd: nil, output: "output of \(title)", exitCode: 0, diff: nil, mcp: nil)))
         }
         let rows = ConversationRows.rows([call(1, "cargo build"), call(2, "cargo test needle"), call(3, "git status")])
         #expect(ConversationRows.rowId(for: 2, in: rows) == 2)
@@ -274,7 +274,7 @@ extension ConversationPageTests {
             case 0, 1:
                 return TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
                     callId: "c\(seq)", name: "Bash", kind: "shell", status: "completed", statusLabel: "completed",
-                    title: "cargo test step \(seq)", cwd: nil, output: "ok \(seq)", exitCode: 0, diff: nil)))
+                    title: "cargo test step \(seq)", cwd: nil, output: "ok \(seq)", exitCode: 0, diff: nil, mcp: nil)))
             case 2:
                 return TimelineEntry(seq: seq, at: nil, truncated: false, body: .user(text: "Message \(seq): go on."))
             default:
@@ -357,5 +357,149 @@ extension ConversationPageTests {
         #expect(ConversationPage.prepended([10, 11, 12], [1, 11, 10, 12]) == nil)
         #expect(ConversationPage.prepended([10, 11, 12], [1, 12]) ?? (-1, -1) == (2, 1), "two absorbed")
         #expect(ConversationPage.prepended([10, 11, 12, 13], [1, 13]) == nil, "more than two: start again")
+    }
+}
+
+extension ConversationPageTests {
+    /// A task status is one activity line (never a bare "status"), with
+    /// its checklist ticked as done and its links.
+    @Test func aStatusIsAnActivityLine() async throws {
+        let page = try await page(["latest"])
+        _ = await page.evaluate("""
+            window.senate.apply({ type: "reset", state: {}, rows: [
+              { id: 2, kind: "status", by: "announceseats", when: "2 days ago", status: {
+                state: "processing", line: "working on it — Cover the uplink reconnect cycle",
+                steps: [{ label: "Reproduce", done: true }, { label: "Fix", done: false }],
+                links: [{ label: "PR", url: "https://example.test/pr/1" }] } } ] });
+            return true
+            """)
+        let line = await page.evaluate("return document.querySelector('.k-status .status-line').textContent") as? String ?? ""
+        #expect(line.contains("announceseats") && line.contains("working on it — Cover the uplink reconnect cycle"))
+        let done = await page.evaluate("return document.querySelectorAll('.k-status .status-steps li.done').length") as? Int
+        #expect(done == 1)
+        let link = await page.evaluate("return document.querySelector('.k-status .status-links a').getAttribute('href')") as? String
+        #expect(link == "https://example.test/pr/1")
+    }
+}
+
+extension ConversationPageTests {
+    /// The page never scrolls sideways: long unbroken tokens wrap, wide
+    /// tables and code scroll inside their own box, a long command title
+    /// is cut, at every width down to the window's narrowest.
+    @Test func thePageNeverScrollsSideways() async throws {
+        let token = String(repeating: "x", count: 400)
+        let table = "| " + (1...30).map { "column\($0)" }.joined(separator: " | ") + " |\n|"
+            + String(repeating: "---|", count: 30) + "\n| " + (1...30).map { "v\($0)" }.joined(separator: " | ") + " |"
+        let code = "```\n" + String(repeating: "let wide = 1; ", count: 60) + "\n```"
+        let page = try await page(["A token: \(token)", table, code, "`\(token)`"])
+        let call = { (seq: UInt64, title: String) in
+            TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
+                callId: "c\(seq)", name: "Bash", kind: "shell", status: "completed", statusLabel: "completed",
+                title: title, cwd: nil, output: token, exitCode: 0, diff: nil, mcp: nil)))
+        }
+        let rows = ConversationRows.rows([
+            call(1, "cargo test " + token), call(2, "git status " + token),
+            TimelineEntry(seq: 3, at: nil, truncated: false, body: .user(text: token)),
+            call(4, "ls " + token),
+        ])
+        ConversationPage.fixtureRows["wide"] = rows
+        for width in [360.0, 480.0, 700.0, 1000.0] {
+            page.web.setFrameSize(NSSize(width: width, height: 600))
+            try await Task.sleep(for: .milliseconds(80))
+            let sizes = await page.evaluate("""
+                const s = document.scrollingElement;
+                return s.scrollWidth + '/' + s.clientWidth
+                """) as? String ?? ""
+            let parts = sizes.split(separator: "/").compactMap { Int($0) }
+            #expect(parts.count == 2 && parts[0] <= parts[1], "messages at \(width): \(sizes)")
+        }
+        let guarded = await page.evaluate("""
+            const s = getComputedStyle(document.documentElement);
+            return s.overscrollBehaviorX + '/' + s.overflowX
+            """) as? String
+        #expect(guarded == "none/hidden", "no sideways bounce: \(guarded ?? "nil")")
+        page.show(.fixtureRows("wide"))
+        for _ in 0..<100 {
+            if await page.evaluate("return document.querySelectorAll('.k-group').length") as? Int == 1 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        _ = await page.evaluate("""
+            document.querySelectorAll('.k-group .tool-head, .k-tool .tool-head').forEach(h => h.click());
+            return true
+            """)
+        for width in [360.0, 700.0] {
+            page.web.setFrameSize(NSSize(width: width, height: 600))
+            try await Task.sleep(for: .milliseconds(80))
+            let sizes = await page.evaluate("""
+                const s = document.scrollingElement;
+                return s.scrollWidth + '/' + s.clientWidth
+                """) as? String ?? ""
+            let parts = sizes.split(separator: "/").compactMap { Int($0) }
+            #expect(parts.count == 2 && parts[0] <= parts[1], "commands at \(width): \(sizes)")
+        }
+    }
+}
+
+extension ConversationPageTests {
+    /// A Senate card's body is Markdown, as every other message: inline
+    /// code, a fenced block and a list, not literal backticks.
+    @Test func aSenateCardsBodyIsMarkdown() async throws {
+        let page = ConversationPage(store: nil)
+        for _ in 0..<500 where !page.isReady { try await Task.sleep(for: .milliseconds(20)) }
+        let text = "Ping `ibot` about it:\n\n- first\n- second\n\n```sh\ncargo test -p ibot\n```"
+        let rows = ConversationRows.rows([
+            TimelineEntry(seq: 1, at: nil, truncated: false, body: .senate(message: SenateLine(
+                committee: "senate", seq: 140, thread: 140, from: "wendell", kind: "note",
+                kindLabel: "note", text: text))),
+        ])
+        ConversationPage.fixtureRows["card"] = rows
+        page.show(.fixtureRows("card"))
+        for _ in 0..<200 {
+            if await page.evaluate("return document.querySelectorAll('.senate').length") as? Int == 1 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        _ = await page.evaluate("await window.senate.renderAll(); return true")
+        let shape = await page.evaluate("""
+            const b = document.querySelector('.senate .senate-body');
+            return [b.querySelectorAll(':not(pre) > code').length, b.querySelectorAll('li').length,
+                    b.querySelectorAll('pre').length, b.textContent.includes('`')].join(',')
+            """) as? String
+        #expect(shape == "1,2,1,false", "inline code, two items, a block, no backticks: \(shape ?? "nil")")
+    }
+}
+
+extension ConversationPageTests {
+    /// An MCP call reads as its mark and `server.tool`, its raw name in
+    /// the tooltip; a run of them carries the mark too.
+    @Test func anMcpCallReadsAsServerDotTool() async throws {
+        let page = ConversationPage(store: nil)
+        for _ in 0..<500 where !page.isReady { try await Task.sleep(for: .milliseconds(20)) }
+        let call = { (seq: UInt64, name: String, title: String) in
+            TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
+                callId: "c\(seq)", name: name, kind: "other", status: "completed", statusLabel: "completed",
+                title: title, cwd: nil, output: nil, exitCode: nil, diff: nil, mcp: "senate.answer")))
+        }
+        let rows = ConversationRows.rows([
+            call(1, "mcp__senate__answer", "senate.answer"),
+            TimelineEntry(seq: 2, at: nil, truncated: false, body: .user(text: "and then")),
+            call(3, "mcp__senate__answer", "thread 2419"), call(4, "mcp__senate__answer", "senate.answer"),
+        ])
+        ConversationPage.fixtureRows["mcp"] = rows
+        page.show(.fixtureRows("mcp"))
+        for _ in 0..<200 {
+            if await page.evaluate("return document.querySelectorAll('.row').length") as? Int == 3 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let single = await page.evaluate("""
+            const h = document.querySelector('.k-tool .tool-head');
+            return [!!h.querySelector('svg.mcp-mark'), h.querySelector('.title').textContent,
+                    h.querySelector('.title').title].join('|')
+            """) as? String
+        #expect(single == "true|senate.answer|mcp__senate__answer")
+        let group = await page.evaluate("""
+            const h = document.querySelector('.group-head');
+            return [!!h.querySelector('svg.mcp-mark'), h.querySelector('.title').textContent].join('|')
+            """) as? String
+        #expect(group == "true|senate.answer", "\(group ?? "nil")")
     }
 }

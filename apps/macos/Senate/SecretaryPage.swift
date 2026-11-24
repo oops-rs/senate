@@ -64,7 +64,9 @@ private struct SecretaryIntro: View {
                     text: $store.secretaryDraft,
                     label: L("secretary.ask"),
                     placeholder: L("secretary.placeholder"),
-                    footnote: L("secretary.footnote", store.state.person ?? "?"),
+                    // Shown only while the first message would start it.
+                    footnote: store.secretarySession == nil ? L("secretary.footnote", store.state.person ?? "?") : nil,
+                    hint: L("secretary.footnote", store.state.person ?? "?"),
                     busy: store.secretaryStarting,
                     online: store.state.online
                 ) {

@@ -1102,6 +1102,17 @@ pub fn thread_events(t: &ThreadSummary) -> Vec<Event> {
             format!("Waiting on a person: {reason}."),
         ));
     }
+    // Thread 1565's shape: the agent's statuses, one a repeat (left out).
+    let status = |seq: u64, title: Option<&str>| {
+        let mut payload = senate_core::StatusPayload::new(senate_core::StatusState::Processing);
+        payload.title = title.map(str::to_string);
+        let mut e = event(seq, Kind::Status, Address::senator(&agent), String::new());
+        e.meta.insert(senate_core::StatusPayload::META_KEY.into(), payload.value());
+        e
+    };
+    events.push(status(t.root.0 + 2, Some("Wait for startup seat reports")));
+    events.push(status(t.root.0 + 3, None));
+    events.push(status(t.root.0 + 4, Some("Cover the uplink reconnect cycle")));
     events
 }
 
@@ -1857,6 +1868,17 @@ fn timelines(w: &mut World) {
                 new: None,
             },
         ),
+    );
+    // Two MCP calls: read as "senate.status", "senate.answer".
+    push(
+        &mut lead,
+        31,
+        tool("mcp-1", "mcp__senate__status", S::Completed, D::Other { summary: String::new() }),
+    );
+    push(
+        &mut lead,
+        31,
+        tool("mcp-2", "mcp__senate__answer", S::Completed, D::Other { summary: "thread 2419".into() }),
     );
     push(
         &mut lead,

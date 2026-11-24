@@ -372,9 +372,8 @@ private struct SessionMenu: View {
             }
             SessionActions(store: store, hosted: h, style: .menu)
             Divider()
-            Button(L("mention.copy", h.label)) { Mentions.copyText(h.label) }
         }
-        Button(L("mention.copy", session.sessionId)) { Mentions.copyText(session.sessionId) }
+        CopySenator(label: session.hosted?.label, mention: session.mention)
     }
 }
 

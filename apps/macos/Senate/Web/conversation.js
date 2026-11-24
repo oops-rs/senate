@@ -259,6 +259,45 @@
     return messageBody(md);
   }
 
+  // The MCP mark, drawn as the runtime marks are: a small monochrome
+  // vector in the text's colour (no bitmap, no brand colour).
+  function mcpMark() {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", "12"); svg.setAttribute("height", "12");
+    svg.setAttribute("aria-hidden", "true");
+    svg.classList.add("mcp-mark");
+    for (const d of ["M2.5 7.5 L7.5 2.5 a2.1 2.1 0 0 1 3 3 L5.5 10.5",
+                     "M6 5 L9 2 a2.1 2.1 0 0 1 3 3 L9 8 a2.1 2.1 0 0 1 3 3 L8.5 14.5",
+                     "M7.5 6.5 L5.5 8.5 a2.1 2.1 0 0 0 3 3 L10.5 9.5"]) {
+      const p = document.createElementNS(ns, "path");
+      p.setAttribute("d", d);
+      svg.appendChild(p);
+    }
+    return svg;
+  }
+
+  // A tool's glyph: the MCP mark for an MCP tool, else its kind's.
+  function toolGlyph(c) {
+    const k = el("span", "kind");
+    if (c.mcp) k.appendChild(mcpMark());
+    else k.textContent = { shell: "›", read: "▤", edit: "✎", write: "✎", search: "⌕", fetch: "◎", sub_agent: "◆" }[c.kind] || "•";
+    return k;
+  }
+
+  // A tool's line: an MCP tool as server.tool, then what it was given;
+  // its raw name in the tooltip.
+  function toolTitle(c) {
+    const t = el("span", "title");
+    if (c.mcp) {
+      t.appendChild(el("span", "mcp-name", c.mcp));
+      if (c.title && c.title !== c.mcp && c.title !== c.name) t.appendChild(el("span", "mcp-args", " " + c.title));
+      t.title = c.name;
+    } else t.textContent = c.title;
+    return t;
+  }
+
   function groupHead(row) {
     const k = key(row), isOpen = open.has(k), ms = row.members;
     const done = (m) => m.tool.status === "completed" || m.tool.status === "failed";
@@ -268,9 +307,11 @@
     const head = el("div", "tool-head group-head");
     head.dataset.toggle = k;
     head.setAttribute("role", "button"); head.setAttribute("aria-expanded", String(isOpen));
-    head.appendChild(el("span", "kind", "≡"));
+    // A run of one MCP server's calls carries its mark.
+    const allMcp = ms.every((m) => m.tool.mcp);
+    head.appendChild(allMcp ? toolGlyph(shown.tool) : el("span", "kind", "≡"));
     head.appendChild(el("span", "count", labels.commands.replace("%lld", String(ms.length))));
-    head.appendChild(el("span", "title", shown.tool.title));
+    head.appendChild(toolTitle(shown.tool));
     if (failed) head.appendChild(el("span", "fail", "✕ " + failed));
     else head.appendChild(el("span", running ? "run" : "ok", running ? "…" : "✓"));
     head.appendChild(el("span", "run", isOpen ? "▾" : "▸"));
@@ -297,6 +338,37 @@
         if (row.mine) { r.appendChild(content); r.appendChild(head); } else { r.appendChild(head); r.appendChild(content); }
         break;
       }
+      case "status": {
+        // A task status: who, what it is doing now, when; its checklist
+        // and links under it, when it gives them.
+        const s = row.status;
+        const line = el("div", "status-line");
+        line.appendChild(el("span", "by", row.by));
+        line.appendChild(el("span", "what", s.line));
+        line.appendChild(el("span", "meta", row.when));
+        r.classList.add("st-" + s.state);
+        r.appendChild(line);
+        if (s.steps.length) {
+          const list = el("ul", "status-steps");
+          for (const st of s.steps) {
+            const li = el("li", st.done ? "done" : "");
+            li.appendChild(el("span", "tick", st.done ? "✓" : "○"));
+            li.appendChild(el("span", "", st.label));
+            list.appendChild(li);
+          }
+          r.appendChild(list);
+        }
+        if (s.links.length) {
+          const links = el("div", "status-links");
+          for (const l of s.links) {
+            const a = el("a", "", l.label);
+            a.setAttribute("href", l.url);
+            links.appendChild(a);
+          }
+          r.appendChild(links);
+        }
+        break;
+      }
       case "group": {
         // Commands back to back: a count and the running (else the last)
         // one; open, each as its own row. The members are always here,
@@ -318,8 +390,8 @@
         const head = el("div", "tool-head");
         head.dataset.toggle = key(row);
         head.setAttribute("role", "button"); head.setAttribute("aria-expanded", String(isOpen));
-        head.appendChild(el("span", "kind", { shell: "›", read: "▤", edit: "✎", write: "✎", search: "⌕", fetch: "◎", sub_agent: "◆" }[c.kind] || "•"));
-        head.appendChild(el("span", "title", c.title));
+        head.appendChild(toolGlyph(c));
+        head.appendChild(toolTitle(c));
         if (c.exit != null && c.exit !== 0) head.appendChild(el("span", "fail", "exit " + c.exit));
         head.appendChild(el("span", c.status === "completed" ? "ok" : c.status === "failed" ? "fail" : "run",
           c.status === "completed" ? "✓" : c.status === "failed" ? "✕" : "…"));
@@ -356,7 +428,9 @@
         head.appendChild(el("span", "from", s.from || ""));
         head.appendChild(el("span", "meta", "  " + (s.kindLabel || "") + "  " + (s.committee || "") + (s.thread ? " · #" + s.thread : "")));
         d.appendChild(head);
-        d.appendChild(el("div", "typed", s.text));
+        const content = el("div", "senate-body");
+        content.appendChild(body(row.md));
+        d.appendChild(content);
         if (s.committee && s.thread) {
           d.dataset.committee = s.committee; d.dataset.thread = String(s.thread);
           d.setAttribute("role", "link");

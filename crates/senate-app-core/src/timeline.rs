@@ -103,6 +103,19 @@ pub struct ToolCall {
     pub exit_code: Option<i64>,
     /// An edit as a unified diff.
     pub diff: Option<String>,
+    /// An MCP tool, as people read it: `senate.answer` for
+    /// `mcp__senate__answer` (the raw name stays in `name`).
+    pub mcp: Option<String>,
+}
+
+/// An MCP tool's name as people read it, `server.tool`: Claude's
+/// `mcp__<server>__<tool>` and Codex's `<server>__<tool>` (none of Codex's
+/// own tools has `__` in its name). The server may itself contain single
+/// underscores; it ends at the first `__` after the prefix.
+pub fn mcp_label(name: &str) -> Option<String> {
+    let rest = name.strip_prefix("mcp__").unwrap_or(name);
+    let (server, tool) = rest.split_once("__")?;
+    (!server.is_empty() && !tool.is_empty()).then(|| format!("{server}.{tool}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -215,6 +228,7 @@ pub fn entry(item: &TimelineItem, locale: Locale) -> TimelineEntry {
                 output: output.clone(),
                 exit_code: None,
                 diff: None,
+                mcp: mcp_label(name),
             };
             let (kind, title) = match detail {
                 TimelineToolDetail::Shell {
@@ -249,8 +263,9 @@ pub fn entry(item: &TimelineItem, locale: Locale) -> TimelineEntry {
                 TimelineToolDetail::Other { summary } => ("other", summary.clone()),
             };
             call.kind = kind.to_string();
-            call.title = if title.trim().is_empty() {
-                name.clone()
+            // An MCP call with nothing more to say reads as its tool.
+            call.title = if title.trim().is_empty() || title == *name {
+                call.mcp.clone().unwrap_or_else(|| name.clone())
             } else {
                 title
             };
@@ -479,5 +494,19 @@ mod tests {
     fn why_there_is_nothing_to_read_in_either_language() {
         assert!(unavailable(Locale::En, Runtime::Agy).contains("No transcript"));
         assert!(unavailable(Locale::Zh, Runtime::Claude).contains("记录"));
+    }
+
+    #[test]
+    fn mcp_tools_read_as_server_dot_tool() {
+        assert_eq!(mcp_label("mcp__senate__answer").as_deref(), Some("senate.answer"));
+        assert_eq!(
+            mcp_label("mcp__claude_ai_Claude_Docs__batch").as_deref(),
+            Some("claude_ai_Claude_Docs.batch")
+        );
+        // Codex names them server__tool.
+        assert_eq!(mcp_label("senate__catch_up").as_deref(), Some("senate.catch_up"));
+        for own in ["Bash", "Read", "shell", "apply_patch", "web_search", "update_plan", "mcp__", "mcp__senate"] {
+            assert_eq!(mcp_label(own), None, "{own}");
+        }
     }
 }

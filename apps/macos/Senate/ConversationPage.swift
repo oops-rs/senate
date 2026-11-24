@@ -310,6 +310,7 @@ final class ConversationPage: NSObject {
             if let o = call.output { tool["output"] = o }
             if let d = call.diff { tool["diff"] = d }
             if let e = call.exitCode { tool["exit"] = e }
+            if let m = call.mcp { tool["mcp"] = m }
             out["tool"] = tool
         case let .todo(items):
             out["kind"] = "todo"
@@ -317,7 +318,10 @@ final class ConversationPage: NSObject {
         case let .notice(level, text): out["kind"] = "notice"; out["text"] = text; out["level"] = level
         case let .senate(m):
             out["kind"] = "senate"
-            var s: [String: Any] = ["text": names(m.text)]
+            // Its body as Markdown, as every other message: the same
+            // blocks, rendered lazily, links only through the page's handler.
+            var s: [String: Any] = [:]
+            out["md"] = markdown("s/\(session)/\(row.id)", names(m.text))
             if let f = m.from { s["from"] = names(f) }
             if let k = m.kindLabel { s["kindLabel"] = k }
             if let c = m.committee { s["committee"] = c }
@@ -331,7 +335,20 @@ final class ConversationPage: NSObject {
     }
 
     private func encode(_ event: ThreadEvent, committee: String, root: UInt64) -> [String: Any] {
-        [
+        // A task status: one activity line, its checklist and links.
+        if let s = event.status {
+            return [
+                "id": event.seq, "kind": "status",
+                "by": Mentions.shared.plain(event.by, committee: committee),
+                "when": event.at.formatted(.relative(presentation: .named)),
+                "status": [
+                    "state": s.state, "line": s.line,
+                    "steps": s.steps.map { ["label": $0.label, "done": $0.done] },
+                    "links": s.links.map { ["label": $0.label, "url": $0.url] },
+                ] as [String: Any],
+            ]
+        }
+        return [
             "id": event.seq, "kind": "event", "mine": event.mine,
             "by": Mentions.shared.plain(event.by, committee: committee),
             "kindLabel": event.kindLabel,

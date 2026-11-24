@@ -114,6 +114,12 @@ final class Mentions {
         copyText("[\(id)]")
     }
 
+    /// An alias on a committee (`committee::alias`), not a primary name.
+    nonisolated static func isAlias(_ label: String?) -> Bool {
+        guard let label, let r = label.range(of: "::") else { return false }
+        return !label[..<r.lowerBound].isEmpty && !label[r.upperBound...].isEmpty
+    }
+
     static func copyText(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
@@ -167,5 +173,20 @@ struct Ago: View {
         case ..<86400: return "\(s / 3600)h"
         default: return "\(s / 86400)d"
         }
+    }
+}
+
+/// A session's copy items: its alias (`committee::alias`, when it has one)
+/// and its senator's primary name, the form `senate attach` and `senate
+/// ask` take. Short labels; the value is what is copied.
+struct CopySenator: View {
+    let label: String?
+    let mention: String
+
+    var body: some View {
+        if Mentions.isAlias(label), let label {
+            Button(L("copy.senator_alias")) { Mentions.copyText(label) }
+        }
+        Button(L("copy.senator_id")) { Mentions.copyText(Mentions.id(mention)) }
     }
 }

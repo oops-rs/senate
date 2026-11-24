@@ -597,6 +597,57 @@
         }
       }
     },
+    "copy.senator_alias": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy Senator Alias"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拷贝代理别名"
+          }
+        }
+      }
+    },
+    "copy.senator_id": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy Senator ID"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拷贝代理 ID"
+          }
+        }
+      }
+    },
+    "copy.session_id": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy Session ID"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拷贝会话 ID"
+          }
+        }
+      }
+    },
     "desk.back": {
       "extractionState": "manual",
       "localizations": {
@@ -1720,23 +1771,6 @@
         }
       }
     },
-    "inbox.escalated_to": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": " · escalated to %@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": " · 转给 %@"
-          }
-        }
-      }
-    },
     "inbox.from_for": {
       "extractionState": "manual",
       "localizations": {
@@ -1750,40 +1784,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "%1$@（代 %2$@）"
-          }
-        }
-      }
-    },
-    "inbox.meta": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "#%1$@ from %2$@ · %3$@ for %4$@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "#%1$@ 来自 %2$@ · %3$@，已 %4$@"
-          }
-        }
-      }
-    },
-    "inbox.owner": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": " · owner %@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": " · 负责：%@"
           }
         }
       }
@@ -1966,47 +1966,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Take the thread over: queued deliveries to the agent are cancelled"
+            "value": "Take over: nothing more of this thread goes to agents"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "接手这条线程：发给 agent 的排队投递会被取消"
-          }
-        }
-      }
-    },
-    "inbox.taken": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "taken"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已接管"
-          }
-        }
-      }
-    },
-    "inbox.taken_by": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": " · taken by %@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": " · 由 %@ 接手"
+            "value": "接手：此线程不再发给代理"
           }
         }
       }
@@ -2024,23 +1990,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "无法读取该线程"
-          }
-        }
-      }
-    },
-    "inbox.triage": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "triage: %@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "分流：%@"
           }
         }
       }
@@ -2910,6 +2859,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "这个 Senate"
+          }
+        }
+      }
+    },
+    "profile.you": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "you"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你"
           }
         }
       }
@@ -5111,6 +5077,40 @@
         }
       }
     },
+    "thread.escalated_to": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "waiting on %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待 %@"
+          }
+        }
+      }
+    },
+    "thread.from": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "from"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "来自"
+          }
+        }
+      }
+    },
     "thread.more": {
       "extractionState": "manual",
       "localizations": {
@@ -5124,6 +5124,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "更多"
+          }
+        }
+      }
+    },
+    "thread.owner": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "with %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "由 %@ 负责"
+          }
+        }
+      }
+    },
+    "thread.taken_by": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "taken by %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "由 %@ 接手"
           }
         }
       }

@@ -51,7 +51,7 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     func deskItem(committee: String, seq: UInt64) async throws -> DeskItemView {
         try record("desk-item \(committee) \(seq)")
         let item = ThreadEvent(seq: seq, kind: "request", kindLabel: "Request", by: "tester",
-                               to: ["speaker"], body: "Full request", at: Date(), mine: false)
+                               to: ["speaker"], body: "Full request", at: Date(), mine: false, status: nil)
         let thread = ThreadView(committee: committee, root: seq, title: "Full request",
                                 state: nil, stateLabel: nil, kindLabel: "Request", events: [item])
         return DeskItemView(eventId: "source-item", item: item, thread: thread, origin: nil,
@@ -275,7 +275,7 @@ func docket(_ entries: [DocketEntry]) -> [DocketSenate] {
 func senate(roster: [RosterCommittee], chairs: [ChairLine] = []) -> SenateInfo {
     SenateInfo(
         key: "alice-desk", title: "alice-desk", senate: "alice-desk", primary: true,
-        serverUrl: "http://127.0.0.1:7001", me: "[senator::alice]", speaker: nil, presidingAgent: nil,
+        serverUrl: "http://127.0.0.1:7001", me: "[senator::alice]", speaker: nil, speakerIsYou: false, presidingAgent: nil,
         committees: [], roster: roster, chairs: chairs, children: [], uplink: nil)
 }
 

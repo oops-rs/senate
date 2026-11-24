@@ -170,8 +170,11 @@ pub struct SenateInfo {
     /// The person, as a senior senator there: `[senator::alice]`.
     pub me: String,
     /// Who holds the Speaker's seat: `[speaker]` for the built-in Speaker,
-    /// else the senator's mention.
+    /// else the senator's mention (a person by their handle, the same in
+    /// every Senate of the tree).
     pub speaker: Option<String>,
+    /// The Speaker is the signed-in person.
+    pub speaker_is_you: bool,
     /// The person's agent holding the seat, when it is one of theirs.
     pub presiding_agent: Option<String>,
     pub committees: Vec<CommitteeLine>,
@@ -586,7 +589,8 @@ fn senate_info(s: &StatusReply, primary: bool, locale: Locale, now: DateTime<Utc
         primary,
         server_url: s.server_url.clone(),
         me: Address::senior(&s.person).in_text(),
-        speaker: s.speaker.as_ref().map(seat_mention),
+        speaker: speaker_mention(s),
+        speaker_is_you: speaker_is_person(s),
         presiding_agent: presider_of(s).map(ToString::to_string),
         roster: Vec::new(),
         committees: s
@@ -670,6 +674,30 @@ fn child_line(c: &senate_core::ChildSenate, locale: Locale, now: DateTime<Utc>) 
                 presence_label: text::presence(locale, seat.presence).to_string(),
             })
             .collect(),
+    }
+}
+
+/// The Speaker as the Senate's office says: it names a Speaker who sits in
+/// the Senate above (a child Senate's person Speaker), where `/v1/me`'s
+/// seat names whoever works this Senate's desk. The seat only for an
+/// older daemon, which gives no office.
+pub(crate) fn speaker_mention(s: &StatusReply) -> Option<String> {
+    match s.roles.as_ref().and_then(|r| r.office.as_ref()) {
+        Some(office) if office.kind == senate_core::SenatorKind::Person => {
+            Some(Address::senator(office.speaker.name()).in_text())
+        }
+        Some(office) => Some(office.speaker.in_text()),
+        None => s.speaker.as_ref().map(seat_mention),
+    }
+}
+
+/// Whether the Speaker is the person this daemon serves.
+pub(crate) fn speaker_is_person(s: &StatusReply) -> bool {
+    match s.roles.as_ref().and_then(|r| r.office.as_ref()) {
+        Some(office) => {
+            office.kind == senate_core::SenatorKind::Person && office.speaker.name().as_str() == s.person.as_str()
+        }
+        None => matches!(&s.speaker, Some(SpeakerSeat::Senator(p)) if p.as_str() == s.person.as_str()),
     }
 }
 

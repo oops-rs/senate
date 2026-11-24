@@ -109,7 +109,12 @@ private struct SenateSections: View {
                     fact(L("senates.you")) { MentionText(senate.me) }
                     fact(L("senates.speaker")) {
                         if let speaker = senate.speaker {
-                            MentionText(speaker)
+                            HStack(spacing: 6) {
+                                MentionText(speaker)
+                                if senate.speakerIsYou {
+                                    Text(verbatim: L("profile.you")).foregroundStyle(Theme.onSurfaceVariant)
+                                }
+                            }
                         } else {
                             Text(verbatim: L("senates.no_speaker")).foregroundStyle(Theme.onSurfaceVariant)
                         }

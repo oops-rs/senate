@@ -617,7 +617,7 @@ import SenateCore
     private func tool(_ seq: UInt64, _ title: String) -> TimelineEntry {
         TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
             callId: "c\(seq)", name: "Bash", kind: "shell", status: "completed", statusLabel: "done",
-            title: title, cwd: nil, output: nil, exitCode: nil, diff: nil)))
+            title: title, cwd: nil, output: nil, exitCode: nil, diff: nil, mcp: nil)))
     }
 
     @Test func reasoningGoesIntoTheCallOrReplyItLedTo() {
@@ -779,5 +779,30 @@ extension CoreStoreTests {
         #expect(await store.unarchive("api-test") == false)
         #expect(store.actionError?.contains("Only the Speaker in person") == true)
         #expect(store.archived == ["api-test"])
+    }
+}
+
+extension CoreStoreTests {
+    /// ⌘↩ sends only something to send, once, online, and never while an
+    /// input method is composing.
+    @Test func theComposerSendsOnlyWhenItShould() {
+        #expect(MessageComposer.canSend("hello", busy: false, online: true, composing: false))
+        #expect(!MessageComposer.canSend("", busy: false, online: true, composing: false))
+        #expect(!MessageComposer.canSend("  \n\t ", busy: false, online: true, composing: false))
+        #expect(!MessageComposer.canSend("hello", busy: true, online: true, composing: false))
+        #expect(!MessageComposer.canSend("hello", busy: false, online: false, composing: false))
+        #expect(!MessageComposer.canSend("你好", busy: false, online: true, composing: true))
+    }
+}
+
+extension CoreStoreTests {
+    /// "Copy Senator Alias" shows only for an alias on a committee; "Copy
+    /// Senator ID" copies the primary name the CLI takes.
+    @Test func copyItemsTellAnAliasFromAName() {
+        #expect(Mentions.isAlias("senate::app"))
+        #expect(!Mentions.isAlias("claude-f6d10eaa"))
+        #expect(!Mentions.isAlias(nil))
+        #expect(!Mentions.isAlias("::app"))
+        #expect(Mentions.id("[senator::claude-f6d10eaa-48f6]") == "claude-f6d10eaa-48f6")
     }
 }
