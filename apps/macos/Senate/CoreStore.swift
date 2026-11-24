@@ -23,7 +23,7 @@ final class CoreStore {
     /// The window's fixed pages. Inbox and Approvals head the sidebar;
     /// Senates opens from the account menu at its foot.
     enum Section: String, CaseIterable, Hashable {
-        case inbox, approvals, senates
+        case inbox, approvals, senates, history
     }
 
     /// What the window shows: a page, a thread, a session, a committee.
@@ -37,6 +37,8 @@ final class CoreStore {
         case committee(String)
         /// The machine's default secretary: its session's page once it runs.
         case secretary
+        /// An ended or stopped session from History, read-only, by its id.
+        case past(String)
         /// A waiting item that is not a thread (a prompt, an approval, an
         /// item for the Speaker), by its `Waiting.id`: choosing it opens
         /// where it is answered.
@@ -103,6 +105,10 @@ final class CoreStore {
     @ObservationIgnored private var openWindow: OpenWindowAction?
     @ObservationIgnored private(set) var openSettings: OpenSettingsAction?
     @ObservationIgnored private let notifier = Notifier()
+    /// History: ended and stopped sessions, and the search.
+    let history = HistoryModel()
+    /// A search match to show once its session is open.
+    var reveal: Reveal?
     /// The name and picture set in this app.
     let profile = LocalProfile()
     /// The conversation page: one web view, kept, for sessions and threads.
@@ -122,6 +128,7 @@ final class CoreStore {
         showInDock = Dock.showsInDock(defaults)
         applyDock = notifications
         folded = Set(defaults.stringArray(forKey: Self.foldedKey) ?? [])
+        history.store = self
         if notifications {
             notifier.handle = { [weak self] action in await self?.perform(action) }
             notifier.setUp()
@@ -315,7 +322,7 @@ final class CoreStore {
     }
 
     /// The fixed pages at the head of the sidebar.
-    var sections: [Section] { [.inbox, .approvals] }
+    var sections: [Section] { [.inbox, .approvals, .history] }
 
     /// What waits in a section, for its badge: the threads for you (not
     /// those to decide), and everything waiting for a yes or a no.
@@ -323,7 +330,7 @@ final class CoreStore {
         switch section {
         case .inbox: inboxThreads.count
         case .approvals: approvalsCount
-        case .senates: 0
+        case .senates, .history: 0
         }
     }
 

@@ -178,9 +178,9 @@ import SenateCore
         #expect(Dock.showsInDock(defaults))
     }
 
-    @Test func theSidebarHeadsWithInboxAndApprovals() async throws {
+    @Test func theSidebarHeadsWithInboxApprovalsAndHistory() async throws {
         let store = store()
-        #expect(store.sections == [.inbox, .approvals])
+        #expect(store.sections == [.inbox, .approvals, .history])
     }
 
     @Test func openingAThreadFromANotificationSelectsIt() async throws {
@@ -693,3 +693,57 @@ import SenateCore
     }
 }
 
+
+/// History: read a page at a time, narrowed, searched, forgotten, and a
+/// match opened where it was said.
+@MainActor
+@Suite struct HistoryTests {
+    let core = FakeCore()
+
+    func store() -> CoreStore {
+        let suite = "senate-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        let core = self.core
+        return CoreStore(makeCore: { core }, defaults: defaults, notifications: false)
+    }
+
+    @Test func pagesNarrowsAndForgets() async throws {
+        let store = store()
+        let h = store.history
+        await h.reload()
+        #expect(h.rows.count == 12)
+        #expect(h.next == nil)
+        h.runtime = "codex"
+        #expect(h.shown.count == 6 && h.shown.allSatisfy { $0.runtime == "codex" })
+        h.runtime = nil
+        h.committee = "c1"
+        for _ in 0..<100 where h.rows.count == 12 || h.loading { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(h.rows.allSatisfy { $0.committee == "c1" } && h.rows.count == 4)
+        let row = try #require(h.rows.first)
+        #expect(await h.forget(row))
+        #expect(!h.rows.contains { $0.sessionId == row.sessionId })
+        #expect(core.calls.contains("forget \(row.sessionId)"))
+        // By day, newest first.
+        let days = HistoryView.days(h.rows)
+        #expect(days.flatMap(\.rows).map(\.sessionId) == h.rows.map(\.sessionId))
+    }
+
+    @Test func searchAsksAgainWhileTheDaemonIndexes() async throws {
+        let store = store()
+        core.indexingFor = 1
+        store.history.query = "ledger"
+        for _ in 0..<400 where store.history.hits.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(store.history.hits.first?.sessionId == "past-3")
+        #expect(store.history.indexing == nil)
+        #expect(core.calls.filter { $0 == "search ledger" }.count == 2)
+    }
+
+    @Test func anEndedMatchOpensInHistory() async throws {
+        let store = store()
+        await store.history.reload()
+        let hit = SearchHit(sessionId: "past-3", seq: 2, kind: .reply, snippet: "x", at: nil, live: false)
+        store.open(hit, query: "x")
+        #expect(store.place == .past("past-3"))
+        #expect(store.reveal == Reveal(sessionId: "past-3", seq: 2, query: "x"))
+    }
+}

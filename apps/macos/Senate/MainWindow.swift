@@ -43,6 +43,8 @@ struct MainWindow: View {
             return section.title
         case .secretary:
             return L("secretary.title")
+        case let .past(id):
+            return store.history.row(id)?.name ?? L("tab.history")
         case .item:
             break
         }
@@ -74,6 +76,8 @@ struct MainWindow: View {
                 }
             case let .committee(name): CommitteePage(store: store, name: name)
             case .secretary: SecretaryPage(store: store)
+            case .section(.history): HistoryView(store: store)
+            case let .past(id): PastSessionPage(store: store, sessionId: id)
             case .item, .section(.inbox): InboxView(store: store)
             case .section(.approvals): ApprovalsView(store: store)
             case .section(.senates): SenatesView(store: store)
@@ -368,6 +372,7 @@ extension CoreStore.Section {
         case .inbox: L("tab.inbox")
         case .approvals: L("tab.approvals")
         case .senates: L("tab.profile")
+        case .history: L("tab.history")
         }
     }
 
@@ -376,6 +381,7 @@ extension CoreStore.Section {
         case .inbox: "tray"
         case .approvals: "checkmark.shield"
         case .senates: "person.crop.circle"
+        case .history: "clock.arrow.circlepath"
         }
     }
 }

@@ -229,3 +229,39 @@ extension ConversationPageTests {
         #expect(order == "abc")
     }
 }
+
+extension ConversationPageTests {
+    /// A search's match on a command inside a closed group: the group opens,
+    /// the command opens, and the match in its output is the current one.
+    @Test func aMatchInsideAGroupIsRevealed() async throws {
+        let page = ConversationPage(store: nil)
+        for _ in 0..<500 where !page.isReady { try await Task.sleep(for: .milliseconds(20)) }
+        let call = { (seq: UInt64, title: String) in
+            TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
+                callId: "c\(seq)", name: "Bash", kind: "shell", status: "completed", statusLabel: "completed",
+                title: title, cwd: nil, output: "output of \(title)", exitCode: 0, diff: nil)))
+        }
+        let rows = ConversationRows.rows([call(1, "cargo build"), call(2, "cargo test needle"), call(3, "git status")])
+        #expect(ConversationRows.rowId(for: 2, in: rows) == 2)
+        ConversationPage.fixtureRows["reveal-group"] = rows
+        page.show(.fixtureRows("reveal-group"))
+        for _ in 0..<100 {
+            if await page.evaluate("return document.querySelectorAll('.k-group').length") as? Int == 1 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        await page.reveal(row: 2, query: "needle")
+        let groupOpen = await page.evaluate("return !document.querySelector('.group-members').hidden") as? Bool
+        #expect(groupOpen == true, "the group opened")
+        let output = await page.evaluate("""
+            return document.querySelector('[data-id="m2"]').textContent.includes('output of cargo test needle')
+            """) as? Bool
+        #expect(output == true, "the command opened, its output shown")
+        let current = await page.evaluate("""
+            const h = CSS.highlights.get('find-now');
+            if (!h) return '';
+            const [range] = [...h];
+            return range.startContainer.parentElement.closest('[data-id]').dataset.id
+            """) as? String
+        #expect(current == "m2", "the match in that command is the current one")
+    }
+}

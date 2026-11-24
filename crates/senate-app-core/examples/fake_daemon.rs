@@ -106,6 +106,12 @@ async fn main() {
         };
         common::seat_secretary(&mut w, state);
     }
+    // FAKE_HISTORY=N: ended and stopped sessions in History (36 by default).
+    let history = std::env::var("FAKE_HISTORY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(36);
+    common::history(&mut w, history);
     let world = Arc::new(Mutex::new(w));
     let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
     println!("fake daemon on {}", socket.display());
