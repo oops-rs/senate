@@ -38,16 +38,24 @@ impl Shared {
             Err(e) if e.status() == Some(404) => self.chair_of(&committee),
             Err(e) => return Err(server_error(e)),
         };
-        let pending = self
+        let inbox = self
             .on_inbox(&selector, Some(committee.clone()), None, false)
-            .await?
-            .threads
-            .len();
+            .await?;
+        let pending = inbox.threads.len();
+        let mut presence_states = BTreeMap::new();
         let mut members = BTreeMap::new();
         let mut chair_live = false;
         for p in presence.agents {
             let live = p.state == senate_core::PresenceState::Online;
             chair_live |= live && chair.as_ref() == Some(&p.agent);
+            let state = if p.paused {
+                "paused"
+            } else if live {
+                "unknown"
+            } else {
+                "away"
+            };
+            presence_states.insert(p.agent.clone(), state);
             members.insert(p.agent, roster_active(Some(p.state), false, p.paused));
         }
         for agent in presence.duties.into_keys() {
@@ -76,10 +84,45 @@ impl Shared {
         let chair_display_name = chair.as_ref().map(name);
         let members = members
             .into_iter()
-            .map(|(senator, active)| RosterMember {
-                display_name: name(&senator),
-                senator,
-                active,
+            .map(|(senator, active)| {
+                let session = local
+                    .sessions
+                    .iter()
+                    .filter(|s| s.agent == senator && s.committee() == Some(&committee))
+                    .max_by_key(|s| (s.is_live(), s.last_seen));
+                let state = if paused
+                    .iter()
+                    .any(|p| p.agent == senator && p.committee == committee)
+                {
+                    "paused"
+                } else if let Some(session) = session.filter(|s| s.is_live()) {
+                    if self.session_working(session) {
+                        "working"
+                    } else {
+                        "idle"
+                    }
+                } else {
+                    presence_states.get(&senator).copied().unwrap_or("unknown")
+                };
+                let status_title = inbox
+                    .threads
+                    .iter()
+                    .filter(|t| t.owner.as_ref().is_some_and(|o| o.agent == senator))
+                    .max_by_key(|t| t.updated)
+                    .map(|t| t.title.chars().take(200).collect());
+                RosterMember {
+                    display_name: name(&senator),
+                    runtime: session
+                        .map(|s| s.runtime)
+                        .or_else(|| native_runtime(&senator)),
+                    session_state: Some(state.into()),
+                    status_title,
+                    session_id: session
+                        .filter(|s| s.is_live())
+                        .map(|s| s.session_id.clone()),
+                    senator,
+                    active,
+                }
             })
             .collect();
         Ok(RosterCommittee {
@@ -135,4 +178,24 @@ impl Shared {
         *lock(&self.display_aliases) = None;
         Ok(alias)
     }
+}
+
+// Native primary names carry a runtime prefix. Leave custom names unknown;
+// a remote heartbeat only reports connectivity and whether the seat paused.
+fn native_runtime(senator: &SenatorName) -> Option<Runtime> {
+    let name = senator.to_string();
+    let (prefix, id) = name.split_once('-')?;
+    let id = id.as_bytes();
+    if id.len() != 36
+        || !id.iter().enumerate().all(|(i, byte)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+    {
+        return None;
+    }
+    Runtime::parse(prefix)
 }

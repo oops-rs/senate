@@ -36,6 +36,7 @@
 // `unsafe_code = "deny"` refuses; the hand-written code has none.
 #![allow(unsafe_code)]
 
+pub mod activity;
 pub mod ffi;
 pub mod history;
 pub mod link;

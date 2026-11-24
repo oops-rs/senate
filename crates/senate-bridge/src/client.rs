@@ -486,12 +486,23 @@ impl ApiClient {
         committee: &CommitteeId,
         agent: Option<&SenatorName>,
     ) -> Result<ThreadsPage, ApiClientError> {
+        self.thread_page(
+            committee,
+            ThreadsQuery {
+                agent: agent.cloned(),
+                ..ThreadsQuery::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn thread_page(
+        &self,
+        committee: &CommitteeId,
+        query: ThreadsQuery,
+    ) -> Result<ThreadsPage, ApiClientError> {
         let _permit = self.short_request().await;
         let url = self.url(&api::threads_path(committee));
-        let query = ThreadsQuery {
-            state: None,
-            agent: agent.cloned(),
-        };
         let resp = self.authed(self.http.get(url)).query(&query).send().await?;
         Ok(checked(resp).await?.json().await?)
     }
@@ -841,10 +852,19 @@ impl ApiClient {
         after: Seq,
         agent: &SenatorName,
     ) -> Result<Response, ApiClientError> {
+        self.open_event_stream(committee, after, Some(agent)).await
+    }
+
+    pub(crate) async fn open_event_stream(
+        &self,
+        committee: &CommitteeId,
+        after: Seq,
+        agent: Option<&SenatorName>,
+    ) -> Result<Response, ApiClientError> {
         let url = self.url(&api::stream_path(committee));
         let query = api::StreamQuery {
             after,
-            senator: Some(agent.clone()),
+            senator: agent.cloned(),
         };
         let resp = self
             .streaming
