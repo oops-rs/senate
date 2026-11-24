@@ -294,6 +294,22 @@ pub struct RefsParam {
     pub branch: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+enum CardSubject {
+    #[serde(rename = "self")]
+    Own,
+    Committee,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+struct CardParams {
+    subject: CardSubject,
+    value: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 pub struct AskParams {
@@ -1718,6 +1734,29 @@ impl SenateMcp {
                 Err(e) => return Err(describe(e, self.locale)),
             }
         }
+    }
+
+    #[tool(
+        name = "card",
+        description = "Replace your own seat card, or your committee's card if you chair it. Supply an opaque JSON object or null to clear."
+    )]
+    async fn card(&self, params: Parameters<CardParams>) -> Result<String, String> {
+        if self.selector == SessionSelector::default() {
+            return Err("A bound coding session is required".into());
+        }
+        let target = match params.0.subject {
+            CardSubject::Own => crate::ipc::CardTarget::Own,
+            CardSubject::Committee => crate::ipc::CardTarget::Committee { committee: None },
+        };
+        let document = serde_json::to_string(&params.0.value).map_err(|error| error.to_string())?;
+        self.call::<()>(&Request::SetCard {
+            session: self.selector.clone(),
+            target,
+            document,
+        })
+        .await
+        .map_err(|error| describe(error, self.locale))?;
+        Ok("Profile card updated.".into())
     }
 
     #[tool(name = "ask", description = ASK)]
@@ -3487,6 +3526,7 @@ mod tests {
             [
                 "answer",
                 "ask",
+                "card",
                 "catch_up",
                 "chair_cover",
                 "chair_docket",

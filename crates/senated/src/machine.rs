@@ -853,6 +853,7 @@ mod tests {
     async fn first_observed_event(
         stream: &mut reqwest::Response,
         seq: senate_core::Seq,
+        want_line: bool,
     ) -> anyhow::Result<senate_observe_protocol::EventFrame> {
         use senate_observe_protocol::{Event, EventFrame};
 
@@ -863,7 +864,10 @@ mod tests {
             while let Some(end) = buffer.windows(2).position(|bytes| bytes == b"\n\n") {
                 let raw: Vec<_> = buffer.drain(..end + 2).collect();
                 let frame = std::str::from_utf8(&raw)?;
-                assert!(!frame.contains("canary"));
+                assert!(!frame.contains("body-canary") && !frame.contains("hidden-canary"));
+                if !want_line {
+                    assert!(!frame.contains("first-line-canary"));
+                }
                 let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data: ")) else {
                     continue;
                 };
@@ -881,7 +885,7 @@ mod tests {
     async fn observer_credentials_are_only_accepted_on_the_machine_observe_routes()
     -> anyhow::Result<()> {
         use senate_bridge::ipc::{IpcClient, Request};
-        use senate_observe::{AdminRequest, CreateGrant, IssuedGrant, Scope};
+        use senate_observe::{AdminRequest, CreateGrant, IssuedGrant, LinePolicy, Preview, Scope};
         use senate_observe_protocol::{Event, Snapshot};
         use std::time::Duration;
 
@@ -935,9 +939,31 @@ mod tests {
                     origins: vec![],
                     topology: false,
                     expires_in_days: None,
+                    lines: None,
+                    auto_confirmed: false,
                 },
             },
         };
+        ipc.call::<()>(
+            &Request::SetCard {
+                session: Default::default(),
+                target: senate_bridge::ipc::CardTarget::Own,
+                document: r#"{"fixture":{"palette":2}}"#.into(),
+            },
+            wait,
+        )
+        .await?;
+        let mut auto = issue("automatic lines");
+        if let Request::ObserveAdmin {
+            command: AdminRequest::Create { grant },
+        } = &mut auto
+        {
+            grant.scope = Scope::Lines;
+            grant.lines = Some(LinePolicy::Auto);
+            grant.auto_confirmed = true;
+            grant.topology = true;
+        }
+        let auto: IssuedGrant = ipc.call(&auto, wait).await?;
         let issued: IssuedGrant = ipc.call(&issue("first scene"), wait).await?;
         let other: IssuedGrant = ipc.call(&issue("second scene"), wait).await?;
         let http = reqwest::Client::builder()
@@ -960,6 +986,28 @@ mod tests {
         assert_eq!(snapshot.committees.len(), 1);
         assert_eq!(snapshot.committees[0].id, "visible");
         let events = format!("{}/v1/observe/events", top.url);
+        let auto_state: Snapshot = http
+            .get(&state)
+            .bearer_auth(&auto.token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert!(
+            auto_state
+                .capabilities
+                .iter()
+                .any(|capability| capability == "lines_auto")
+        );
+        assert_eq!(
+            auto_state
+                .senate
+                .person
+                .and_then(|person| person.card)
+                .and_then(|card| card.value.get("fixture").cloned()),
+            Some(serde_json::json!({"palette":2}))
+        );
         let resume = |bearer: &str| {
             http.get(&events)
                 .bearer_auth(bearer)
@@ -977,8 +1025,33 @@ mod tests {
             .append(append(hidden, "hidden-canary"))
             .await?;
         let mut stream = resume(&issued.token).send().await?.error_for_status()?;
+        let candidate: Preview = ipc
+            .call(
+                &Request::ObserveAdmin {
+                    command: AdminRequest::Preview {
+                        committee: visible.clone(),
+                        seq: committed.event.seq,
+                    },
+                },
+                wait,
+            )
+            .await?;
+        assert_eq!(candidate.line, "first-line-canary");
+        let mut auto_stream = http
+            .get(&events)
+            .bearer_auth(&auto.token)
+            .header("last-event-id", auto_state.cursor.as_str())
+            .send()
+            .await?
+            .error_for_status()?;
+        let frame = first_observed_event(&mut auto_stream, committed.event.seq, true).await?;
+        let Event::MessagePosted(data) = frame.event else {
+            anyhow::bail!("expected public filing");
+        };
+        assert_eq!(data.line.as_deref(), Some(candidate.line.as_str()));
+        drop(auto_stream);
         let expected = committed.event.seq;
-        let pong = first_observed_event(&mut stream, expected).await?;
+        let pong = first_observed_event(&mut stream, expected, false).await?;
         let Event::MessagePosted(message) = pong.event else {
             anyhow::bail!("expected message event");
         };

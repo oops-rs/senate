@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Address, Approval, ApprovalDecision, ApprovalTool, Committee, Cursor, DeskItem, HoldReason,
-    LinkState, MessageKind, Navigation, Project, RoutePhase, Senate, SenateLink, Senator,
-    SenatorState, Seq, Thread, ThreadState, V1, WaitsOn, Windows,
+    LinkState, MessageKind, Navigation, Project, RetiredSenator, RoutePhase, Senate, SenateLink,
+    Senator, SenatorState, Seq, Thread, ThreadState, V1, WaitsOn, Windows,
 };
 
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
@@ -101,6 +101,12 @@ pub enum Event {
     ViewerDetached(SenatorRef),
     #[serde(rename = "link.changed")]
     LinkChanged(LinkChanged),
+    #[serde(rename = "project.release_seen")]
+    ProjectReleaseSeen(ProjectReleaseSeen),
+    #[serde(rename = "tool.started")]
+    ToolStarted(crate::ToolActivity),
+    #[serde(rename = "tool.ended")]
+    ToolEnded(crate::ToolActivity),
     #[serde(rename = "card.changed")]
     CardChanged(CardChanged),
 }
@@ -184,6 +190,12 @@ pub struct ApprovalDecided {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct ProjectReleaseSeen {
+    pub project_id: String,
+    pub release: crate::ProjectRelease,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct LinkChanged {
     pub id: String,
     pub previous_state: LinkState,
@@ -240,6 +252,7 @@ row_changes!(Upserts {
     committees: Committee,
     projects: Project,
     senators: Senator,
+    retired: RetiredSenator,
     threads: Thread,
     desk_items: DeskItem,
     approvals: Approval,
@@ -250,6 +263,7 @@ row_changes!(Removals {
     committees: IdKey,
     projects: IdKey,
     senators: SeatKey,
+    retired: SeatKey,
     threads: ThreadKey,
     desk_items: ThreadKey,
     approvals: IdKey,

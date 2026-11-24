@@ -1447,6 +1447,13 @@ impl ServerHub {
         .await
     }
 
+    pub(crate) async fn retired_seats(
+        &self,
+        committee: &CommitteeId,
+    ) -> Result<Vec<(SenatorName, Seq)>, HubError> {
+        self.ask_writer(committee, CommitteeMsg::RetiredSeats).await
+    }
+
     /// The committees with a log, split into the open ones and the
     /// archived ones ([`senate_core::CommitteeArchive`]), each in log order.
     pub async fn committees_by_archive(

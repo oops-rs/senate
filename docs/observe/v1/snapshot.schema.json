@@ -56,6 +56,12 @@
         "$ref": "#/$defs/Project"
       }
     },
+    "retired": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RetiredSenator"
+      }
+    },
     "schema_version": {
       "$ref": "#/$defs/V1"
     },
@@ -420,11 +426,103 @@
         },
         "name": {
           "type": "string"
+        },
+        "releases": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProjectRelease"
+          }
         }
       },
       "required": [
         "id",
         "name"
+      ]
+    },
+    "ProjectRelease": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "fixes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "merges": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tag": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tag",
+        "at",
+        "merges",
+        "fixes"
+      ]
+    },
+    "RetiredSenator": {
+      "type": "object",
+      "properties": {
+        "alias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "card": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Card"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "committee_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_active_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retired_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "runtime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "committee_id",
+        "retired_at"
       ]
     },
     "Senate": {

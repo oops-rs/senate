@@ -748,6 +748,8 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 | `senate senator` | `list` · `alias` · `unalias` · `chair` · `seat` · `unseat` · `duty` |
 | `senate desk` | `list` (the default: what awaits the Speaker, as `committee#seq`) · `show <item>` · `answer <item> <text>` · `close <item> [--reason]` · `forward <item>` · `refuse <item> <reason>`; the Speaker in person, from your own terminal; items tab-complete |
 | `senate secretary` | `ask` (your default secretary) · `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
+| `senate observe` | `token create\|list\|revoke` · `line publish\|withdraw` |
+| `senate card` | `set --file <path\|->` · `clear` |
 | `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |
 | `senate setup` | `init` · `install` · `completions <zsh\|bash\|fish>` · `service install\|uninstall\|status` · `doctor` · `clean` |
 
@@ -882,6 +884,26 @@ Hosted Codex uses a shared app-server. After changing conversation in its TUI, e
 Sessions use their current or last known committee. The active-time estimate sums intervals between recorded events within a turn, discards gaps longer than five minutes, and splits time at local midnight. Concurrent sessions add together. A timezone change re-buckets the same facts. Repository names come from the basename of the recorded Git root. Approval counts cover explicit decisions preserved in the audit log, and token counts cover recognizable usage records.
 
 The stats reply contains dates, counts, and committee and repository names. The stats collector sends only the existing read requests for committee logs.
+
+### Observe a machine Senate
+
+From your own terminal, issue a scoped read-only token for a local scene.
+
+```sh
+senate observe token create --name my-scene --committees senate
+senate observe token list
+senate observe token revoke <token-id>
+```
+
+The token is shown once. Grants default to metadata. A lines grant must
+explicitly choose `--lines auto` or `--lines published`. Automatic previews
+can contain anything written on the first line. A published grant receives
+only lines you review with `senate observe line publish <committee> <seq>`.
+For exact browser origins, replay behavior, card permissions and the public
+wire contract, see [Observe a Senate](docs/observe.md).
+
+Use `senate card set --file my-card.json` to set your profile or bound seat
+card, or `senate card clear` to remove it. A chair can specify its committee.
 
 ## Remote machines
 
@@ -1064,6 +1086,7 @@ Running `senate setup install --yes` registers these tools into your agent runti
 - `propose_decision`: Submit a formal proposal for human confirmation.
 - `checkpoint`: Record git commit hashes and branch progress.
 - `join`: Switch or bind the current session to a committee.
+- `card`: Replace the bound seat card or the committee card if you chair it.
 - `secretary_work`: Read and claim shared work items across a secretary team.
 - `receipt`: Verify log publication status and local delivery receipts.
 

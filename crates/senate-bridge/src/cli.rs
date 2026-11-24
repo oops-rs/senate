@@ -156,6 +156,8 @@ enum MemoryCmd {
 enum Cmd {
     /// Issue or manage read-only observation grants.
     Observe(cli_observe::Observe),
+    /// Replace or clear a profile card.
+    Card(cli_observe::CardCommand),
     /// Show your recorded local Senate activity by day.
     Stats {
         /// Number of local calendar days ending today (1d to 366d).
@@ -3378,6 +3380,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         Cmd::Desk(args) => cli_desk::run(args),
         Cmd::Chat(args) => cli_chat::run(args),
         Cmd::Observe(args) => cli_observe::run(args),
+        Cmd::Card(args) => cli_observe::run_card(args),
         Cmd::Setup { command } => run_setup(command, output),
         Cmd::Join {
             committee,

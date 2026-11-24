@@ -18,6 +18,8 @@ pub struct Snapshot {
     pub committees: Vec<Committee>,
     pub projects: Vec<Project>,
     pub senators: Vec<Senator>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired: Vec<RetiredSenator>,
     pub threads: Vec<Thread>,
     pub desk_items: Vec<DeskItem>,
     pub approvals: Vec<Approval>,
@@ -88,6 +90,16 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub link: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub releases: Option<Vec<ProjectRelease>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct ProjectRelease {
+    pub tag: String,
+    pub at: DateTime<Utc>,
+    pub merges: u32,
+    pub fixes: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
@@ -101,6 +113,19 @@ pub struct Senator {
     pub last_active_at: Option<DateTime<Utc>>,
     pub hosted: Hosting,
     pub viewer_attached: Option<bool>,
+    pub link: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card: Option<Card>,
+}
+
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+pub struct RetiredSenator {
+    pub id: String,
+    pub committee_id: String,
+    pub alias: Option<String>,
+    pub runtime: Option<String>,
+    pub last_active_at: Option<DateTime<Utc>>,
+    pub retired_at: DateTime<Utc>,
     pub link: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub card: Option<Card>,

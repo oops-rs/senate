@@ -87,6 +87,7 @@ pub(crate) enum CommitteeMsg {
     /// Record activity and re-evaluate the lease in seat-change order.
     Heartbeat(Heartbeat, RpcReplyPort<Result<(), LogError>>),
     IsUnseated(SenatorName, RpcReplyPort<bool>),
+    RetiredSeats(RpcReplyPort<Vec<(SenatorName, Seq)>>),
     /// Whether the committee is archived: the seq it was archived at.
     IsArchived(RpcReplyPort<Option<Seq>>),
     /// Archive or unarchive the committee (the Speaker in person, checked
@@ -796,6 +797,21 @@ impl Actor for CommitteeActor {
             }
             CommitteeMsg::IsUnseated(senator, reply) => {
                 reply_or_log(reply, state.seats.is_unseated(&senator));
+            }
+            CommitteeMsg::RetiredSeats(reply) => {
+                let mut seats: Vec<_> = state
+                    .seats
+                    .unseated()
+                    .filter_map(|senator| {
+                        state
+                            .seats
+                            .status(senator)
+                            .map(|(seq, _)| (senator.clone(), seq))
+                    })
+                    .collect();
+                seats.sort_by_key(|(_, seq)| std::cmp::Reverse(*seq));
+                seats.truncate(12);
+                reply_or_log(reply, seats);
             }
             CommitteeMsg::IsArchived(reply) => {
                 reply_or_log(reply, state.archive.archived());
