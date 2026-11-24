@@ -493,4 +493,23 @@ mod tests {
         }
         Ok(())
     }
+    #[tokio::test]
+    async fn http_cannot_issue_a_line_grant_even_when_bootstrap_has_an_issuer() -> TestResult {
+        let home = tempfile::tempdir()?;
+        let address = "127.0.0.1:42567".parse()?;
+        let (registry, _issuer) = Registry::open_for_app_confirmation(home.path(), address)?;
+        let bearer = issue(&registry, "https://scene.example")?;
+        let app = router(registry.clone()).layer(axum::Extension(ConnectInfo(address)));
+        let response = app
+            .oneshot(
+                request(STATE_PATH)
+                    .method(Method::POST)
+                    .header(header::AUTHORIZATION, format!("Bearer {}", bearer.token))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), 405);
+        assert_eq!(registry.list().len(), 1);
+        Ok(())
+    }
 }
