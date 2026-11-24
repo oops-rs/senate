@@ -15,7 +15,15 @@ use super::Cli;
 const GROUPS: &[(&str, &[&str])] = &[
     (
         "See what is happening",
-        &["status", "committees", "inbox", "thread", "memory", "stats"],
+        &[
+            "status",
+            "committees",
+            "inbox",
+            "thread",
+            "memory",
+            "stats",
+            "observe",
+        ],
     ),
     (
         "Speak as yourself",

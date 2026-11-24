@@ -15,6 +15,8 @@ mod cli_help;
 mod cli_history;
 #[path = "cli_legacy.rs"]
 mod cli_legacy;
+#[path = "cli_observe.rs"]
+mod cli_observe;
 #[path = "cli_secretary.rs"]
 mod cli_secretary;
 #[path = "cli_remote.rs"]
@@ -152,6 +154,8 @@ enum MemoryCmd {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Issue or manage read-only observation grants.
+    Observe(cli_observe::Observe),
     /// Show your recorded local Senate activity by day.
     Stats {
         /// Number of local calendar days ending today (1d to 366d).
@@ -3373,6 +3377,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         Cmd::Secretary(args) => cli_secretary::run(args),
         Cmd::Desk(args) => cli_desk::run(args),
         Cmd::Chat(args) => cli_chat::run(args),
+        Cmd::Observe(args) => cli_observe::run(args),
         Cmd::Setup { command } => run_setup(command, output),
         Cmd::Join {
             committee,

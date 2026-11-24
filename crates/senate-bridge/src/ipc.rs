@@ -985,6 +985,9 @@ pub enum Request {
     RemoteControl {
         command: crate::remote::Control,
     },
+    ObserveAdmin {
+        command: senate_observe::AdminRequest,
+    },
     Ping,
     Status,
     Profiles,

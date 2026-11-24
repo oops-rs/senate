@@ -713,14 +713,17 @@ pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
 
 pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_bridge(options, host_binary, false).await
+    start_bridge(options, host_binary, false, None).await
 }
 
 /// Start the bridge against the loopback Senate listener owned by this
 /// process. That listener supports HTTP/2 without negotiation.
-pub async fn start_in_process(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
+pub async fn start_in_process(
+    options: DaemonOptions,
+    observe: Option<Arc<senate_observe::Registry>>,
+) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_bridge(options, host_binary, true).await
+    start_bridge(options, host_binary, true, observe).await
 }
 
 /// Start the bridge with a companion Senate CLI at an explicit path.
@@ -728,13 +731,14 @@ pub async fn start_with_host_binary(
     options: DaemonOptions,
     host_binary: PathBuf,
 ) -> anyhow::Result<DaemonHandle> {
-    start_bridge(options, host_binary, false).await
+    start_bridge(options, host_binary, false, None).await
 }
 
 async fn start_bridge(
     options: DaemonOptions,
     host_binary: PathBuf,
     in_process: bool,
+    observe: Option<Arc<senate_observe::Registry>>,
 ) -> anyhow::Result<DaemonHandle> {
     let DaemonOptions {
         paths,
@@ -825,6 +829,7 @@ async fn start_bridge(
         }
     };
     let mut front = Front::new(shared.clone(), relay, watch, app_clients);
+    front.observe = observe;
     front.remote = remote.as_ref().map(|(service, _)| service.clone());
     let front = Arc::new(front);
 
@@ -3220,7 +3225,9 @@ impl Shared {
                 wrap(result.map_err(server_error))
             }
             Request::Status => wrap(self.on_status()),
-            Request::RemoteControl { .. } => Reply::err(IpcError::bad_request("local device management only")),
+            Request::RemoteControl { .. } | Request::ObserveAdmin { .. } => {
+                Reply::err(IpcError::bad_request("local person socket only"))
+            }
             Request::Profiles => wrap(Ok(&self.config.profiles)),
             Request::Sessions => wrap(self.on_sessions(false).await),
             Request::CommitteeThreads { committee, include_archived, limit, cursor } =>
@@ -6332,9 +6339,11 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
     use tokio::io::AsyncWriteExt;
 
     // Who is calling, from the socket: for the requests only a person makes.
-    let peer = stream
-        .peer_cred()
-        .ok()
+    let credentials = stream.peer_cred().ok();
+    let same_owner = credentials
+        .as_ref()
+        .is_some_and(|cred| cred.uid() == rustix::process::geteuid().as_raw());
+    let peer = credentials
         .and_then(|cred| cred.pid())
         .and_then(|pid| u32::try_from(pid).ok());
     let (read, mut write) = stream.into_split();
@@ -6480,6 +6489,12 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     // The person's own acts (see approval_guard::person_only):
                     // refused from inside a coding session's process tree. One
                     // boxed arm keeps this connection's future small.
+                    Ok(Request::ObserveAdmin { .. }) if !same_owner => (
+                        Reply::err(IpcError::bad_request(
+                            "Observe grants require the daemon's local user",
+                        )),
+                        false,
+                    ),
                     Ok(request) if let Some(guidance) = approval_guard::person_only(&request) => (
                         Box::pin(shared.guarded_dispatch(peer, guidance, request)).await,
                         false,

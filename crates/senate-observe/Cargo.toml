@@ -1,0 +1,31 @@
+[package]
+name = "senate-observe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Machine-owned read-only Senate observation service"
+
+[dependencies]
+axum = { workspace = true }
+chrono = { workspace = true }
+getrandom = "0.4"
+hex = { workspace = true }
+senate-core = { workspace = true }
+senate-observe-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+url = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+tower = { workspace = true }
+
+[lints]
+workspace = true

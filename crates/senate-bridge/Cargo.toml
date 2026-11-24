@@ -15,6 +15,7 @@ name = "senate"
 path = "src/main.rs"
 
 [dependencies]
+senate-observe.workspace = true
 senate-remote-admin.workspace = true
 senate-core = { workspace = true }
 senate-markdown = { workspace = true }

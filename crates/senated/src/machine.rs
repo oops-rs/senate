@@ -289,8 +289,20 @@ impl Machine {
             });
         bridge.validate().map_err(MachineError::Invalid)?;
         let pauser = Pauser::default();
+        // A separate grant store belongs to the carrier Senate. A broken
+        // observer store must not prevent deliberation on an existing Senate.
+        let observe = plans.first().and_then(|plan| {
+            match senate_observe::Registry::open(&plan.dir, plan.listen) {
+                Ok(registry) => Some(registry),
+                Err(error) => {
+                    tracing::warn!(%error, "the machine observation service is unavailable");
+                    None
+                }
+            }
+        });
         let side = Arc::new(DeveloperMachine {
             in_process: !plans.is_empty(),
+            observe: observe.clone(),
             pauser: pauser.clone(),
             options: DaemonOptions {
                 paths: paths.clone(),
@@ -345,6 +357,9 @@ impl Machine {
             }
             if carries {
                 assembly = assembly.component_arc(side.clone());
+                if let Some(registry) = &observe {
+                    assembly = assembly.observe(registry.clone());
+                }
             }
             let daemon = assembly
                 .start_with_listener(Some(p.listener))
@@ -790,6 +805,7 @@ pub fn nested_notice(agent: &str, dir: &Path, locale: Locale) -> String {
 /// assembly's supervision.
 struct DeveloperMachine {
     in_process: bool,
+    observe: Option<Arc<senate_observe::Registry>>,
     options: DaemonOptions,
     pauser: Pauser,
 }
@@ -803,7 +819,7 @@ impl Component for DeveloperMachine {
     async fn run(&self, ctx: ComponentContext) -> anyhow::Result<()> {
         let options = self.options.clone();
         let handle = if self.in_process {
-            daemon::start_in_process(options).await?
+            daemon::start_in_process(options, self.observe.clone()).await?
         } else {
             daemon::start(options).await?
         };
@@ -832,6 +848,110 @@ mod tests {
 
     fn quiet() -> Timing {
         Timing::default()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observer_credentials_are_only_accepted_on_the_machine_observe_routes()
+    -> anyhow::Result<()> {
+        use senate_bridge::ipc::{IpcClient, Request};
+        use senate_observe::{AdminRequest, CreateGrant, IssuedGrant, Scope};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir()?;
+        let paths = Paths::new(dir.path().join("senate"));
+        let config = toml::from_str("person = \"alice\"\n")?;
+        let hosted = toml::from_str("[local]\nname = \"observe-test\"\n")?;
+        let machine = Machine::start_with(paths.clone(), config, hosted, quiet()).await?;
+        let top = machine
+            .senate()
+            .ok_or_else(|| anyhow::anyhow!("missing hosted Senate"))?;
+        let wait = Duration::from_secs(5);
+        // Machine::start_with returns after the HTTP listeners are bound.
+        // The bridge is a supervised component and opens its socket later.
+        let socket = paths.socket();
+        let mut ipc = tokio::time::timeout(wait, async {
+            loop {
+                match IpcClient::connect(&socket, wait).await {
+                    Err(senate_bridge::ipc::ClientError::Connect { source, .. })
+                        if matches!(
+                            source.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    other => break other,
+                }
+            }
+        })
+        .await??;
+        let issued: IssuedGrant = ipc
+            .call(
+                &Request::ObserveAdmin {
+                    command: AdminRequest::Create {
+                        grant: CreateGrant {
+                            name: "test scene".into(),
+                            committees: None,
+                            all_committees: true,
+                            scope: Scope::Metadata,
+                            origins: vec![],
+                            topology: false,
+                            expires_in_days: None,
+                        },
+                    },
+                },
+                wait,
+            )
+            .await?;
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(wait)
+            .build()?;
+        let state = format!("{}/v1/observe/state", top.url);
+        assert_eq!(issued.url, top.url);
+        assert_eq!(
+            http.get(&state)
+                .bearer_auth(&issued.token)
+                .send()
+                .await?
+                .status(),
+            503
+        );
+        assert_eq!(
+            http.get(&state)
+                .bearer_auth(&top.token)
+                .send()
+                .await?
+                .status(),
+            401
+        );
+        assert_eq!(
+            http.get(format!("{}/v1/me", top.url))
+                .bearer_auth(&issued.token)
+                .send()
+                .await?
+                .status(),
+            401
+        );
+        ipc.call::<()>(
+            &Request::ObserveAdmin {
+                command: AdminRequest::Revoke {
+                    id: issued.grant.id,
+                },
+            },
+            wait,
+        )
+        .await?;
+        assert_eq!(
+            http.get(&state)
+                .bearer_auth(&issued.token)
+                .send()
+                .await?
+                .status(),
+            401
+        );
+        machine.shutdown().await;
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

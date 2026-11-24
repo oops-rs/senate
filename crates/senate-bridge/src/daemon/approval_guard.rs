@@ -52,6 +52,9 @@ pub(super) fn answers_a_prompt(request: &Request) -> bool {
 /// for any other request.
 pub(super) fn person_only(request: &Request) -> Option<&'static str> {
     Some(match request {
+        Request::ObserveAdmin { .. } => {
+            "Manage Observe grants from your own terminal or the Senate app"
+        }
         Request::RebindHost { .. } => "Run `senate session rebind` from your own terminal",
         Request::Timeline { .. }
         | Request::SessionHistory { .. }
