@@ -4,9 +4,11 @@
 mod event;
 pub mod link;
 mod state;
+mod tools;
 
 pub use event::*;
 pub use state::*;
+pub use tools::*;
 
 use std::fmt;
 use std::num::NonZeroU64;

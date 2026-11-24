@@ -101,6 +101,10 @@ pub enum Event {
     ViewerDetached(SenatorRef),
     #[serde(rename = "link.changed")]
     LinkChanged(LinkChanged),
+    #[serde(rename = "tool.started")]
+    ToolStarted(crate::ToolActivity),
+    #[serde(rename = "tool.ended")]
+    ToolEnded(crate::ToolActivity),
     #[serde(rename = "card.changed")]
     CardChanged(CardChanged),
 }

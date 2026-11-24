@@ -351,6 +351,38 @@
       "type": "object",
       "properties": {
         "data": {
+          "$ref": "#/$defs/ToolActivity"
+        },
+        "kind": {
+          "type": "string",
+          "const": "tool.started"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/ToolActivity"
+        },
+        "kind": {
+          "type": "string",
+          "const": "tool.ended"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
           "$ref": "#/$defs/CardChanged"
         },
         "kind": {
@@ -1508,6 +1540,48 @@
         "previous_state",
         "state",
         "waits_on"
+      ]
+    },
+    "ToolActivity": {
+      "type": "object",
+      "properties": {
+        "call_id": {
+          "type": "string"
+        },
+        "senator_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "tool_kind": {
+          "$ref": "#/$defs/ToolKind"
+        }
+      },
+      "required": [
+        "senator_id",
+        "session_id",
+        "call_id",
+        "tool_kind"
+      ]
+    },
+    "ToolKind": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "command",
+            "edit",
+            "read",
+            "search",
+            "web",
+            "other"
+          ]
+        },
+        {
+          "type": "string",
+          "pattern": "^mcp:[a-z0-9][a-z0-9-]{0,62}$"
+        }
       ]
     },
     "Truncation": {

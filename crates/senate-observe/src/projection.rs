@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -62,6 +63,8 @@ pub trait SenateSource: Send + Sync {
         Ok(None)
     }
 
+    fn idle(&self) {}
+
     async fn preview(&self, _committee: &CommitteeId, _seq: Seq) -> Option<Preview> {
         None
     }
@@ -99,6 +102,20 @@ pub(crate) struct Projections {
     state_budget: Arc<Semaphore>,
     shutdown: watch::Sender<bool>,
     notices: broadcast::Sender<LocalNotice>,
+    demand_epoch: AtomicU64,
+}
+
+pub struct ToolDemand {
+    pub epoch: u64,
+    committees: Option<BTreeSet<CommitteeId>>,
+}
+
+impl ToolDemand {
+    pub fn includes(&self, id: &CommitteeId) -> bool {
+        self.committees
+            .as_ref()
+            .is_none_or(|committees| committees.contains(id))
+    }
 }
 
 struct View {
@@ -108,6 +125,7 @@ struct View {
     wake: Notify,
     stream_limit: Arc<Semaphore>,
     lines: Option<LinePolicy>,
+    committees: Option<BTreeSet<CommitteeId>>,
 }
 
 struct Activity {
@@ -132,11 +150,34 @@ impl Projections {
             state_budget: Arc::new(Semaphore::new(MAX_STATE_TOTAL as usize)),
             shutdown: watch::channel(false).0,
             notices: broadcast::channel(256).0,
+            demand_epoch: AtomicU64::new(0),
         })
     }
 
     pub(crate) fn set_source(&self, source: Arc<dyn SenateSource>) {
         *lock(&self.source) = Some(source);
+    }
+
+    pub(crate) fn tool_demand(&self) -> Option<ToolDemand> {
+        let views = lock(&self.views);
+        if views.is_empty() {
+            return None;
+        }
+        let mut committees = Some(BTreeSet::new());
+        for view in views.values() {
+            let Some(allow) = committees.as_mut() else {
+                break;
+            };
+            if let Some(view_committees) = &view.committees {
+                allow.extend(view_committees.iter().cloned());
+            } else {
+                committees = None;
+            }
+        }
+        Some(ToolDemand {
+            epoch: self.demand_epoch.load(Ordering::Relaxed),
+            committees,
+        })
     }
 
     pub(crate) fn source(&self) -> Option<Arc<dyn SenateSource>> {
@@ -195,10 +236,14 @@ impl Projections {
                     wake: Notify::new(),
                     stream_limit: Arc::new(Semaphore::new(2)),
                     lines: grant.info.lines,
+                    committees: grant.info.committees.clone(),
                 });
                 let worker = self.clone();
                 let view_for_task = view.clone();
                 let grant_for_task = grant.clone();
+                if views.is_empty() {
+                    self.demand_epoch.fetch_add(1, Ordering::Relaxed);
+                }
                 views.insert(grant.info.id.clone(), view.clone());
                 tokio::spawn(async move {
                     let result = worker.run(&view_for_task, source, &grant_for_task).await;
@@ -233,6 +278,11 @@ impl Projections {
             .is_some_and(|current| Arc::ptr_eq(current, view))
         {
             views.remove(grant_id);
+        }
+        if views.is_empty()
+            && let Some(source) = self.source()
+        {
+            source.idle();
         }
     }
 

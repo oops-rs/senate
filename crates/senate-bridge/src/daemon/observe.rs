@@ -10,9 +10,13 @@ use crate::ipc::UplinkStatus;
 
 pub(super) struct Source {
     pub(super) shared: Weak<Shared>,
+    pub(super) tools: super::observe_tools::Tools,
 }
 
 impl MachineSource for Source {
+    fn idle(&self) {
+        self.tools.clear();
+    }
     fn read(&self) -> Result<MachineFacts, ProjectionError> {
         let shared = self.shared.upgrade().ok_or(ProjectionError::NotReady)?;
         let paths = Paths::new(&shared.home);
@@ -27,6 +31,9 @@ impl MachineSource for Source {
             .filter(|s| s.is_live() && !shared.hosts.unpublished(&s.session_id))
             .cloned()
             .collect();
+        if let Some(registry) = &shared.observe {
+            self.tools.poll(&shared, registry, &active);
+        }
         let host_facts =
             crate::host::status(&paths, &shared.store, &active).map_err(unavailable)?;
         let approvals = approval_facts(&shared, &active, &host_facts)?;

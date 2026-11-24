@@ -26,6 +26,14 @@ pub enum LocalNotice {
         committee: CommitteeId,
         seq: Seq,
     },
+    Tool {
+        committee: CommitteeId,
+        senator: SenatorName,
+        session: String,
+        call: String,
+        kind: String,
+        started: bool,
+    },
     Card {
         key: CardKey,
         revision: String,

@@ -9,6 +9,7 @@
 pub(crate) mod agy;
 mod claude;
 mod codex;
+pub(crate) mod observe_tools;
 mod parse;
 mod titles;
 

@@ -178,6 +178,7 @@ mod hosted_approvals;
 mod hosts;
 mod model_catalog;
 mod observe;
+mod observe_tools;
 mod pause;
 #[path = "daemon/stats.rs"]
 mod personal_stats;
@@ -835,6 +836,7 @@ async fn start_bridge(
     if let Some(registry) = &observe {
         registry.attach_machine(Arc::new(observe::Source {
             shared: Arc::downgrade(&shared),
+            tools: observe_tools::Tools::default(),
         }));
     }
     front.observe = observe;

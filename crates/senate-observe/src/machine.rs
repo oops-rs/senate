@@ -17,6 +17,7 @@ use crate::{GrantInfo, ProjectionError, Registry};
 /// committees and seats actually exist in a grant.
 pub trait MachineSource: Send + Sync {
     fn read(&self) -> Result<MachineFacts, ProjectionError>;
+    fn idle(&self) {}
 }
 
 pub struct MachineFacts {

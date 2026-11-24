@@ -21,6 +21,6 @@ pub use previews::{LinePolicy, Preview, first_line};
 
 pub use journal::Hint;
 pub use machine::{LocalApproval, LocalHistory, LocalSeat, MachineFacts, MachineSource};
-pub use projection::{Capture, ProjectionError, SenateSource};
+pub use projection::{Capture, ProjectionError, SenateSource, ToolDemand};
 
 pub use notices::LocalNotice;

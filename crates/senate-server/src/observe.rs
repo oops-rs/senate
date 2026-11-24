@@ -64,6 +64,12 @@ impl SenateSource for Source {
         )
     }
 
+    fn idle(&self) {
+        if let Some(registry) = self.registry.upgrade() {
+            registry.release_machine_observation();
+        }
+    }
+
     async fn capture(&self, grant: &GrantInfo) -> Result<Capture, ProjectionError> {
         let hub = self.hub()?;
         let registry = self.registry.upgrade().ok_or(ProjectionError::NotReady)?;
@@ -207,6 +213,9 @@ impl SenateSource for Source {
         snapshot.capabilities.extend([
             "cards".into(),
             "retired_senators".into(),
+            "tool_lifecycle".into(),
+            "tool_lifecycle:claude".into(),
+            "tool_lifecycle:codex".into(),
             "approval_metadata".into(),
             "message_routing".into(),
             "hosted_viewers".into(),
@@ -426,6 +435,41 @@ impl SenateSource for Source {
                         phase,
                         reason,
                     }),
+                }))
+            }
+            LocalNotice::Tool {
+                committee,
+                senator,
+                session,
+                call,
+                kind,
+                started,
+            } => {
+                if !visible_seat(state, &committee, &senator) {
+                    return Ok(None);
+                }
+                let tool_kind = kind.parse().map_err(|_| ProjectionError::NotReady)?;
+                let data = public::ToolActivity {
+                    senator_id: senator.to_string(),
+                    session_id: registry
+                        .tool_identity(grant, &session)
+                        .map_err(|_| ProjectionError::NotReady)?,
+                    call_id: registry
+                        .tool_identity(grant, &call)
+                        .map_err(|_| ProjectionError::NotReady)?,
+                    tool_kind,
+                };
+                Ok(Some(Hint {
+                    committee_id: Some(committee.to_string()),
+                    link: link(
+                        &state.senate.id,
+                        Target::Senator(format!("{committee}::{senator}")),
+                    ),
+                    event: if started {
+                        public::Event::ToolStarted(data)
+                    } else {
+                        public::Event::ToolEnded(data)
+                    },
                 }))
             }
             LocalNotice::Card { key, revision } => Ok(card_hint(state, key, revision)),

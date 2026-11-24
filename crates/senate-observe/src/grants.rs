@@ -285,6 +285,20 @@ impl Registry {
         crate::machine::merge(self, grant, snapshot)
     }
 
+    pub fn tool_demand(&self) -> Option<crate::ToolDemand> {
+        self.projections.tool_demand()
+    }
+
+    pub fn release_machine_observation(&self) {
+        if let Some(machine) = lock(&self.machine).as_ref() {
+            machine.idle();
+        }
+    }
+
+    pub fn tool_identity(&self, grant: &GrantInfo, id: &str) -> Result<String, GrantError> {
+        self.scoped_id(b"tool", format!("{}:{id}", grant.id).as_bytes())
+    }
+
     pub fn is_watched(&self) -> bool {
         self.projections.is_watched()
     }
