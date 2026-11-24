@@ -3137,6 +3137,8 @@ impl Shared {
             Request::RemoteControl { .. } => Reply::err(IpcError::bad_request("local device management only")),
             Request::Profiles => wrap(Ok(&self.config.profiles)),
             Request::Sessions => wrap(self.on_sessions(false).await),
+            Request::SessionHistory { .. } | Request::SessionSearch { .. } | Request::SessionForget { .. } =>
+                Reply::err(IpcError::bad_request("session history is not implemented in this build")),
             Request::Timeline { session_id, direction, cursor, limit } =>
                 wrap(self.on_timeline(session_id, direction, cursor, limit).await),
             Request::PruneHosts => wrap(self.on_prune_hosts().await),
