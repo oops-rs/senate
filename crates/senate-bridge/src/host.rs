@@ -1246,7 +1246,7 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
         attachment_size(&mut stream).await
     })
     .await??;
-    let mut output = tokio::time::timeout(Duration::from_secs(3), async {
+    let (mut output, initial_screen) = tokio::time::timeout(Duration::from_secs(3), async {
         tty.resize(rows, cols).await?;
         // Subscribe alongside the snapshot and the modes, between complete
         // output batches and their virtual replies.
@@ -1258,10 +1258,13 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
             let keyboard = emulation.keyboard_preamble();
             (mirror, output, modes, keyboard)
         };
-        stream.write_all(&modes).await?;
-        stream.write_all(&mirror.attach_snapshot()).await?;
-        stream.write_all(&keyboard).await?;
-        Ok::<_, anyhow::Error>(output)
+        let initial_screen = async {
+            stream.write_all(&modes).await?;
+            stream.write_all(&mirror.attach_snapshot()).await?;
+            stream.write_all(&keyboard).await
+        }
+        .await;
+        Ok::<_, anyhow::Error>((output, initial_screen))
     })
     .await??;
     let (mut input, mut screen) = stream.into_split();
@@ -1367,32 +1370,33 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
             }
         }
     };
-    let result = {
+    let result = 'attachment: {
         let mut from_terminal = std::pin::pin!(from_terminal);
-        tokio::select! {
-            biased;
-            result = from_terminal.as_mut() => result,
-            result = to_terminal => {
-                let result: anyhow::Result<()> = result;
-                // A viewer can close just after writing its last KEYS.
-                // The failed redraw can wake before the queued input does.
-                // Finish reading complete frames before recording detach.
-                let disconnected = result.as_ref().err().is_some_and(|error| {
-                    error.downcast_ref::<io::Error>().is_some_and(|error| {
-                        matches!(
-                            error.kind(),
-                            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
-                        )
-                    })
-                });
-                if disconnected {
-                    tokio::time::timeout(Duration::from_secs(1), from_terminal)
-                        .await
-                        .unwrap_or(result)
-                } else {
-                    result
-                }
-            }
+        let result: anyhow::Result<()> = match initial_screen {
+            Ok(()) => tokio::select! {
+                biased;
+                result = from_terminal.as_mut() => break 'attachment result,
+                result = to_terminal => result,
+            },
+            Err(error) => Err(error.into()),
+        };
+        // A viewer can close just after writing its last KEYS. A write can
+        // fail during the initial replay or while forwarding live output.
+        // Read complete queued frames before recording detach in either case.
+        let disconnected = result.as_ref().err().is_some_and(|error| {
+            error.downcast_ref::<io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                )
+            })
+        });
+        if disconnected {
+            tokio::time::timeout(Duration::from_secs(1), from_terminal)
+                .await
+                .unwrap_or(result)
+        } else {
+            result
         }
     };
     if let Some(at) = classify.finish() {
@@ -1667,6 +1671,37 @@ mod tests {
         relay.await?;
         assert!(Viewer::lock(&viewer).draft.pending());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn losing_the_initial_replay_preserves_queued_keys() -> anyhow::Result<()> {
+        let (pty, _pts) = pty_process::open()?;
+        let (_, write) = pty.into_split();
+        let tty = Tty::new(write, Scheme::Light, 3, 40);
+        let viewer = Mutex::new(Viewer {
+            path: PathBuf::new(),
+            activity: ViewerActivity::default(),
+            dirty: false,
+            draft: input::Draft::default(),
+        });
+        let (host, mut client) = UnixStream::pair()?;
+        // Prevent the initial replay from starting until the viewer has
+        // sent a complete key frame and disconnected.
+        let replay_gate = tty.output_gate.lock().await;
+        let detach = async {
+            begin_viewer(&mut client, 3, 40).await;
+            client.write_all(&[KEYS, 0, 1, b'x']).await?;
+            drop(client);
+            drop(replay_gate);
+            Ok::<_, anyhow::Error>(())
+        };
+        let (relay, detach) = tokio::join!(relay(host, &tty, &viewer), detach);
+        detach?;
+        assert!(
+            Viewer::lock(&viewer).draft.pending(),
+            "initial replay failure lost the queued key: {relay:?}"
+        );
+        relay
     }
 
     #[tokio::test]
