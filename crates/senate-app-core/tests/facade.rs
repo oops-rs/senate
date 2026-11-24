@@ -830,3 +830,50 @@ async fn archived_committees_are_listed_and_unarchived_through_the_facade() {
         Err(senate_app_core::ffi::CoreError::Invalid { .. })
     ));
 }
+
+#[tokio::test]
+async fn committee_activity_records_are_exposed_through_the_facade() {
+    use senate_app_core::activity::{ActivityBatch, ActivityListener};
+    struct Activity(tokio::sync::mpsc::UnboundedSender<ActivityBatch>);
+    impl ActivityListener for Activity {
+        fn on_batch(&self, batch: ActivityBatch) {
+            let _ = self.0.send(batch);
+        }
+        fn on_end(&self, error: Option<String>) {
+            assert!(error.is_none(), "{error:?}");
+        }
+    }
+
+    let (dir, socket, world) = setup();
+    let _daemon = FakeDaemon::start(&socket, world);
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en".into())).unwrap();
+    core.start(Arc::new(Listener::default())).unwrap();
+    let page = core
+        .committee_threads("refund-v2".into(), true, Some(1), None)
+        .await
+        .unwrap();
+    assert_eq!(page.rows[0].other_committee.as_deref(), Some("payments"));
+    assert_eq!(page.rows[0].last_author.as_deref(), Some("senator::tester"));
+    assert_eq!(page.next_cursor.as_deref(), Some("430"));
+
+    let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+    let id = core
+        .watch_activity(
+            Some(vec!["refund-v2".into()]),
+            [("refund-v2".into(), 501)].into_iter().collect(),
+            Arc::new(Activity(send)),
+        )
+        .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(5), receive.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.cursors["refund-v2"], 501);
+    let update = tokio::time::timeout(Duration::from_secs(5), receive.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(update.events[0].seq, 502);
+    assert_eq!(update.events[0].thread, Some(502));
+    core.stop_activity(id);
+}

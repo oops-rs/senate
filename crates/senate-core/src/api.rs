@@ -501,6 +501,14 @@ pub struct PresencePage {
 /// those addressed to that agent.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ThreadsQuery {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_discussions: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<Seq>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<StatusState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

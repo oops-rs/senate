@@ -552,6 +552,10 @@ impl Shared {
         }
         let event = auth.note(committee.clone(), body);
         let mut unconfirmed = event.clone();
+        let event = event.with_meta(
+            super::activity::LIFECYCLE,
+            serde_json::json!([if paused { "paused" } else { "stopped" }, primary]),
+        );
         let verb = if force {
             self.locale.pick("强制停止", "forced stop")
         } else {
@@ -603,6 +607,7 @@ impl Shared {
         let target = Address::senator(&reply.senator).in_text();
         let actor = auth.actor();
         let runtime = Runtime::from(runtime).as_str();
+        let ready = matches!(phase, LaunchAudit::Ready);
         let (body, timeout_message) = match phase {
             LaunchAudit::Ready => {
                 let body = match self.locale {
@@ -637,7 +642,13 @@ impl Shared {
                 (body, "the launch rollback audit was not acknowledged")
             }
         };
-        let event = auth.note(committee.clone(), body);
+        let mut event = auth.note(committee.clone(), body);
+        if ready {
+            event = event.with_meta(
+                super::activity::LIFECYCLE,
+                serde_json::json!(["started", reply.senator]),
+            );
+        }
         tokio::time::timeout(AUDIT_TIMEOUT, self.post(event))
             .await
             .map_err(|_| IpcError::new(codes::SERVER, timeout_message))??;

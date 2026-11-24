@@ -117,6 +117,7 @@ pub struct ServerHub {
     next_conn: AtomicU64,
     briefs: Caches<BriefBuilder>,
     tasks: Caches<TaskBoard>,
+    discussions: Caches<DiscussionBoard>,
     checkpoints: Caches<Checkpoints>,
     dockets: Caches<SpeakerDocket>,
     chairs: Caches<ChairView>,
@@ -153,6 +154,20 @@ impl Fold for TaskBoard {
     }
     fn observe(&mut self, event: &Event) {
         TaskBoard::observe(self, event);
+    }
+}
+
+struct DiscussionBoard(TaskBoard);
+
+impl Fold for DiscussionBoard {
+    fn fresh(_: &CommitteeId, people: &People) -> Self {
+        Self(TaskBoard::with_discussions(people.clone()))
+    }
+    fn head(&self) -> Seq {
+        self.0.head()
+    }
+    fn observe(&mut self, event: &Event) {
+        self.0.observe(event);
     }
 }
 
@@ -290,6 +305,7 @@ impl ServerHub {
             next_conn: AtomicU64::new(1),
             briefs: Mutex::default(),
             tasks: Mutex::default(),
+            discussions: Mutex::default(),
             checkpoints: Mutex::default(),
             dockets: Mutex::default(),
             chairs: Mutex::default(),
@@ -1573,6 +1589,24 @@ impl ServerHub {
             .last_heartbeat(committee, agent)
             .await
             .map_err(log_error)
+    }
+    pub(crate) async fn committee_threads(
+        &self,
+        committee: &CommitteeId,
+        query: &senate_core::api::ThreadsQuery,
+    ) -> Result<senate_core::api::ThreadsPage, HubError> {
+        let cached = self.folded(&self.discussions, committee).await?;
+        let board = &cached.fold.0;
+        let threads = board.committee_threads(
+            query.state,
+            query.include_archived,
+            query.before,
+            query.limit.unwrap_or(41).clamp(1, 101),
+        );
+        Ok(senate_core::api::ThreadsPage {
+            threads: threads.into_iter().cloned().collect(),
+            head: board.head(),
+        })
     }
 }
 

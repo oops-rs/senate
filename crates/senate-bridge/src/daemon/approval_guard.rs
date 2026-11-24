@@ -59,6 +59,9 @@ pub(super) fn person_only(request: &Request) -> Option<&'static str> {
         | Request::SessionForget { .. } => {
             "Read session transcripts from your own terminal or the Senate app"
         }
+        Request::CommitteeThreads { .. } => {
+            "Read committee threads from your own terminal or the Senate app"
+        }
         // As the person (no session). With a session it is the Speaker's
         // office's, checked by the front and the server.
         Request::SetChair { session, .. }

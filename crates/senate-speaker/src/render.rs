@@ -3198,6 +3198,7 @@ mod tests {
             since: Seq(118),
             since_ts: Utc::now(),
             updated: Seq(119),
+            activity: None,
             steps: vec![Step {
                 id: "1".into(),
                 label: "read the log".into(),
