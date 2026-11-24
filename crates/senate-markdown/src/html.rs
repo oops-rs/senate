@@ -17,7 +17,7 @@ fn write_block(block: &Block, layout: &mut Layout, tight: bool) {
             if !tight {
                 out.push_str("<p>");
             }
-            inlines(content, out);
+            inlines(content, "<br>\n", out);
             if !tight {
                 out.push_str("</p>");
             }
@@ -26,7 +26,7 @@ fn write_block(block: &Block, layout: &mut Layout, tight: bool) {
         Block::Heading { level, content } => {
             let level = (*level).clamp(1, 6);
             let _ = write!(out, "<h{level}>");
-            inlines(content, out);
+            inlines(content, "\n", out);
             let _ = writeln!(out, "</h{level}>");
         }
         Block::List {
@@ -106,13 +106,13 @@ fn table_row(row: &[Vec<Inline>], alignment: &[Alignment], tag: &str, out: &mut 
             _ => "",
         };
         let _ = write!(out, "<{tag}{class}>");
-        inlines(content, out);
+        inlines(content, "\n", out);
         let _ = write!(out, "</{tag}>");
     }
     out.push_str("</tr>\n");
 }
 
-fn inlines(items: &[Inline], out: &mut String) {
+fn inlines(items: &[Inline], soft_break: &str, out: &mut String) {
     for item in items {
         match item {
             Inline::Text(text) => escape(text, out),
@@ -121,26 +121,26 @@ fn inlines(items: &[Inline], out: &mut String) {
                 escape(text, out);
                 out.push_str("</code>");
             }
-            Inline::Strong(content) => span("strong", content, out),
-            Inline::Emphasis(content) => span("em", content, out),
-            Inline::Strikethrough(content) => span("del", content, out),
-            Inline::SoftBreak => out.push('\n'),
+            Inline::Strong(content) => span("strong", content, soft_break, out),
+            Inline::Emphasis(content) => span("em", content, soft_break, out),
+            Inline::Strikethrough(content) => span("del", content, soft_break, out),
+            Inline::SoftBreak => out.push_str(soft_break),
             Inline::HardBreak => out.push_str("<br>\n"),
             Inline::Link { url, content } if safe_url(url) => {
                 out.push_str("<a href=\"");
                 escape(url, out);
                 out.push_str("\">");
-                inlines(content, out);
+                inlines(content, soft_break, out);
                 out.push_str("</a>");
             }
-            Inline::Link { content, .. } => inlines(content, out),
+            Inline::Link { content, .. } => inlines(content, soft_break, out),
         }
     }
 }
 
-fn span(tag: &str, content: &[Inline], out: &mut String) {
+fn span(tag: &str, content: &[Inline], soft_break: &str, out: &mut String) {
     let _ = write!(out, "<{tag}>");
-    inlines(content, out);
+    inlines(content, soft_break, out);
     let _ = write!(out, "</{tag}>");
 }
 

@@ -429,13 +429,93 @@ fn terminal_keeps_hard_breaks_marks_headings_and_aligns_task_children() {
     let plain = Terminal::new(80, Color::None);
     let unicode = rendered(text, Format::Terminal, plain);
     assert!(unicode.contains("# One\n## Two\n### Three\n#### Four\n"));
-    assert!(unicode.contains("hard\nnext soft\n"));
+    assert!(unicode.contains("hard\nnext\nsoft\n"));
     assert!(unicode.contains("☑ Parent\n  ☐ Child\n"));
     let ascii = rendered(text, Format::Terminal, plain.with_utf8(false));
     assert!(ascii.contains("[x] Parent\n    [ ] Child\n"));
     let colored = rendered(text, Format::Terminal, Terminal::new(80, Color::Ansi16));
     assert!(colored.contains("\x1b[1;36mOne\x1b[0m"));
     assert!(!colored.contains("# One"));
+}
+
+#[test]
+fn paragraph_quote_and_list_soft_breaks_render_in_both_formats() {
+    let terminal = Terminal::new(80, Color::None);
+    for (source, html, plain) in [
+        ("one\ntwo", "<p>one<br>\ntwo</p>", "one\ntwo\n"),
+        (
+            "> one\n> two\n> three",
+            "<blockquote>\n<p>one<br>\ntwo<br>\nthree</p>",
+            "│ one\n│ two\n│ three\n",
+        ),
+        (
+            "> > one\n> > two",
+            "<blockquote>\n<blockquote>\n<p>one<br>\ntwo</p>",
+            "│ │ one\n│ │ two\n",
+        ),
+        (
+            "- one\n  two\n- three",
+            "<li>one<br>\ntwo\n</li>",
+            "• one\n  two\n• three\n",
+        ),
+        (
+            "- one\n  two\n\n- three",
+            "<li><p>one<br>\ntwo</p>",
+            "• one\n  two\n• three\n",
+        ),
+    ] {
+        assert!(
+            rendered(source, Format::Html, terminal).contains(html),
+            "{source:?}"
+        );
+        assert_eq!(rendered(source, Format::Terminal, terminal), plain);
+    }
+    let narrow = Terminal::new(8, Color::None);
+    assert_eq!(
+        rendered("> one two\n> three four", Format::Terminal, narrow),
+        "│ one\n│ two\n│ three\n│ four\n"
+    );
+    assert_eq!(
+        rendered("- one two\n  three four", Format::Terminal, narrow),
+        "• one\n  two\n  three\n  four\n"
+    );
+}
+
+#[test]
+fn multiline_inlines_keep_their_surrounding_markup_and_context() {
+    let terminal = Terminal::new(80, Color::None);
+    let source = "Line one\nline two\n========\n\n[read\nmore](https://example.org) and `line\nwrapped`\n\n| Cell |\n| --- |\n| one two |";
+    let html = rendered(source, Format::Html, terminal);
+    assert!(html.contains("<h1>Line one\nline two</h1>"));
+    assert!(html.contains(
+        "<a href=\"https://example.org\">read<br>\nmore</a> and <code>line wrapped</code>"
+    ));
+    assert!(html.contains("<td>one two</td>"));
+    let plain = rendered(source, Format::Terminal, terminal);
+    assert!(plain.contains("# Line one line two\n"));
+    assert!(plain.contains("read\nmore (https://example.org) and line wrapped\n"));
+    assert!(plain.contains("│ one two │"));
+}
+
+#[test]
+fn streaming_a_partial_line_only_replaces_the_changed_block() {
+    let terminal = Terminal::new(80, Color::None);
+    let mut cache = RenderCache::new(terminal);
+    let mut doc = Document::parse("Top\nline\n\n> one\n> t");
+    both(&mut cache, &doc);
+    let earlier = doc.blocks()[0].clone();
+    let tail = doc.blocks()[1].id;
+    let diff = doc.update("Top\nline\n\n> one\n> two");
+    assert_eq!(diff.unchanged, 1);
+    assert_eq!(diff.replaced, [tail]);
+    assert_eq!(doc.blocks()[0], earlier);
+    assert!(Arc::ptr_eq(&doc.blocks()[0].block, &earlier.block));
+    apply(&mut cache, &doc, &diff);
+    assert_eq!(
+        render(&doc, &cache, Format::Terminal),
+        "Top\nline\n│ one\n│ two\n"
+    );
+    assert!(render(&doc, &cache, Format::Html).contains("<p>one<br>\ntwo</p>"));
 }
 
 #[test]
