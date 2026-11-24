@@ -12,13 +12,18 @@ enum TownSnapshot {
 
     static func run(_ store: CoreStore, shot: (String) async -> Void) async {
         let large = ProcessInfo.processInfo.environment[TownScript.env] == "large"
-        store.place = .town
+        store.select(.town)
         await shot("town-quiet")
         // SENATE_APP_TOWN_HOLD=<s>: stay on the quiet town that long (to
         // measure what a still town costs), then go on.
         if let hold = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_HOLD"].flatMap(Double.init) {
             print("snapshot: holding the quiet town \(hold) s")
             try? await Task.sleep(for: .seconds(hold))
+        }
+        if TownScript.requested == nil {
+            // The live feed: the fake daemon's trickle (an event every
+            // 1.2 s after the watch opens), pictured as it plays.
+            for i in 1...4 { await shot("town-live-\(i)") }
         }
         if TownScript.requested != nil {
             NotificationCenter.default.post(name: TownModel.playScript, object: large ? "large" : nil)

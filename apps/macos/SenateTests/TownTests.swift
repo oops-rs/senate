@@ -93,16 +93,12 @@ import Testing
 
     // MARK: Events from two readings
 
-    private func input(_ senators: [TownSenator], threads: [TownThread] = []) -> TownInput {
-        TownInput(state: TownState(committees: [TownCommittee(name: "c", senators: senators)]), threads: threads)
-    }
-
-    private func thread(_ updated: UInt64, from: String = "a", to: String? = "b") -> TownThread {
-        TownThread(ref: ref(), updated: updated, speaker: from, listener: to, line: "hello there")
+    private func input(_ senators: [TownSenator]) -> TownState {
+        TownState(committees: [TownCommittee(name: "c", senators: senators)])
     }
 
     @Test func theFirstReadingIsQuiet() {
-        #expect(TownDiff.events(from: nil, to: input([senator("a")], threads: [thread(5)])).isEmpty)
+        #expect(TownDiff.events(from: nil, to: input([senator("a"), senator("b", .working)])).isEmpty)
     }
 
     @Test func moodsArrivalsAndDepartures() {
@@ -113,19 +109,57 @@ import Testing
         ])
     }
 
-    @Test func aThreadThatGrewIsAMessage() {
-        let people = [senator("a"), senator("b")]
-        let old = input(people, threads: [thread(5)])
-        #expect(TownDiff.events(from: old, to: input(people, threads: [thread(5)])).isEmpty)
-        #expect(TownDiff.events(from: old, to: input(people, threads: [thread(6)])) == [
-            .message(from: "a", to: "b", thread: ref(), line: "hello there"),
-        ])
-        // A new thread is a message too; one to oneself is not.
-        let fresh = TownThread(ref: ref("c", 9), updated: 9, speaker: "b", listener: "a", line: "x")
-        let selfish = TownThread(ref: ref("c", 10), updated: 10, speaker: "a", listener: "a", line: "y")
-        #expect(TownDiff.events(from: old, to: input(people, threads: [thread(5), fresh, selfish])) == [
-            .message(from: "b", to: "a", thread: ref("c", 9), line: "x"),
-        ])
+    @Test func aSessionStoppingLeavesTownAndStartingComesBack() {
+        let old = input([senator("a", .working), senator("b", .stopped)])
+        let new = input([senator("a", .stopped), senator("b", .idle), senator("c", .stopped)])
+        // A new senator already stopped does not arrive.
+        #expect(TownDiff.events(from: old, to: new) == [.left(senator: "a"), .arrived(senator: "b")])
+    }
+
+    private func entry(
+        _ kind: String, from: String = "/s::c::senator::a", to: [String] = ["/s::c::senator::b"],
+        behalf: String? = nil, thread: UInt64? = 7, seq: UInt64 = 9, state: String? = nil
+    ) -> TownActivityEntry {
+        TownActivityEntry(committee: "c", seq: seq, kind: kind, from: from, to: to, onBehalfOf: behalf,
+                          thread: thread, line: "hello there", state: state)
+    }
+
+    @Test func whatIsSaidIsAVisitFromItsRealAuthor() {
+        let t = TownThreadRef(committee: "c", root: 7, title: "hello there")
+        #expect(TownActivity.events([entry("answer")]) == [.message(from: "a", to: "b", thread: t, line: "hello there")])
+        // The Speaker speaking for a senator: the senator walks.
+        #expect(TownActivity.events([entry("question", from: "speaker", behalf: "senator::z")])
+            == [.message(from: "z", to: "b", thread: t, line: "hello there")])
+        // A question opens its own thread; nobody addressed goes to the house.
+        let own = TownThreadRef(committee: "c", root: 9, title: "hello there")
+        #expect(TownActivity.events([entry("question", to: [], thread: nil)])
+            == [.message(from: "a", to: nil, thread: own, line: "hello there")])
+    }
+
+    @Test func aSettledStatusIsACheckAndOthersAreNothing() {
+        let t = TownThreadRef(committee: "c", root: 7, title: "hello there")
+        #expect(TownActivity.events([entry("status", state: "active")]) == [.answered(thread: t, a: "a", b: "b")])
+        #expect(TownActivity.events([entry("status", state: "processing")]).isEmpty)
+        // Comings and goings are the roster's, not repeated from here.
+        #expect(TownActivity.events([entry("joined", state: "unknown"), entry("left", state: "away")]).isEmpty)
+        // To oneself is not a visit.
+        #expect(TownActivity.events([entry("note", to: ["senator::a"])]).isEmpty)
+    }
+
+    @Test func entriesAreActedInLogOrder() {
+        let late = entry("note", seq: 20)
+        let early = entry("answer", from: "senator::b", to: ["senator::a"], seq: 10)
+        let events = TownActivity.events([late, early])
+        guard case let .message(first, _, _, _) = events.first else { Issue.record("no visit"); return }
+        #expect(first == "b")
+    }
+
+    @Test func aRemoteMembersStateIsItsMood() {
+        #expect(TownMood(session: "working") == .working)
+        #expect(TownMood(session: "paused") == .paused)
+        #expect(TownMood(session: "away") == .stopped)
+        #expect(TownMood(session: "unknown") == .idle)
+        #expect(TownMood(session: nil) == .idle)
     }
 
     // MARK: Director
@@ -189,9 +223,12 @@ import Testing
         #expect(director.out.isEmpty)
     }
 
-    @Test func strangersAreNotActedOut() {
+    @Test func strangersComeAsGuests() {
         var director = TownDirector()
-        #expect(director.accept([message("ghost", "a")], present: ["a"], reduceMotion: false).isEmpty)
+        // Someone from elsewhere visits; it counts as out like anyone.
+        #expect(director.accept([message("ghost", "a")], present: ["a"], reduceMotion: false).count == 1)
+        #expect(director.out == ["ghost"])
+        _ = director.cameHome("ghost")
         // An unknown listener: the visit goes to the thread's house.
         let actions = director.accept([message("a", "ghost")], present: ["a"], reduceMotion: false)
         if case let .visit(_, to, _, _, _) = actions.first { #expect(to == nil) } else { Issue.record("no visit") }
@@ -203,6 +240,95 @@ import Testing
         _ = director.accept([message("a", root: 1), message("b", root: 2)], present: ["a", "b"], reduceMotion: false)
         _ = director.accept([.left(senator: "b")], present: ["a"], reduceMotion: false)
         #expect(director.queue.isEmpty)
+    }
+
+    @Test func arrivalsWalkWhileThereIsRoomElseAppear() {
+        var director = TownDirector()
+        director.maxWalkers = 1
+        let present: Set<String> = ["a", "b"]
+        #expect(director.accept([.arrived(senator: "a"), .left(senator: "b")], present: present, reduceMotion: false) == [
+            .arrive(senator: "a", walk: true), .depart(senator: "b", walk: false),
+        ])
+        // The walker in counts against the limit until home.
+        #expect(director.out == ["a"])
+        _ = director.cameHome("a")
+        #expect(director.accept([.left(senator: "a")], present: present, reduceMotion: true) == [.depart(senator: "a", walk: false)])
+        #expect(director.accept([.arrived(senator: "ghost")], present: present, reduceMotion: false).isEmpty)
+    }
+
+    @Test func aSettledThreadChecksThoseInTown() {
+        var director = TownDirector()
+        #expect(director.accept([.answered(thread: ref(), a: "a", b: "ghost")], present: ["a"], reduceMotion: false)
+            == [.check(thread: ref(), a: "a", b: nil)])
+        #expect(director.accept([.answered(thread: ref(), a: "x", b: "y")], present: ["a"], reduceMotion: false).isEmpty)
+    }
+
+    @Test func theWayInFromTheEdge() {
+        let layout = TownLayout(committees: ["a", "b", "c"])
+        let room = layout.room("a")!
+        let edge = layout.edgeX(for: room)
+        #expect(edge < layout.bounds.minX || edge > layout.bounds.maxX)
+        let path = TownLayout.pathFromEdge(edge, to: CGPoint(x: room.midX, y: room.midY), in: room)
+        #expect(path.first?.x == edge)
+        #expect(path.contains(TownLayout.door(of: room)))
+        #expect(path.last == CGPoint(x: room.midX, y: room.midY))
+    }
+
+    // MARK: Placement
+
+    @Test func aBubbleGoesAboveTheHeadWhenNothingIsThere() {
+        let view = CGRect(x: -500, y: -500, width: 1000, height: 1000)
+        let b = TownPlacement.bubble(size: CGSize(width: 100, height: 22), head: .zero, obstacles: [], viewport: view)
+        #expect(b.centre.x == 0)
+        #expect(b.centre.y > 11)
+        #expect(b.tail == .zero)
+    }
+
+    @Test func aBubbleAvoidsAFaceAndStaysInView() {
+        let view = CGRect(x: -500, y: -500, width: 1000, height: 1000)
+        let size = CGSize(width: 100, height: 22)
+        // Someone stands right above the speaker.
+        let face = CGRect(x: -20, y: 15, width: 40, height: 30)
+        let b = TownPlacement.bubble(size: size, head: .zero, obstacles: [face], viewport: view)
+        let rect = CGRect(x: b.centre.x - 50, y: b.centre.y - 11, width: 100, height: 22)
+        #expect(!rect.intersects(face))
+        // At the top edge of the view it is kept inside.
+        let edge = TownPlacement.bubble(size: size, head: CGPoint(x: 480, y: 490), obstacles: [], viewport: view)
+        #expect(edge.centre.x + 50 <= 500)
+        #expect(edge.centre.y + 11 <= 500)
+    }
+
+    @Test func aFaceCountsMoreThanASign() {
+        let view = CGRect(x: -500, y: -500, width: 1000, height: 1000)
+        let size = CGSize(width: 100, height: 22)
+        // Faces on both sides and above; a sign higher up: the bubble may
+        // cover the sign, never a face.
+        let faces = [CGRect(x: -60, y: 10, width: 120, height: 40), CGRect(x: 40, y: -10, width: 200, height: 30),
+                     CGRect(x: -240, y: -10, width: 200, height: 30)]
+        let sign = CGRect(x: -200, y: 60, width: 400, height: 100)
+        let b = TownPlacement.bubble(size: size, head: .zero, obstacles: faces, soft: [sign], viewport: view)
+        let rect = CGRect(x: b.centre.x - 50, y: b.centre.y - 11, width: 100, height: 22)
+        #expect(faces.allSatisfy { !$0.intersects(rect) })
+        #expect(rect.intersects(sign))
+    }
+
+    @Test func namesNeverOverlap() {
+        let a = TownPlacement.Label(id: "a", rect: CGRect(x: 0, y: 0, width: 40, height: 10), priority: 0)
+        let chair = TownPlacement.Label(id: "chair", rect: CGRect(x: 20, y: 0, width: 40, height: 10), priority: 3)
+        let c = TownPlacement.Label(id: "c", rect: CGRect(x: 10, y: -11, width: 40, height: 10), priority: 0)
+        let far = TownPlacement.Label(id: "far", rect: CGRect(x: 300, y: 0, width: 40, height: 10), priority: 0)
+        let out = TownPlacement.labels([a, chair, c, far], step: 11)
+        #expect(out["chair"] == .some(0))
+        #expect(out["far"] == .some(0))
+        #expect(out["a"] == .some(11))
+        // Whatever is shown, nothing overlaps.
+        let shown = [a, chair, c, far].compactMap { l in out[l.id]!.map { l.rect.offsetBy(dx: 0, dy: -$0) } }
+        for (i, r) in shown.enumerated() {
+            for q in shown.dropFirst(i + 1) { #expect(!r.intersects(q)) }
+        }
+        // With no room left a name hides.
+        let crowd = (0..<4).map { TownPlacement.Label(id: "\($0)", rect: CGRect(x: 0, y: 0, width: 40, height: 10), priority: 0) }
+        #expect(TownPlacement.labels(crowd, step: 11).values.filter { $0 == nil }.count == 2)
     }
 
     // MARK: Text
@@ -222,7 +348,7 @@ import Testing
 
     @Test func aClickFindsWhatIsUnderIt() {
         let scene = TownScene(size: CGSize(width: 900, height: 700))
-        scene.apply(TownScript.quiet.state)
+        scene.apply(TownScript.quiet)
         scene.fit()
         let chair = try! #require(scene.position(of: "claude-chair"))
         #expect(scene.hit(at: scene.viewPoint(CGPoint(x: chair.x, y: chair.y + 14))) == .senator(id: "claude-chair", sessionId: "demo-claude-chair"))
@@ -237,8 +363,8 @@ import Testing
 
     @Test func aLargeTownBuilds() {
         let scene = TownScene(size: CGSize(width: 900, height: 700))
-        scene.apply(TownScript.large.state)
-        scene.apply(TownScript.large.state, events: TownScript.largeEvents)
+        scene.apply(TownScript.large)
+        scene.apply(TownScript.large, events: TownScript.largeEvents)
         #expect(scene.layout.cells.count == 30)
     }
 }

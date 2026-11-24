@@ -38,6 +38,8 @@ struct TownSenator: Hashable, Sendable, Identifiable {
     var chair: Bool = false
     /// This machine's session for it, which a click opens.
     var sessionId: String?
+    /// What it is working on, when known (its latest status title).
+    var doing: String?
 }
 
 /// A thread, as far as the town needs it: where it is and what it is called.
@@ -45,6 +47,8 @@ struct TownThreadRef: Hashable, Sendable {
     var committee: String
     var root: UInt64
     var title: String
+    /// Who asked, by name, for a thread waiting on the person.
+    var asker: String?
 
     var key: String { "\(committee):\(root)" }
 }
@@ -70,6 +74,8 @@ struct TownHall: Hashable, Sendable {
 struct TownState: Hashable, Sendable {
     var committees: [TownCommittee] = []
     var hall = TownHall()
+    /// The person things wait on (`alice`), for the visitors' labels.
+    var person: String?
 
     /// Every senator by id, the Secretary included.
     var senators: [String: TownSenator] {
@@ -93,57 +99,87 @@ enum TownEvent: Hashable, Sendable {
     /// the thread names no one in town: it goes to the thread's house).
     case message(from: String, to: String?, thread: TownThreadRef, line: String)
     case mood(senator: String, TownMood)
+    /// Came into town: a new senator, or one whose session started again.
     case arrived(senator: String)
+    /// Left town: gone from the state, or its session stopped.
     case left(senator: String)
-}
-
-/// A thread between agents as one state of the store shows it: enough to
-/// tell, from two states, that someone said something in it.
-struct TownThread: Hashable, Sendable {
-    var ref: TownThreadRef
-    /// Its last seq: it grows when someone writes in it.
-    var updated: UInt64
-    /// Who spoke last, as far as the store tells (the latest news's author,
-    /// else who opened it).
-    var speaker: String
-    /// Whom it is spoken to.
-    var listener: String?
-    /// The first line of what was said, else the thread's title.
-    var line: String
-}
-
-/// One reading of the store: the town and the threads in flight.
-struct TownInput: Hashable, Sendable {
-    var state: TownState
-    var threads: [TownThread] = []
+    /// A thread between `a` and `b` was answered or closed.
+    case answered(thread: TownThreadRef, a: String?, b: String?)
 }
 
 enum TownDiff {
-    /// What happened between two readings. Nothing for the first one: a
-    /// town that opens is quiet, not a replay.
-    static func events(from old: TownInput?, to new: TownInput) -> [TownEvent] {
+    /// What happened between two readings of the town: moods, arrivals and
+    /// departures. Nothing for the first reading: a town that opens is
+    /// quiet, not a replay.
+    static func events(from old: TownState?, to new: TownState) -> [TownEvent] {
         guard let old else { return [] }
         var events: [TownEvent] = []
-        let before = old.state.senators
-        let after = new.state.senators
+        let before = old.senators
+        let after = new.senators
         for id in after.keys.sorted() {
             guard let now = after[id] else { continue }
             if let was = before[id] {
-                if was.mood != now.mood { events.append(.mood(senator: id, now.mood)) }
-            } else {
+                if was.mood == now.mood { continue }
+                // A session stopping leaves town; one starting again comes back.
+                if now.mood == .stopped {
+                    events.append(.left(senator: id))
+                } else if was.mood == .stopped {
+                    events.append(.arrived(senator: id))
+                } else {
+                    events.append(.mood(senator: id, now.mood))
+                }
+            } else if now.mood != .stopped {
                 events.append(.arrived(senator: id))
             }
         }
         for id in before.keys.sorted() where after[id] == nil {
             events.append(.left(senator: id))
         }
-        let known = Dictionary(old.threads.map { ($0.ref.key, $0.updated) }, uniquingKeysWith: max)
-        for thread in new.threads.sorted(by: { ($0.updated, $0.ref.key) < ($1.updated, $1.ref.key) }) {
-            if let seen = known[thread.ref.key], seen >= thread.updated { continue }
-            guard thread.speaker != thread.listener else { continue }
-            events.append(.message(
-                from: thread.speaker, to: thread.listener, thread: thread.ref, line: thread.line
-            ))
+        return events
+    }
+}
+
+/// One entry of a committee's activity, as the town needs it (the core's
+/// `ActivityEntry`, without the daemon's types).
+struct TownActivityEntry: Hashable, Sendable {
+    var committee: String
+    var seq: UInt64
+    /// `question`, `request`, `answer`, `note`, `status`, `escalation`,
+    /// `decision`, `joined`, `left`, `state`, `session_started`, …
+    var kind: String
+    var from: String
+    var to: [String]
+    var onBehalfOf: String?
+    var thread: UInt64?
+    var line: String
+    /// A status entry's committed thread state; a member's for the others.
+    var state: String?
+}
+
+enum TownActivity {
+    /// What is said in a thread: acted out as a visit.
+    static let spoken: Set<String> = ["question", "request", "answer", "note", "escalation", "decision"]
+    /// A thread's state that means it is settled.
+    static let settled: Set<String> = ["active", "answered", "closed", "archived", "done"]
+
+    /// The town's events in a batch of activity: what was said (a visit
+    /// from its real author to the first it was said to) and threads
+    /// settled (a ✓). Comings and goings come from the roster's own
+    /// readings, which the store keeps current, so they are not repeated
+    /// here.
+    static func events(_ entries: [TownActivityEntry]) -> [TownEvent] {
+        var events: [TownEvent] = []
+        for entry in entries.sorted(by: { ($0.seq, $0.committee) < ($1.seq, $1.committee) }) {
+            let author = TownText.senatorId(entry.onBehalfOf ?? entry.from)
+            let listener = entry.to.first.map(TownText.senatorId)
+            let ref = TownThreadRef(committee: entry.committee, root: entry.thread ?? entry.seq,
+                                    title: TownText.firstWords(entry.line, words: 12, characters: 80))
+            if spoken.contains(entry.kind) {
+                guard author != listener else { continue }
+                events.append(.message(from: author, to: listener, thread: ref, line: entry.line))
+            } else if entry.kind == "status", let state = entry.state, settled.contains(state), entry.thread != nil {
+                events.append(.answered(thread: ref, a: author, b: listener))
+            }
         }
         return events
     }
