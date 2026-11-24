@@ -218,3 +218,111 @@ mod tests {
         assert_ne!(EventId::derived(1, "k"), EventId::derived(1, "j"));
     }
 }
+
+/// The names among `known` closest to `written`, best first, at most
+/// `limit`: what a mistyped committee (or Senate) name was probably meant
+/// to be. A name counts as close when it shares most of `written`'s
+/// `-`-separated words, or is a few edits away; nothing is offered for a
+/// name like none of them.
+pub fn closest_names<'a>(
+    written: &str,
+    known: impl IntoIterator<Item = &'a str>,
+    limit: usize,
+) -> Vec<String> {
+    let words = |s: &str| -> Vec<String> {
+        s.to_lowercase()
+            .split(['-', '_', '/', '.'])
+            .filter(|w| !w.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let mine = words(written);
+    let mut scored: Vec<(usize, usize, &str)> = known
+        .into_iter()
+        .filter(|k| *k != written)
+        .filter_map(|k| {
+            let theirs = words(k);
+            let shared = mine.iter().filter(|w| theirs.contains(w)).count();
+            let distance = edit_distance(&written.to_lowercase(), &k.to_lowercase());
+            let close = distance <= 3.max(written.chars().count() / 4)
+                || (!mine.is_empty() && shared * 2 >= mine.len() && shared > 0);
+            close.then_some((shared, distance, k))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(b.2)));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, k)| k.to_owned())
+        .collect()
+}
+
+/// "no committee `X` in /path", with the closest of `known` committees:
+/// what both a server and a bridge say of a committee that is not there.
+pub fn no_committee(
+    path: &crate::SenatePath,
+    target: &CommitteeId,
+    known: &[CommitteeId],
+) -> String {
+    let close = closest_names(target.as_str(), known.iter().map(CommitteeId::as_str), 3);
+    if close.is_empty() {
+        format!("no committee `{target}` in {path}")
+    } else {
+        let list = close
+            .iter()
+            .map(|c| format!("`{c}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("no committee `{target}` in {path}; did you mean {list}?")
+    }
+}
+
+/// Levenshtein distance by characters.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = if ca == *cb {
+                prev
+            } else {
+                1 + prev.min(row[j]).min(row[j + 1])
+            };
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
+#[cfg(test)]
+mod closest_tests {
+    use super::closest_names;
+
+    #[test]
+    fn a_mistyped_committee_finds_what_it_meant() {
+        let known = [
+            "yoki-ios-wendell-feat-iphone-duo-modal",
+            "lama-ludo-ios-feat-iphone-duo-main",
+            "senate",
+            "refund-v2",
+        ];
+        let found = closest_names("yoki-ios-feat-iphone-duo-modal", known, 3);
+        assert_eq!(
+            found[0], "yoki-ios-wendell-feat-iphone-duo-modal",
+            "{found:?}"
+        );
+        assert!(
+            found.len() <= 3 && !found.contains(&"senate".to_owned()),
+            "{found:?}"
+        );
+        assert_eq!(closest_names("refund-v3", known, 3), ["refund-v2"]);
+        assert!(closest_names("zzz-unrelated", known, 3).is_empty());
+        assert!(
+            closest_names("senate", known, 3).is_empty(),
+            "itself is not a suggestion"
+        );
+    }
+}

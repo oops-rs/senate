@@ -819,13 +819,22 @@ impl ServerHub {
         };
         // A committee exists here once it has an event, or a seat: an agent
         // connected to it before anything was said.
+        let (open, archived) = self.committees_by_archive().await?;
+        if archived.contains(&target) {
+            return Ok(Resolved::Unknown {
+                reason: format!(
+                    "the committee {target} in {path} is archived and takes no new threads \
+                     (its Speaker can run `senate committees unarchive {target}`)"
+                ),
+            });
+        }
         let exists = Some(&target) == committee
-            || self.committees().await?.contains(&target)
+            || open.contains(&target)
             || !self.presence.agents_on(&target).is_empty();
         if !exists {
             return Ok(if named_here {
                 Resolved::Unknown {
-                    reason: format!("{path} has no committee {target}"),
+                    reason: senate_core::ids::no_committee(&path, &target, &open),
                 }
             } else {
                 Resolved::Elsewhere
