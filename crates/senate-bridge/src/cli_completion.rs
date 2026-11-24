@@ -162,7 +162,7 @@ pub(super) fn doctor(locale: Locale) -> Option<Check> {
     ))
 }
 
-fn request<T: serde::de::DeserializeOwned>(request: &Request) -> Option<T> {
+pub(super) fn request<T: serde::de::DeserializeOwned>(request: &Request) -> Option<T> {
     let paths = Paths::from_env().ok()?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

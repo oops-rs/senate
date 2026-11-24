@@ -746,6 +746,7 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 | :--- | :--- |
 | `senate session` | `list` · `watch` · `find` · `approve` · `stop` · `restore` · `pause` · `resume` · `replace` · `prune` |
 | `senate senator` | `list` · `alias` · `unalias` · `chair` · `seat` · `unseat` · `duty` |
+| `senate desk` | `list` (the default: what awaits the Speaker, as `committee#seq`) · `show <item>` · `answer <item> <text>` · `close <item> [--reason]` · `forward <item>` · `refuse <item> <reason>`; the Speaker in person, from your own terminal; items tab-complete |
 | `senate secretary` | `ask` (your default secretary) · `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
 | `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |
 | `senate setup` | `init` · `install` · `completions <zsh\|bash\|fish>` · `service install\|uninstall\|status` · `doctor` · `clean` |
