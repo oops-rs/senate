@@ -199,7 +199,7 @@ fn unavailable(_: StoreError) -> ProjectionError {
 impl Front {
     pub(super) async fn set_observer_card(
         &self,
-        selector: &SessionSelector,
+        session: Option<Session>,
         target: crate::ipc::CardTarget,
         document: &str,
     ) -> Result<(), IpcError> {
@@ -212,12 +212,7 @@ impl Front {
             .as_ref()
             .ok_or_else(|| IpcError::bad_request("Cards require a machine-hosted Senate"))?;
         let shared = self.primary();
-        let local_person = selector == &SessionSelector::default();
-        let session = if local_person {
-            None
-        } else {
-            Some(shared.resolve(selector)?)
-        };
+        let local_person = session.is_none();
         let writer = match &session {
             Some(session) => session.agent.clone(),
             None => SenatorName::new(shared.config.person.clone())

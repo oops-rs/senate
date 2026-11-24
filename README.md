@@ -895,10 +895,8 @@ senate observe token list
 senate observe token revoke <token-id>
 ```
 
-The token is shown once. Grants default to metadata. A lines grant must
-explicitly choose `--lines auto` or `--lines published`. Automatic previews
-can contain anything written on the first line. A published grant receives
-only lines you review with `senate observe line publish <committee> <seq>`.
+The token is shown once. Grants default to metadata. Lines grants require daemon-verified person confirmation and are
+currently disabled.
 For exact browser origins, replay behavior, card permissions and the public
 wire contract, see [Observe a Senate](docs/observe.md). To try the portable
 scene host with a demo feed, see [Build your own scene](docs/observe/build-your-own-scene.md).

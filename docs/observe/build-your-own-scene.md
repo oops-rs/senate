@@ -93,4 +93,5 @@ Put only the bearer in an owner-only token file, such as a file with mode
 0600. Recording uses an owner-only output file and omits credentials, live cursors
 and navigation links. Use `--include-lines` only for a recording you intend
 to retain with approved message previews. Playback presents the same public
-HTTP contract with a disposable token.
+HTTP contract with a disposable token. Line-bearing recordings require
+person confirmation and are currently refused.

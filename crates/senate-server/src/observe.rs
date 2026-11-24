@@ -65,6 +65,28 @@ impl SenateSource for Source {
         )
     }
 
+    fn wire_snapshot(
+        &self,
+        grant: &GrantInfo,
+        snapshot: &mut public::Snapshot,
+    ) -> Result<(), ProjectionError> {
+        let registry = self.registry.upgrade().ok_or(ProjectionError::NotReady)?;
+        senate_observe::WireIdentities {
+            registry: &registry,
+            grant,
+        }
+        .snapshot(snapshot)
+    }
+
+    fn wire_hint(&self, grant: &GrantInfo, hint: &mut Hint) -> Result<(), ProjectionError> {
+        let registry = self.registry.upgrade().ok_or(ProjectionError::NotReady)?;
+        senate_observe::WireIdentities {
+            registry: &registry,
+            grant,
+        }
+        .hint(hint)
+    }
+
     fn idle(&self) {
         if let Some(registry) = self.registry.upgrade() {
             registry.release_machine_observation();
@@ -505,7 +527,7 @@ impl SenateSource for Source {
                     return Ok(None);
                 }
                 let id = registry
-                    .approval_id(&native_id)
+                    .approval_id(grant, &native_id)
                     .map_err(|_| ProjectionError::NotReady)?;
                 Ok(Some(Hint {
                     at: None,

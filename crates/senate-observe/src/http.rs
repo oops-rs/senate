@@ -24,17 +24,19 @@ pub fn router(registry: Arc<Registry>) -> Router {
 
 async fn observe(State(registry): State<Arc<Registry>>, request: Request) -> Response {
     let headers = request.headers();
-    let peer = request.extensions().get::<ConnectInfo<SocketAddr>>();
-    if !peer.is_some_and(|ConnectInfo(addr)| addr.ip().is_loopback())
-        || !valid_authority(&request, registry.address())
-    {
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip())
+        .filter(|ip| ip.is_loopback() && valid_authority(&request, registry.address()));
+    let Some(peer) = peer else {
         registry.audit.denied();
         return failure(
             StatusCode::FORBIDDEN,
             "forbidden",
             "Observe requires its bound loopback authority",
         );
-    }
+    };
     if request.uri().query().is_some()
         || headers.contains_key(header::COOKIE)
         || headers.contains_key(header::TRANSFER_ENCODING)
@@ -54,7 +56,7 @@ async fn observe(State(registry): State<Arc<Registry>>, request: Request) -> Res
     };
 
     if request.method() == Method::OPTIONS {
-        return preflight(&registry, headers, origin);
+        return preflight(&registry, headers, origin, peer);
     }
     if request.method() != Method::GET {
         let mut response = failure(
@@ -137,7 +139,12 @@ async fn observe(State(registry): State<Arc<Registry>>, request: Request) -> Res
     cors(response, origin, false)
 }
 
-fn preflight(registry: &Registry, headers: &HeaderMap, origin: Option<&str>) -> Response {
+fn preflight(
+    registry: &Registry,
+    headers: &HeaderMap,
+    origin: Option<&str>,
+    peer: std::net::IpAddr,
+) -> Response {
     let Some(origin) = origin else {
         return bad_request();
     };
@@ -158,7 +165,7 @@ fn preflight(registry: &Registry, headers: &HeaderMap, origin: Option<&str>) -> 
         registry.audit.denied();
         return bad_request();
     }
-    match registry.preflight(origin) {
+    match registry.preflight(origin, peer) {
         Ok(()) => cors(StatusCode::NO_CONTENT.into_response(), Some(origin), true),
         Err(error) => {
             registry.audit.denied();
@@ -339,7 +346,6 @@ mod tests {
                 topology: false,
                 expires_in_days: None,
                 lines: None,
-                auto_confirmed: false,
             },
             Default::default(),
         )?)

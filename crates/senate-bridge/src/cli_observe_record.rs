@@ -8,7 +8,7 @@ use std::time::Instant;
 use anyhow::{Context, bail};
 use base64::Engine as _;
 use clap::Args;
-use senate_observe::{CreateGrant, LinePolicy, Recording, Registry, Scope};
+use senate_observe::{CreateGrant, Recording, Registry, Scope};
 use senate_observe_client::{Client, Frame, Update};
 use senate_observe_protocol::recording::{self, Content, Format, Header, Row};
 use senate_observe_protocol::{Cursor, V1};
@@ -188,7 +188,11 @@ pub(super) async fn replay(args: Replay) -> anyhow::Result<()> {
             u64::from(args.max_mib) * 1024 * 1024,
         )?
     };
-    let lines = recording.includes_lines();
+    if recording.includes_lines() {
+        bail!(
+            "Replaying message lines requires daemon-verified person confirmation, which is unavailable. Use a metadata recording."
+        );
+    }
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
     let home = tempfile::tempdir()?;
     let registry = Registry::open(home.path(), listener.local_addr()?)?;
@@ -198,9 +202,9 @@ pub(super) async fn replay(args: Replay) -> anyhow::Result<()> {
             name: "Observe replay".into(),
             committees: None,
             all_committees: true,
-            scope: if lines { Scope::Lines } else { Scope::Metadata },
-            lines: lines.then_some(LinePolicy::Published),
-            auto_confirmed: false,
+            scope: Scope::Metadata,
+            lines: None,
+
             origins: args.origin.into_iter().collect(),
             topology: true,
             expires_in_days: Some(1),

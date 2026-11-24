@@ -63,6 +63,17 @@ pub trait SenateSource: Send + Sync {
         Ok(None)
     }
 
+    fn wire_snapshot(
+        &self,
+        _grant: &GrantInfo,
+        _snapshot: &mut Snapshot,
+    ) -> Result<(), ProjectionError> {
+        Ok(())
+    }
+    fn wire_hint(&self, _grant: &GrantInfo, _hint: &mut Hint) -> Result<(), ProjectionError> {
+        Ok(())
+    }
+
     fn idle(&self) {}
 
     fn stream_opened(&self) {}
@@ -330,7 +341,9 @@ impl Projections {
                 .map_err(|_| ProjectionError::RateLimited)?;
             let first = capture(source, &grant.info).await?;
             check_view(&first.snapshot)?;
-            let journal = Journal::new(first.snapshot.clone())?;
+            let mut wire = first.snapshot.clone();
+            source.wire_snapshot(&grant.info, &mut wire)?;
+            let journal = Journal::new(wire)?;
             budget.resize(journal.state_bytes())?;
             *lock(&view.journal) = Some(journal);
             view.signal.send_replace(Signal::Ready);
@@ -442,7 +455,12 @@ impl Projections {
             if !hints.is_empty() && grant.is_live() && !*shutdown.borrow() {
                 let mut journal = lock(&view.journal);
                 let journal = journal.as_mut().ok_or(ProjectionError::Reset)?;
-                let next = journal.prepare(current.snapshot.clone(), hints)?;
+                let mut wire = current.snapshot.clone();
+                source.wire_snapshot(&grant.info, &mut wire)?;
+                for hint in &mut hints {
+                    source.wire_hint(&grant.info, hint)?;
+                }
+                let next = journal.prepare(wire, hints)?;
                 budget.resize(next.state_bytes())?;
                 journal.apply(next);
                 view.signal.send_replace(Signal::Ready);
@@ -502,6 +520,13 @@ impl Projections {
         let expires_in = (grant.info.expires_at - Utc::now())
             .to_std()
             .unwrap_or_default();
+        let expiry = tokio::time::Instant::now() + expires_in;
+        let lease = StreamLease::new(
+            Reservation::new(view.clone(), global, local),
+            grant.revoked.clone(),
+            signal.clone(),
+            expiry,
+        );
         let stream = Stream {
             view: view.clone(),
             signal,
@@ -512,9 +537,9 @@ impl Projections {
                 bytes: 0,
             },
             grant,
-            expiry: tokio::time::Instant::now() + expires_in,
+            expiry,
             after,
-            _reservation: Reservation::new(view, global, local),
+            _lease: lease,
             last_poll: Instant::now(),
         };
         if let Some(source) = self.source() {
@@ -635,6 +660,43 @@ impl Drop for Reservation {
     }
 }
 
+struct StreamLease {
+    reservation: Arc<Mutex<Option<Reservation>>>,
+    _owner: tokio::sync::oneshot::Sender<()>,
+}
+
+impl StreamLease {
+    fn new(
+        reservation: Reservation,
+        mut revoked: watch::Receiver<bool>,
+        mut signal: watch::Receiver<Signal>,
+        expiry: tokio::time::Instant,
+    ) -> Self {
+        let reservation = Arc::new(Mutex::new(Some(reservation)));
+        let cleanup = reservation.clone();
+        let (owner, dropped) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = dropped => {}
+                _ = tokio::time::sleep_until(expiry) => {}
+                _ = revoked.wait_for(|revoked| *revoked) => {}
+                _ = signal.wait_for(|signal| matches!(signal, Signal::Failed(_))) => {}
+            }
+            lock(&cleanup).take();
+        });
+        Self {
+            reservation,
+            _owner: owner,
+        }
+    }
+}
+
+impl Drop for StreamLease {
+    fn drop(&mut self) {
+        lock(&self.reservation).take();
+    }
+}
+
 struct Stream {
     view: Arc<View>,
     signal: watch::Receiver<Signal>,
@@ -642,7 +704,7 @@ struct Stream {
     audit: StreamAudit,
     expiry: tokio::time::Instant,
     after: u64,
-    _reservation: Reservation,
+    _lease: StreamLease,
     last_poll: Instant,
 }
 
@@ -880,7 +942,6 @@ mod tests {
                     topology: false,
                     expires_in_days: None,
                     lines: None,
-                    auto_confirmed: false,
                 },
                 BTreeSet::new(),
             )
@@ -951,6 +1012,50 @@ mod tests {
         journal.apply(next);
         assert_ne!(journal.snapshot(), first);
         assert!(journal.next(0)?.is_some());
+        Ok(())
+    }
+    #[tokio::test]
+    async fn revocation_releases_a_stream_reservation_without_polling_its_body()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let registry = Registry::open(home.path(), "127.0.0.1:45501".parse()?)?;
+        registry.attach_senate(Arc::new(Source {
+            calls: AtomicUsize::new(0),
+            log: broadcast::channel(8).0,
+        }));
+        let issued = registry.create(
+            CreateGrant {
+                name: "stalled fixture".into(),
+                committees: None,
+                all_committees: true,
+                scope: Scope::Metadata,
+                lines: None,
+                origins: vec![],
+                topology: false,
+                expires_in_days: None,
+            },
+            BTreeSet::new(),
+        )?;
+        let grant = registry
+            .authenticate(&issued.token, None, true)
+            .map_err(|_| "authentication failed")?;
+        let response = registry
+            .projections
+            .events(grant, None, registry.audit.clone())
+            .await
+            .map_err(|_| "stream failed")?;
+        assert_eq!(
+            registry.projections.streams.available_permits(),
+            STREAM_LIMIT - 1
+        );
+        registry.revoke(&issued.grant.id)?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while registry.projections.streams.available_permits() != STREAM_LIMIT {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        drop(response);
         Ok(())
     }
 }

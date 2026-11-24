@@ -29,9 +29,10 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "process", "io-util"] }
 url = "2"
+unicode-general-category = "1.1"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 tower = { workspace = true }
 
 [lints]

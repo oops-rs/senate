@@ -6,6 +6,7 @@ mod cards;
 mod diff;
 mod grants;
 mod http;
+mod identities;
 mod journal;
 mod machine;
 mod notices;
@@ -30,3 +31,5 @@ pub use notices::LocalNotice;
 
 #[cfg(feature = "replay")]
 pub use replay::{Recording, ReplayError};
+
+pub use identities::WireIdentities;

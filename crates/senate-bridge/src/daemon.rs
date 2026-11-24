@@ -6622,13 +6622,24 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         )),
                         false,
                     ),
-                    Ok(request @ Request::SetCard { .. }) if matches!(&request, Request::SetCard { session, .. } if session != &SessionSelector::default()) =>
-                    {
-                        let Request::SetCard { session, .. } = &request else {
-                            unreachable!()
-                        };
-                        let reply = match shared.verify_card_session(peer, session).await {
-                            Ok(()) => Box::pin(shared.dispatch(request)).await,
+                    Ok(Request::SetCard {
+                        session,
+                        target,
+                        document,
+                    }) if session != SessionSelector::default() => {
+                        let _binding = shared.primary().session_bindings.read().await;
+                        let reply = match shared.primary().resolve(&session) {
+                            Ok(session) => match shared.verify_card_session(peer, &session).await {
+                                Ok(()) => wrap(
+                                    Box::pin(shared.set_observer_card(
+                                        Some(session),
+                                        target,
+                                        &document,
+                                    ))
+                                    .await,
+                                ),
+                                Err(error) => Reply::err(error),
+                            },
                             Err(error) => Reply::err(error),
                         };
                         (reply, false)

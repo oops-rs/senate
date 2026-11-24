@@ -170,11 +170,10 @@ pub(super) fn run(args: Observe) -> anyhow::Result<()> {
                 (GrantScope::Lines, Some(Lines::Published)) => Some(LinePolicy::Published),
                 _ => bail!("Choose --lines auto or --lines published with --scope lines"),
             };
-            let auto_confirmed = policy == Some(LinePolicy::Auto);
-            if auto_confirmed {
-                confirm(
-                    "Automatic previews expose eligible first lines, which can contain commands, paths or credentials.",
-                )?;
+            if policy.is_some() {
+                bail!(
+                    "Lines grants require daemon-verified person confirmation, which is unavailable. Use --scope metadata."
+                );
             }
             let command = AdminRequest::Create {
                 grant: CreateGrant {
@@ -186,7 +185,6 @@ pub(super) fn run(args: Observe) -> anyhow::Result<()> {
                         GrantScope::Lines => Scope::Lines,
                     },
                     lines: policy,
-                    auto_confirmed,
                     origins,
                     topology,
                     expires_in_days: expires_in,
@@ -232,7 +230,10 @@ fn line(paths: &Paths, action: Line) -> anyhow::Result<()> {
                     },
                 },
             ))?;
-            confirm(&format!("Publish this exact preview?\n{}", reviewed.line))?;
+            confirm(&format!(
+                "Publish this exact preview?\n{}",
+                serde_json::to_string(&reviewed.line)?
+            ))?;
             AdminRequest::Publish {
                 committee,
                 seq,

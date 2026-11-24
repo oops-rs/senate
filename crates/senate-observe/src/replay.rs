@@ -264,7 +264,7 @@ mod tests {
                 all_committees: true,
                 scope: Scope::Metadata,
                 lines: None,
-                auto_confirmed: false,
+
                 origins: vec![],
                 topology: false,
                 expires_in_days: None,
