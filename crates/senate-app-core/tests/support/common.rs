@@ -1211,9 +1211,28 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 "approval {id} was already answered"
             ))),
         },
+        // This machine's Observe identity, and History ids written as
+        // `obs-<session id>` (the real ones are keyed hashes).
+        Request::ObserveAdmin {
+            command: senate_observe::AdminRequest::Identity,
+        } => Reply::ok(&serde_json::json!({
+            "id": FAKE_INSTALLATION,
+            "url": "http://127.0.0.1:7199",
+        })),
+        Request::ObserveAdmin {
+            command: senate_observe::AdminRequest::HistorySession { id },
+        } => Reply::ok(&id.strip_prefix("obs-").and_then(|native| {
+            w.history
+                .iter()
+                .find(|row| row.session_id == native)
+                .map(|row| row.session_id.clone())
+        })),
         other => Reply::err(IpcError::bad_request(format!("fake: {other:?}"))),
     }
 }
+
+/// The fake daemon's Observe installation id: `?senate=id:fake-installation`.
+pub const FAKE_INSTALLATION: &str = "fake-installation";
 
 /// Two hosted terminals: `claude` (alias `lead`) running with a permission
 /// prompt waiting, and a stopped Codex `reviewer`.

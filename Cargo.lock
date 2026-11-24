@@ -2628,6 +2628,8 @@ dependencies = [
  "senate-bridge",
  "senate-core",
  "senate-markdown",
+ "senate-observe",
+ "senate-observe-protocol",
  "serde",
  "serde_json",
  "tempfile",

@@ -81,11 +81,22 @@ targets:
         # so with it off no Dock icon ever flashes.
         LSUIElement: true
         NSAppleEventsUsageDescription: Senate opens Codex and hosted sessions in Terminal.
+        # `senate://open/v1/…` links (LinkRouter.swift). The scheme is a
+        # build setting: `senate` for Release only. A Debug build registers
+        # `senate-debug` instead (read as `senate` by a Debug build alone),
+        # so building or running one never takes `senate://` from the
+        # installed app; its UI test opens `senate-debug://` links.
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.senate.app.link
+            CFBundleTypeRole: Viewer
+            CFBundleURLSchemes:
+              - $(SENATE_URL_SCHEME)
         NSHumanReadableCopyright: MIT
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.senate.app
         PRODUCT_NAME: Senate
+        SENATE_URL_SCHEME: senate
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # The app's own code runs on the main actor unless it says otherwise.
@@ -103,6 +114,9 @@ targets:
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: Senate/Senate.entitlements
         COMBINE_HIDPI_IMAGES: YES
+      configs:
+        Debug:
+          SENATE_URL_SCHEME: senate-debug
   # The store and view models against a fake core (Swift Testing), hosted
   # by the app (which connects to nothing under test).
   SenateTests:

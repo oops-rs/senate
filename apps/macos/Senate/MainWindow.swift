@@ -63,6 +63,10 @@ struct MainWindow: View {
             return store.history.row(id)?.name ?? L("tab.history")
         case let .desk(item):
             return DeskEntryDetail.title(item)
+        case .unavailable:
+            return L("link.unavailable")
+        case let .confirmSenate(other, _):
+            return other.title
         case .item:
             break
         }
@@ -103,6 +107,8 @@ struct MainWindow: View {
             case .section(.approvals): ApprovalsView(store: store)
             case let .desk(item): DeskEntryDetail(store: store, item: item).id(item.id)
             case .section(.senates): SenatesView(store: store)
+            case .unavailable: EmptyState(text: L("link.unavailable"), detail: L("link.unavailable_detail"))
+            case let .confirmSenate(other, link): SenateSwitchPage(store: store, other: other, link: link)
             }
         }
     }

@@ -50,6 +50,12 @@ final class CoreStore {
         /// item for the Speaker), by its `Waiting.id`: choosing it opens
         /// where it is answered.
         case item(String)
+        /// What a `senate://` link pointed at is not here (missing,
+        /// deleted, unreadable, or on another machine).
+        case unavailable
+        /// A link for another Senate served here, with the link: the
+        /// person confirms before it is shown.
+        case confirmSenate(LinkRouter.SenateSwitch, String)
     }
 
     private(set) var state: AppState = .placeholder
@@ -162,6 +168,8 @@ final class CoreStore {
     var reveal: Reveal?
     /// The name and picture set in this app.
     let profile = LocalProfile()
+    /// `senate://open/v1/…` links: the one validator and router.
+    let links = LinkRouter()
     /// The conversation page: one web view, kept, for sessions and threads.
     @ObservationIgnored lazy var page = ConversationPage(store: self)
     @ObservationIgnored private let defaults: UserDefaults
@@ -183,6 +191,7 @@ final class CoreStore {
         folded = Set(defaults.stringArray(forKey: Self.foldedKey) ?? [])
         history.store = self
         threads.store = self
+        links.store = self
         if notifications {
             notifier.handle = { [weak self] action in await self?.perform(action) }
             notifier.setUp()

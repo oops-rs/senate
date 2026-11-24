@@ -216,8 +216,11 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     func take(committee: String, thread: UInt64) async throws {
         try record("take \(committee) \(thread)")
     }
+    /// Threads the daemon cannot read (deleted, or not the person's).
+    var missingThreads: Set<UInt64> = []
     func thread(committee: String, thread: UInt64) async throws -> ThreadView {
         try record("thread \(committee) \(thread)")
+        if missingThreads.contains(thread) { throw CoreError.Failed(message: "no thread \(thread)") }
         return threadView ?? ThreadView(committee: committee, root: thread, title: "", state: nil, stateLabel: nil, kindLabel: "", events: [])
     }
     var committeeThreadRows: [CommitteeThread] = []
@@ -284,6 +287,20 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
         return nextSent
     }
     func pauseSession(label: String) async throws { try record("pause \(label)") }
+
+    /// This machine's Observe installation id; `nil`: no Observe here.
+    var installationId: String? = "this-mac"
+    func observeInstallationId() async throws -> String {
+        try record("observe-identity")
+        guard let installationId else { throw CoreError.Failed(message: "Observe requires a machine-hosted Senate") }
+        return installationId
+    }
+    /// Observe History ids (`obs-…`) and the local sessions they mean.
+    var historyIds: [String: String] = [:]
+    func observeHistorySession(id: String) async throws -> String? {
+        try record("observe-history \(id)")
+        return historyIds[id]
+    }
 
     func watchTerminal() -> TerminalCommand {
         TerminalCommand(argv: [], cwd: nil, shellLine: "", appleScript: "")
