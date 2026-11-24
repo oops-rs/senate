@@ -1,39 +1,21 @@
 //! Caller checks for person-only IPC and app-confirmed operations.
 //!
-//! An agent must not approve its own prompts, nor another agent's: a
-//! permission prompt is a person's decision. So [`Request::ApproveSession`]
-//! and [`Request::Approve`] are refused when the process that sent them
-//! runs inside a coding session's process tree. The daemon takes the
-//! caller's pid from the socket itself (`LOCAL_PEEREPID` on macOS,
-//! `SO_PEERCRED` on Linux, through tokio's `peer_cred`), not from anything
-//! the caller says, and walks its ancestors up to pid 1. It refuses when
-//! any of them is:
+//! IPC admission rejects operator requests from protected hosted processes.
+//! On macOS it requires a per-request Mach proof of process generation and
+//! coalition membership. Missing proof is a refusal. On Linux and WSL with
+//! administrator-provisioned cgroups it checks membership using a stable
+//! socket peer handle. These checks survive reparenting.
 //!
-//! - the runtime process of a session on record that has not ended (the
-//!   Claude pid its hooks reported);
-//! - a running terminal host, or the TUI it runs (every Senate-hosted
-//!   session, whatever its runtime);
-//! - this daemon (a companion session it started, or a hosted one);
-//! - a coding runtime by its executable's name (`claude`, `codex`, `agy`),
-//!   for the agents Senate has no pid for, such as a Codex session started
-//!   outside Senate.
+//! A kernel ancestry walk additionally rejects recorded runtimes, hosts,
+//! the daemon and named coding runtimes. Native detached agents, shared
+//! Codex backends outside protected scopes, and jobs started independently
+//! by system schedulers can pass routine checks. Linux and WSL advertise an
+//! advisory guard when protected scopes are unavailable.
 //!
-//! It also refuses when the chain cannot be read to its end, or the socket
-//! names no pid. Environment markers (`CLAUDECODE`, a hosted session's
-//! variables) are not consulted: a caller sets its own environment.
-//!
-//! This is defence in depth, not a boundary. A process that detached from
-//! its agent (a daemonized child, re-parented to launchd or init) escapes
-//! the ancestry check, and so does a runtime renamed past the names above
-//! that Senate has no pid for. The person's own terminal, and the desktop
-//! app, are outside every agent's tree, so they pass. Every decision, and
-//! every refusal with its reason, goes to the daemon's log.
-//!
-//! Creating an Observe grant with message lines and repairing a session
-//! binding also require a response from the signed macOS app on its XPC
-//! channel. The daemon dispatches the original queued request after that
-//! response. Linux, WSL and installations without the signed app refuse
-//! those operations. Linux and WSL advertise the routine guard as advisory.
+//! Line-bearing Observe grants and session rebind also require a signed
+//! macOS app decision. A decision applies once to the exact queued request.
+//! These operations are refused without the signed app, including on Linux
+//! and WSL. See `docs/person-guard.md` for platform and hook policy.
 
 use std::collections::BTreeMap;
 

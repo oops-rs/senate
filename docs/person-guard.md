@@ -46,10 +46,12 @@ names and ancestry provide additional rejection while the original tree is visib
 The macOS bridge checks one-time proofs for operator requests. It binds each
 proof to the exact request digest and the Mach sender's process generation.
 Managed launchd hosting persists its daemon coalition before publishing the
-bridge. The scope covers dedicated hosted Codex backends. Existing shared backends
-remain advisory until their hosted sessions are restored to dedicated mode. Linux and WSL hosting is advisory until the administrator provisions it. Hook
-process queries and person-name reservation are in place. Native role bindings persist by boot and process generation. The app's signed XPC queue provides consent for
-rebind and line-bearing grants through a dedicated Observe registry capability.
+bridge. The scope covers dedicated hosted Codex backends. Existing shared
+backends remain advisory until their hosted sessions are restored to dedicated
+mode. Linux and WSL hosting is advisory until the administrator provisions it.
+Native role bindings persist by boot and process generation. The app's signed
+XPC queue provides consent for rebind and line-bearing grants through a
+dedicated Observe registry capability.
 
 From an operator terminal in this worktree, with the signed fixture binaries
 built from the same revision, run:
