@@ -493,6 +493,7 @@ impl AppCore {
     }
 
     /// A missing reason forwards the item. A present reason refuses it.
+    /// Kept for the app until it moves to [`Self::desk_decide`].
     pub async fn decide_desk_item(
         &self,
         committee: String,
@@ -500,6 +501,24 @@ impl AppCore {
         item_id: String,
         id: String,
         reason: Option<String>,
+    ) -> Result<DeskOutcomeView, CoreError> {
+        let decision = reason.map_or(crate::reads::DeskChoice::Forward, |reason| {
+            crate::reads::DeskChoice::Refuse { reason }
+        });
+        self.desk_decide(committee, seq, item_id, id, decision)
+            .await
+    }
+
+    /// Decide a desk item: forward, refuse with a reason, answer as the
+    /// Speaker, or close it ([`crate::reads::DeskChoice`]); what is allowed
+    /// is the item's `actions`.
+    pub async fn desk_decide(
+        &self,
+        committee: String,
+        seq: u64,
+        item_id: String,
+        id: String,
+        decision: crate::reads::DeskChoice,
     ) -> Result<DeskOutcomeView, CoreError> {
         let committee = self.committee_id(&committee)?;
         let event_id = |value: &str| {
@@ -511,9 +530,7 @@ impl AppCore {
         };
         let item_id = event_id(&item_id)?;
         let id = event_id(&id)?;
-        let decision = reason.map_or(DeskDecision::Forward, |reason| DeskDecision::Refuse {
-            reason,
-        });
+        let decision = DeskDecision::from(decision);
         let request = Request::DeskDecide {
             committee,
             seq: Seq(seq),

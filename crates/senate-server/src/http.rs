@@ -894,6 +894,17 @@ async fn check_status(
             "only the originating senator or the Speaker's office may archive this hosted approval notice",
         ));
     }
+    // The Speaker's office closes what waits on its desk, whatever it is:
+    // an archived status and nothing more, on a root of this committee.
+    // (Speaker writes have already passed AppState::preside.)
+    if event.from == Address::Speaker
+        && payload.state == StatusState::Archived
+        && payload.takeover.is_none()
+        && payload.escalated_to.is_none()
+        && root.as_ref().is_some_and(|r| r.thread.is_none())
+    {
+        return Ok(());
+    }
     let task = root.as_ref().filter(|r| {
         r.thread.is_none()
             && matches!(r.kind, Kind::Question | Kind::Request)

@@ -159,8 +159,79 @@ async fn the_desk_action_returns_its_receipt_and_preserves_a_daemon_refusal() {
         .await
         .unwrap();
     assert!(!refused.delivered);
-    let blocked = core.desk_item(committee, 62).await.unwrap();
+    let blocked = core.desk_item(committee.clone(), 62).await.unwrap();
     assert!(blocked.blocked.unwrap().contains("Only the Speaker"));
+    assert!(blocked.actions.is_empty());
+    assert!(blocked.waits_on.unwrap().contains("Only the Speaker"));
+    daemon.stop();
+}
+
+#[tokio::test]
+async fn the_speaker_answers_or_closes_a_desk_item_through_one_choice() {
+    use senate_app_core::{DeskAction, DeskChoice, DeskOutcomeKind};
+    let (dir, socket, world) = setup();
+    common::desk_fixture(&mut world.lock().unwrap());
+    let daemon = FakeDaemon::start(&socket, world);
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en".into())).unwrap();
+    core.start(Arc::new(Listener::default())).unwrap();
+    let committee = "refund-v2".to_owned();
+
+    let forwardable = core.desk_item(committee.clone(), 60).await.unwrap();
+    assert_eq!(
+        forwardable.actions,
+        [
+            DeskAction::Forward,
+            DeskAction::Refuse,
+            DeskAction::Answer,
+            DeskAction::Close
+        ]
+    );
+    let item = core.desk_item(committee.clone(), 63).await.unwrap();
+    assert_eq!(item.actions, [DeskAction::Answer, DeskAction::Close]);
+    assert_eq!(item.waits_on, None);
+
+    let id = core.new_desk_action_id();
+    let answer = DeskChoice::Answer {
+        body: "From Q3.".into(),
+    };
+    let answered = core
+        .desk_decide(
+            committee.clone(),
+            63,
+            item.event_id.clone(),
+            id.clone(),
+            answer.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answered.kind, DeskOutcomeKind::Answered);
+    assert_eq!(answered.seq, 77);
+    assert!(!answered.delivered);
+    assert_eq!(
+        core.desk_decide(committee.clone(), 63, item.event_id.clone(), id, answer)
+            .await
+            .unwrap(),
+        answered,
+        "a retry with the same id is the same answer"
+    );
+
+    let closed = core
+        .desk_decide(
+            committee.clone(),
+            61,
+            core.desk_item(committee.clone(), 61)
+                .await
+                .unwrap()
+                .event_id,
+            core.new_desk_action_id(),
+            DeskChoice::Close {
+                reason: Some("Settled in chat.".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(closed.kind, DeskOutcomeKind::Closed);
+    assert_eq!(closed.reason.as_deref(), Some("Settled in chat."));
     daemon.stop();
 }
 
