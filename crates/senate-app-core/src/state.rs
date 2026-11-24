@@ -207,6 +207,10 @@ pub struct RosterMember {
     pub senator_id: String,
     pub display_name: String,
     pub active: bool,
+    pub runtime: Option<String>,
+    pub session_state: Option<String>,
+    pub status_title: Option<String>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -644,6 +648,10 @@ fn roster_committee(c: &senate_bridge::ipc::RosterCommittee) -> RosterCommittee 
                 senator_id: member.senator.to_string(),
                 display_name: member.display_name.clone(),
                 active: member.active,
+                runtime: member.runtime.map(|r| r.as_str().to_owned()),
+                session_state: member.session_state.clone(),
+                status_title: member.status_title.clone(),
+                session_id: member.session_id.clone(),
             })
             .collect(),
     }

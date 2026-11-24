@@ -305,6 +305,25 @@ impl Drop for RawTerminal {
     }
 }
 
+/// The host refused the attachment: another terminal holds it.
+#[derive(Debug)]
+pub struct Busy;
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the senator already has an attached terminal")
+    }
+}
+
+impl std::error::Error for Busy {}
+
+/// The path of the terminal on stdin (`/dev/ttys012`), when it is one.
+fn own_tty() -> Option<String> {
+    rustix::termios::ttyname(std::io::stdin(), Vec::new())
+        .ok()
+        .and_then(|name| name.into_string().ok())
+}
+
 /// Attach until Ctrl-], the person closes the terminal, or the host exits.
 pub async fn attach(path: &Path, paths: &Paths, label: &str) -> anyhow::Result<()> {
     ensure!(
@@ -312,9 +331,10 @@ pub async fn attach(path: &Path, paths: &Paths, label: &str) -> anyhow::Result<(
         "terminal socket is outside the test directory"
     );
     let drops = super::paste::drop_directory(paths, path).ok();
-    let stream = UnixStream::connect(path)
+    let stream = tokio::time::timeout(ATTACH_STARTUP_TIMEOUT, UnixStream::connect(path))
         .await
-        .context("connect to the hosted terminal")?;
+        .with_context(|| format!("connecting to {label}'s terminal host timed out"))?
+        .with_context(|| format!("connect to {label}'s terminal host"))?;
     drive(stream, label, drops, UnixStream::into_split).await
 }
 
@@ -325,6 +345,8 @@ pub(crate) async fn attach_stream(
 ) -> anyhow::Result<()> {
     drive(stream, label, drops, tokio::io::split).await
 }
+
+const ATTACH_STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 async fn drive<S, R, W>(
     mut stream: S,
@@ -338,11 +360,15 @@ where
     W: AsyncWrite + Unpin,
 {
     let (takes_colors, native) =
-        match tokio::time::timeout(Duration::from_secs(3), stream.read_u8()).await?? {
+        match tokio::time::timeout(ATTACH_STARTUP_TIMEOUT, stream.read_u8())
+            .await
+            .with_context(|| format!("{label}'s terminal host did not answer in time"))?
+            .with_context(|| format!("read the reply from {label}'s terminal host"))?
+        {
             ATTACHED_NATIVE => (true, true),
             ATTACHED => (true, false),
             ATTACHED_PLAIN => (false, false),
-            BUSY => bail!("the senator already has an attached terminal"),
+            BUSY => return Err(Busy.into()),
             _ => bail!("unrecognized terminal host reply"),
         };
 
@@ -357,7 +383,10 @@ where
             .draw(attach_separator(label, cols).as_bytes())
             .await?;
     }
-    let (colors, typed) = terminal.colors().await;
+    let (mut colors, typed) = terminal.colors().await;
+    colors.tty = own_tty();
+    // The terminal's title names the session while it is attached.
+    let _ = terminal.draw(&super::title::set(label)).await;
     let (mut screen, mut keys) = split(stream);
 
     let to_host = async {
@@ -404,6 +433,20 @@ where
     };
     let to_screen = async {
         let mut bytes = [0; IO_CHUNK];
+        // A native host always sends a replay after the initial resize.
+        // Legacy relays may have no screen to send until the TUI paints.
+        if native {
+            let n = tokio::time::timeout(ATTACH_STARTUP_TIMEOUT, screen.read(&mut bytes))
+                .await
+                .with_context(|| {
+                    format!("{label}'s terminal host did not send its initial screen in time")
+                })??;
+            ensure!(
+                n != 0,
+                "{label}'s terminal host closed before sending its initial screen"
+            );
+            terminal.draw(&bytes[..n]).await?;
+        }
         loop {
             let n = screen.read(&mut bytes).await?;
             if n == 0 {
@@ -421,7 +464,8 @@ where
     };
     // draw handles partial writes and waits for writable readiness. Bound
     // cleanup in case the attached terminal has disappeared.
-    let reset = reset_display(native, colors.keyboard_flags);
+    let mut reset = reset_display(native, colors.keyboard_flags);
+    reset.extend_from_slice(super::title::RESTORE);
     let _ = tokio::time::timeout(Duration::from_millis(250), terminal.draw(&reset)).await;
     result
 }

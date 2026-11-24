@@ -39,6 +39,8 @@ final class CoreStore {
         case secretary
         /// Town: the Senate's live activity as a little neighbourhood.
         case town
+        /// Every thread of a committee (the sidebar's "Show all").
+        case threads(String)
         /// An ended or stopped session from History, read-only, by its id.
         case past(String)
         /// An item on the Speaker's desk, inspected (forward, refuse) or
@@ -154,6 +156,8 @@ final class CoreStore {
     @ObservationIgnored private let notifier = Notifier()
     /// History: ended and stopped sessions, and the search.
     let history = HistoryModel()
+    /// The committees' threads, for the sidebar.
+    let threads: ThreadsModel
     /// A search match to show once its session is open.
     var reveal: Reveal?
     /// The name and picture set in this app.
@@ -169,6 +173,7 @@ final class CoreStore {
         notifications: Bool = true
     ) {
         self.makeCore = makeCore
+        threads = ThreadsModel(defaults: defaults)
         self.defaults = defaults
         drafts = defaults.dictionary(forKey: Self.draftsKey) as? [String: String] ?? [:]
         showInactive = defaults.bool(forKey: Self.showInactiveKey)
@@ -177,6 +182,7 @@ final class CoreStore {
         applyDock = notifications
         folded = Set(defaults.stringArray(forKey: Self.foldedKey) ?? [])
         history.store = self
+        threads.store = self
         if notifications {
             notifier.handle = { [weak self] action in await self?.perform(action) }
             notifier.setUp()
@@ -378,6 +384,7 @@ final class CoreStore {
             threadError = nil
             Task { await loadThread(committee: String(key[..<colon]), root: root) }
         }
+        if case let .thread(key) = place { threads.markSeen(key) }
         if old != place { syncTimeline() }
     }
 

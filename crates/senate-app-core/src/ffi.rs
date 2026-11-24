@@ -10,6 +10,8 @@
 //! work or read what is already in memory. Listener calls arrive on the
 //! core's threads; the app hops to its UI thread itself.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::Utc;
@@ -25,6 +27,7 @@ use senate_core::alias::AliasName;
 use senate_core::{CommitteeId, EventId, Locale, Mention, Seq};
 use tokio::runtime::{Handle, Runtime};
 
+use crate::activity::{ActivityListener, CommitteeThreadPage};
 use crate::link::{Backoff, Driver, Link, Sink};
 use crate::model::{self, Action, Failure, Model, Refresh};
 use crate::names;
@@ -247,7 +250,9 @@ pub struct AppCore {
     locale: Mutex<Locale>,
     driver: OnceLock<Arc<Driver<ListenerSink>>>,
     /// The timeline watches running, by session id.
-    watches: Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
+    watches: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    activity_watches: Mutex<HashMap<u64, tokio::task::JoinHandle<()>>>,
+    next_activity_watch: AtomicU64,
 }
 
 #[uniffi::export]
@@ -287,6 +292,8 @@ impl AppCore {
             locale: Mutex::new(locale),
             driver: OnceLock::new(),
             watches: Mutex::default(),
+            activity_watches: Mutex::default(),
+            next_activity_watch: AtomicU64::new(1),
         }))
     }
 
@@ -892,6 +899,84 @@ impl AppCore {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&session_id);
         if let Some(task) = task {
+            task.abort();
+        }
+    }
+
+    /// Every readable work and discussion thread in the committee.
+    pub async fn committee_threads(
+        &self,
+        committee: String,
+        include_archived: bool,
+        limit: Option<u32>,
+        cursor: Option<String>,
+    ) -> Result<CommitteeThreadPage, CoreError> {
+        let request = Request::CommitteeThreads {
+            committee: self.committee_id(&committee)?,
+            include_archived,
+            limit: limit.map(|limit| limit as usize),
+            cursor,
+        };
+        let reply: senate_bridge::ipc::CommitteeThreadPage = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        Ok(reply.into())
+    }
+
+    /// Watch selected committees, or all readable active ones when omitted.
+    /// A committee with no cursor starts at its current head.
+    pub fn watch_activity(
+        &self,
+        committees: Option<Vec<String>>,
+        after: HashMap<String, u64>,
+        listener: Arc<dyn ActivityListener>,
+    ) -> Result<u64, CoreError> {
+        let link = self.driver()?.link().clone();
+        let committees = committees
+            .map(|committees| {
+                committees
+                    .iter()
+                    .map(|c| self.committee_id(c))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        let after = after
+            .into_iter()
+            .map(|(committee, seq)| Ok((self.committee_id(&committee)?, Seq(seq))))
+            .collect::<Result<_, CoreError>>()?;
+        let request = Request::ActivityWatch { committees, after };
+        let task = self.handle.spawn(async move {
+            let result = async {
+                let mut stream = link.activity_watch(&request).await?;
+                while let Some(batch) = stream.next().await? {
+                    let reset = batch.reset;
+                    listener.on_batch(batch.into());
+                    if reset {
+                        break;
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            listener.on_end(result.err().as_ref().map(model::message));
+        });
+        let id = self.next_activity_watch.fetch_add(1, Ordering::Relaxed);
+        let mut watches = self
+            .activity_watches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        watches.retain(|_, task| !task.is_finished());
+        watches.insert(id, task);
+        Ok(id)
+    }
+
+    pub fn stop_activity(&self, id: u64) {
+        if let Some(task) = self
+            .activity_watches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id)
+        {
             task.abort();
         }
     }

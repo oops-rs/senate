@@ -357,6 +357,8 @@ pub struct ThreadSummary {
     pub since_ts: DateTime<Utc>,
     /// The last seq in the thread.
     pub updated: Seq,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<ThreadActivity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -391,6 +393,46 @@ pub struct ThreadSummary {
     /// answered by speaking in the thread themselves.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub directed: Vec<Directed>,
+}
+
+/// Log metadata used by committee-wide readers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadActivity {
+    pub last_at: DateTime<Utc>,
+    pub last_author: String,
+    pub opener: Option<String>,
+    pub addressee: Option<String>,
+    pub message_count: u64,
+    pub other_committee: Option<crate::CommitteeId>,
+}
+
+fn other_committee(event: &Event) -> Option<crate::CommitteeId> {
+    crate::Origin::of(event)
+        .map(|origin| origin.locator)
+        .into_iter()
+        .chain(crate::locator::intended(event))
+        .filter_map(|locator| locator.committee().cloned())
+        .find(|committee| committee != &event.committee)
+}
+
+fn activity_author(event: &Event) -> String {
+    if event.is_chair_discussion()
+        && let Some(origin) = crate::Origin::of(event)
+    {
+        return origin.locator.to_string();
+    }
+    event
+        .on_behalf_of
+        .as_ref()
+        .unwrap_or(&event.from)
+        .to_string()
+}
+
+fn is_message(event: &Event) -> bool {
+    matches!(
+        event.kind,
+        Kind::Question | Kind::Request | Kind::Answer | Kind::Note | Kind::Chat
+    )
 }
 
 /// Longest first line kept for [`Directed::line`], in characters.
@@ -560,6 +602,8 @@ pub const UNTITLED_CHARS: usize = 40;
 pub struct TaskBoard {
     head: Seq,
     threads: BTreeMap<Seq, ThreadSummary>,
+    discussions: BTreeMap<Seq, ThreadSummary>,
+    include_discussions: bool,
     output_level: OutputLevel,
     /// Who the Senate's people are: a `senator::` address that is not one
     /// of them is an agent's.
@@ -572,6 +616,14 @@ impl TaskBoard {
         Self {
             people,
             ..Self::default()
+        }
+    }
+
+    /// A separate, on-demand fold for readers outside the task inbox.
+    pub fn with_discussions(people: People) -> Self {
+        Self {
+            include_discussions: true,
+            ..Self::new(people)
         }
     }
 
@@ -597,6 +649,34 @@ impl TaskBoard {
             .collect();
         out.sort_by_key(|t| (t.since, t.root));
         out
+    }
+
+    /// Committee discussion threads in addition to tasks. Unanswered standalone
+    /// notes and chats do not form discussion threads until they get a reply.
+    pub fn committee_threads(
+        &self,
+        state: Option<StatusState>,
+        include_archived: bool,
+        before: Option<Seq>,
+        limit: usize,
+    ) -> Vec<&ThreadSummary> {
+        let mut rows: Vec<_> = self
+            .threads
+            .values()
+            .chain(self.discussions.values().filter(|t| {
+                t.updated > t.root
+                    || matches!(t.kind, Kind::Question | Kind::Request)
+                    || t.activity
+                        .as_ref()
+                        .is_some_and(|a| a.other_committee.is_some())
+            }))
+            .filter(|t| state.is_none_or(|s| t.state == s))
+            .filter(|t| include_archived || t.state != StatusState::Archived)
+            .filter(|t| before.is_none_or(|before| t.updated < before))
+            .collect();
+        rows.sort_unstable_by_key(|t| std::cmp::Reverse(t.updated));
+        rows.truncate(limit);
+        rows
     }
 
     /// [`TaskBoard::threads`] narrowed to those addressed to `agent`: one
@@ -634,10 +714,14 @@ impl TaskBoard {
             .iter()
             .filter_map(|a| self.people.as_agent(a).cloned())
             .collect();
-        if !is_task {
+        let threads = if is_task {
+            &mut self.threads
+        } else if self.include_discussions && is_message(event) {
+            &mut self.discussions
+        } else {
             return;
-        }
-        self.threads.insert(
+        };
+        threads.insert(
             event.seq,
             ThreadSummary {
                 root: event.seq,
@@ -651,6 +735,18 @@ impl TaskBoard {
                 since: event.seq,
                 since_ts: event.ts,
                 updated: event.seq,
+                activity: self.include_discussions.then(|| ThreadActivity {
+                    last_at: event.ts,
+                    last_author: activity_author(event),
+                    opener: event.is_chair_discussion().then(|| activity_author(event)),
+                    addressee: event
+                        .to
+                        .is_empty()
+                        .then(|| crate::locator::intended(event).map(|locator| locator.to_string()))
+                        .flatten(),
+                    message_count: u64::from(is_message(event)),
+                    other_committee: other_committee(event),
+                }),
                 steps: Vec::new(),
                 links: Vec::new(),
                 owner: None,
@@ -668,10 +764,22 @@ impl TaskBoard {
     }
 
     fn observe_reply(&mut self, root: Seq, event: &Event) {
-        let Some(thread) = self.threads.get_mut(&root) else {
+        let Some(thread) = self
+            .threads
+            .get_mut(&root)
+            .or_else(|| self.discussions.get_mut(&root))
+        else {
             return;
         };
         thread.updated = event.seq;
+        if let Some(activity) = &mut thread.activity {
+            activity.last_at = event.ts;
+            activity.last_author = activity_author(event);
+            activity.message_count += u64::from(is_message(event));
+            if activity.other_committee.is_none() {
+                activity.other_committee = other_committee(event);
+            }
+        }
         let enter = |thread: &mut ThreadSummary, state: StatusState| {
             if thread.state != state {
                 thread.state = state;

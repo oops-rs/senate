@@ -573,6 +573,9 @@ pub struct SessionRow {
     /// (since its host started).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typed_secs_ago: Option<u64>,
+    /// The attached viewer's terminal device (`/dev/ttys012`), when it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_tty: Option<String>,
     /// The host's attach socket.
     pub tty: PathBuf,
     /// A permission prompt waits in its terminal for a person: what it is
@@ -714,6 +717,28 @@ pub struct AttachInfo {
     pub primary: SenatorName,
     pub tty: Option<PathBuf>,
     pub paused: bool,
+}
+
+/// An office whose current holder can be used as a hosted session selector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionRole {
+    Chair {
+        committee: CommitteeId,
+    },
+    Secretary {
+        senate: Option<senate_core::SenatePath>,
+    },
+    Speaker,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRoleHolder {
+    pub primary: SenatorName,
+    /// The current hosted session here, if recorded, even when stopped.
+    pub session_id: Option<String>,
+    /// All eligible holders in desk order, for locating one on a paired machine.
+    pub candidates: Vec<SenatorName>,
 }
 
 /// What [`Request::Resume`] did.
@@ -1094,6 +1119,23 @@ pub enum Request {
         #[serde(default)]
         limit: Option<usize>,
     },
+    CommitteeThreads {
+        committee: CommitteeId,
+        #[serde(default)]
+        include_archived: bool,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        cursor: Option<String>,
+    },
+    ActivityWatch {
+        /// None selects every readable, unarchived committee.
+        #[serde(default)]
+        committees: Option<Vec<CommitteeId>>,
+        /// Omitted committees begin at their current head.
+        #[serde(default)]
+        after: std::collections::BTreeMap<CommitteeId, Seq>,
+    },
     TimelineWatch {
         session_id: String,
         after: u64,
@@ -1108,6 +1150,12 @@ pub enum Request {
         #[serde(flatten)]
         target: AttachTarget,
     },
+    /// List terminal choices without reading conversation transcripts.
+    AttachChoices,
+    ResolveSessionRole {
+        role: SessionRole,
+    },
+    SessionRoleNames,
     Attach {
         senator: AliasName,
     },
@@ -1207,6 +1255,11 @@ pub enum Request {
     /// The archived committees (`senate committees --archived`, the app's
     /// Show archived).
     ArchivedCommittees,
+    /// Make the terminal attached to a hosted session ring and flash its
+    /// title (`senate session find`).
+    FindSession {
+        senator: AliasName,
+    },
     /// The machine's default secretary, changing nothing (`senate setup
     /// doctor`, the app).
     DefaultSecretary,
@@ -2445,6 +2498,18 @@ pub struct DeskOpenReply {
     pub existing_chair: Option<SenatorName>,
 }
 
+/// What [`Request::FindSession`] found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindReply {
+    /// The session, as a command names it (`committee::alias`).
+    pub name: String,
+    /// Whether a terminal is attached to it: it now rings and flashes.
+    pub attached: bool,
+    /// That terminal's device, when it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tty: Option<String>,
+}
+
 /// The machine's default secretary ([`Request::DefaultSecretary`],
 /// [`Request::EnsureSecretary`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2537,6 +2602,61 @@ pub enum StreamState {
     Stopped,
 }
 
+/// One page ordered by decreasing last activity sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitteeThreadPage {
+    pub rows: Vec<CommitteeThread>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitteeThread {
+    pub committee: CommitteeId,
+    pub root: Seq,
+    pub title: String,
+    pub kind: String,
+    pub opener: String,
+    pub addressees: Vec<String>,
+    pub owner: Option<String>,
+    pub state: String,
+    pub waits_on: Option<String>,
+    pub escalated_to: Option<String>,
+    pub takeover: Option<String>,
+    pub last_seq: Seq,
+    pub last_at: Option<DateTime<Utc>>,
+    pub last_author: Option<String>,
+    pub message_count: Option<u64>,
+    pub other_committee: Option<CommitteeId>,
+}
+
+/// A bounded batch. A reset ends the stream and asks the caller to refresh.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityBatch {
+    pub events: Vec<ActivityEntry>,
+    /// Initial resume positions. Later batches advance these via event seqs.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub cursors: std::collections::BTreeMap<CommitteeId, Seq>,
+    pub reset: bool,
+}
+
+/// Log previews. Kinds include chat, binding, question, answer, request,
+/// note, decision, checkpoint, status, escalation, presence, joined, left, state,
+/// chair_changed, session_started, session_stopped, and unknown. State
+/// describes the thread on status/escalation and the seat on lifecycle events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityEntry {
+    pub committee: CommitteeId,
+    pub seq: Seq,
+    pub at: DateTime<Utc>,
+    pub kind: String,
+    pub from: String,
+    pub to: Vec<String>,
+    pub on_behalf_of: Option<String>,
+    pub thread: Option<Seq>,
+    pub line: String,
+    pub state: Option<String>,
+}
+
 /// A committee as shown in the Senate roster.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RosterCommittee {
@@ -2553,6 +2673,14 @@ pub struct RosterMember {
     pub senator: SenatorName,
     pub display_name: String,
     pub active: bool,
+    #[serde(default)]
+    pub runtime: Option<Runtime>,
+    #[serde(default)]
+    pub session_state: Option<String>,
+    #[serde(default)]
+    pub status_title: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl RosterCommittee {

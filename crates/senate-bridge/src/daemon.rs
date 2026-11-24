@@ -167,6 +167,7 @@ use crate::session::{self, Runtime, Session, SessionState};
 use crate::state::{ItemKey, ItemStatus, QueueItem, SessionUpsert, Store, StoreError};
 use crate::stream::{self, CommitteeWorker};
 
+mod activity;
 mod approval_guard;
 pub mod default_secretary;
 mod desk_decision;
@@ -515,6 +516,7 @@ pub(crate) struct Shared {
     pub(crate) ladder: Ladder,
     pub(crate) timing: Timing,
     streams: Mutex<BTreeMap<Seat, CommitteeWorker>>,
+    activity: activity::ActivityHub,
     /// Wakes the batcher.
     pub(crate) work: Notify,
     /// Wakes the supervisor.
@@ -972,6 +974,7 @@ impl Shared {
             uplink,
             timing: common.timing,
             streams: Mutex::new(BTreeMap::new()),
+            activity: activity::ActivityHub::default(),
             work: Notify::new(),
             committees_changed: Notify::new(),
             generation: RwLock::new(0),
@@ -2022,6 +2025,7 @@ impl Shared {
         event: &Event,
         dirty: &Notify,
     ) -> Result<(), StoreError> {
+        self.activity.publish(event, true);
         if self.observe_chair(event) {
             self.seed_chair(&event.committee).await;
         }
@@ -3114,6 +3118,7 @@ impl Shared {
                     .map(|me| me.archived)
                     .map_err(server_error),
             ),
+            Request::FindSession { senator } => wrap(self.on_find_session(senator).await),
             Request::DefaultSecretary => wrap(self.on_default_secretary().await),
             Request::EnsureSecretary => {
                 self.sessions_changed(wrap(self.on_ensure_secretary().await))
@@ -3198,6 +3203,13 @@ impl Shared {
                 model,
             } => self.sessions_changed(wrap(self.on_replace(&senator, prompt, model).await)),
             Request::AttachInfo { target } => wrap(self.on_attach_info(target).await),
+            Request::AttachChoices => {
+                self.refresh_display_aliases().await;
+                let aliases = lock(&self.display_aliases).as_ref().map(|(_, a)| a.clone());
+                wrap(self.session_rows(false, aliases).await)
+            }
+            Request::ResolveSessionRole { role } => wrap(self.resolve_session_role(role).await),
+            Request::SessionRoleNames => wrap(self.session_role_names()),
             Request::Attach { senator } => wrap(self.on_attach(senator).await),
             Request::Receipt { committee, seq } => wrap(self.receipt(&committee, seq).await),
             Request::SetCommitteeSeat { committee, request } => {
@@ -3211,6 +3223,8 @@ impl Shared {
             Request::RemoteControl { .. } => Reply::err(IpcError::bad_request("local device management only")),
             Request::Profiles => wrap(Ok(&self.config.profiles)),
             Request::Sessions => wrap(self.on_sessions(false).await),
+            Request::CommitteeThreads { committee, include_archived, limit, cursor } =>
+                wrap(self.on_committee_threads(committee, include_archived, limit, cursor).await),
             Request::Stats { from, to, tz } => wrap(self.on_stats(from, to, &tz).await),
             Request::SessionHistory { committee, before, limit } =>
                 wrap(self.on_history(committee, before, limit).await),
@@ -3497,7 +3511,7 @@ impl Shared {
             Request::SessionDrop { .. } => Reply::err(IpcError::bad_request(
                 "attachments require an upload connection on the local person socket",
             )),
-            Request::Watch { .. } | Request::TimelineWatch { .. } => Reply::err(IpcError::bad_request(
+            Request::Watch { .. } | Request::TimelineWatch { .. } | Request::ActivityWatch { .. } => Reply::err(IpcError::bad_request(
                 "watch turns a connection into a stream; send it as the connection's request",
             )),
         }
@@ -3558,14 +3572,22 @@ impl Shared {
         &self,
         include_transcript: bool,
     ) -> Result<crate::ipc::SessionsReply, IpcError> {
-        use crate::ipc::{HostState, LocalSessionRow, SessionRow, SessionsReply};
-        let paths = Paths::new(&self.home);
         // An alias is the Senate's to say; one that does not answer in time
         // leaves each session under its senator's own name.
         let aliases = tokio::time::timeout(Duration::from_secs(2), self.api.aliases())
             .await
             .ok()
             .and_then(Result::ok);
+        self.session_rows(include_transcript, aliases).await
+    }
+
+    async fn session_rows(
+        &self,
+        include_transcript: bool,
+        aliases: Option<senate_core::alias::KnownAliases>,
+    ) -> Result<crate::ipc::SessionsReply, IpcError> {
+        use crate::ipc::{HostState, LocalSessionRow, SessionRow, SessionsReply};
+        let paths = Paths::new(&self.home);
         let chairs: BTreeMap<_, _> = self.known_chairs().into_iter().collect();
         let mut rows = Vec::new();
         let mut known = BTreeSet::new();
@@ -3596,9 +3618,10 @@ impl Shared {
         } else {
             HashMap::new()
         };
+        let mut prompts = self.hosted_prompts();
         for (session, host_id) in hosted {
             let facts = crate::host::facts(&paths, &host_id).map_err(IpcError::internal)?;
-            let prompt = self.hosted_prompt(&host_id);
+            let prompt = prompts.remove(&host_id);
             let committee = session.committee().cloned();
             let alias = committee
                 .as_ref()
@@ -3639,6 +3662,7 @@ impl Shared {
                 started_at: facts.started_at,
                 attached: facts.attached,
                 typed_secs_ago: facts.typed_secs_ago,
+                viewer_tty: facts.viewer_tty,
                 prompt,
                 paused: !facts.running && paused.contains(&session.agent),
             });
@@ -6363,6 +6387,31 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         tokio::select! {
                             () = Box::pin(session_drop::serve(&shared, peer, request, reader, write)) => {}
                             _ = shutdown.changed() => {}
+                        }
+                        return;
+                    }
+                    Ok(Request::ActivityWatch { committees, after }) => {
+                        match shared
+                            .refuse_agent_caller(
+                                peer,
+                                "Read committee activity from your own terminal or the Senate app",
+                            )
+                            .await
+                        {
+                            Ok(()) => {
+                                Box::pin(activity::serve(
+                                    shared.primary(),
+                                    committees,
+                                    after,
+                                    reader,
+                                    write,
+                                    shutdown,
+                                ))
+                                .await
+                            }
+                            Err(error) => {
+                                send_ipc_line(&mut write, &Reply::err(error)).await;
+                            }
                         }
                         return;
                     }

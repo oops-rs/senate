@@ -130,8 +130,14 @@ async fn resolve(paths: &Paths, name: &str) -> anyhow::Result<String> {
 
 pub(super) fn show(name: &str) -> anyhow::Result<()> {
     let paths = Paths::from_env()?;
+    let role = super::session_role::resolve(&paths, name, None)?;
     let rt = runtime(false)?;
-    let id = rt.block_on(resolve(&paths, name))?;
+    let id = match role {
+        Some(holder) => holder
+            .session_id
+            .context("the role has no local hosted session")?,
+        None => rt.block_on(resolve(&paths, name))?,
+    };
     let terminal = Terminal::stdout(None);
     let tty = io::stdout().is_terminal();
     if tty {

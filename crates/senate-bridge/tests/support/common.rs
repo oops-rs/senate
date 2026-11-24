@@ -268,6 +268,7 @@ pub struct Inner {
     pub roster: Roster,
     pub aliases: senate_core::alias::CommitteeAliases,
     pub alias_delay: Duration,
+    pub alias_lookup_delay: Duration,
     /// Answer as a server older than per-committee aliases: no
     /// `/v1/committee-aliases`, only the Senate-wide `/v1/aliases`.
     pub old_aliases: bool,
@@ -431,6 +432,10 @@ async fn add_epoch(State(st): St, mut resp: Response) -> Response {
 async fn aliases(State(st): St, headers: HeaderMap) -> Response {
     if let Err(error) = auth(&st, &headers) {
         return error;
+    }
+    let delay = st.inner.lock().unwrap().alias_lookup_delay;
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
     }
     let inner = st.inner.lock().unwrap();
     if inner.old_aliases {
@@ -1097,12 +1102,19 @@ async fn threads(
         return r;
     }
     let inner = st.inner.lock().unwrap();
-    let mut board = senate_core::TaskBoard::new(inner.roster.people());
+    let mut board = if q.include_discussions {
+        senate_core::TaskBoard::with_discussions(inner.roster.people())
+    } else {
+        senate_core::TaskBoard::new(inner.roster.people())
+    };
     for e in inner.events.get(&committee).cloned().unwrap_or_default() {
         board.observe(&e);
     }
     let threads = match &q.agent {
         Some(agent) => board.threads_for(agent, q.state),
+        None if q.include_discussions => {
+            board.committee_threads(q.state, q.include_archived, q.before, q.limit.unwrap_or(41))
+        }
         None => board.threads(q.state),
     };
     Json(senate_core::api::ThreadsPage {
@@ -1466,6 +1478,7 @@ impl FakeServer {
                 raw: HashMap::new(),
                 aliases: Default::default(),
                 alias_delay: Duration::ZERO,
+                alias_lookup_delay: Duration::ZERO,
                 old_aliases: false,
                 cursors: HashMap::new(),
                 heartbeats: Vec::new(),

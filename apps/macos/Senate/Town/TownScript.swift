@@ -8,7 +8,7 @@ enum TownScript {
     /// the store's.
     static let env = "SENATE_APP_TOWN_DEMO"
 
-    static var requested: TownInput? {
+    static var requested: TownState? {
         switch ProcessInfo.processInfo.environment[env] {
         case "1", "small": quiet
         case "large": large
@@ -24,14 +24,14 @@ enum TownScript {
 
     /// Five committees and a hall: someone at work, someone idle, a
     /// senator asleep, one waiting on a person, two threads waiting on you.
-    static let quiet = TownInput(state: TownState(
+    static let quiet = TownState(
         committees: [
             TownCommittee(name: "senate", senators: [
                 s("claude-chair", "chair", .claude, .working, chair: true),
                 s("claude-town", "town", .claude, .working),
                 s("codex-flaky", "flaky", .codex, .idle),
                 s("claude-app", "app", .claude, .waiting),
-            ], waiting: [TownThreadRef(committee: "senate", root: 2577, title: "Unknown committee in ask")]),
+            ], waiting: [TownThreadRef(committee: "senate", root: 2577, title: "Unknown committee in ask", asker: "app")]),
             TownCommittee(name: "ledger", senators: [
                 s("codex-ledger", "ledger-chair", .codex, .idle, chair: true),
                 s("claude-migrate", "migrate", .claude, .working),
@@ -50,8 +50,9 @@ enum TownScript {
                 s("claude-docs", "docs", .claude, .idle, chair: true),
             ]),
         ],
-        hall: TownHall(secretary: s("claude-secretary", "secretary", .claude, .working), docket: 1)
-    ))
+        hall: TownHall(secretary: s("claude-secretary", "secretary", .claude, .working), docket: 1),
+        person: "wendell"
+    )
 
     /// What happens in the busy town: visits within a house, across the
     /// street, and to the hall.
@@ -65,6 +66,9 @@ enum TownScript {
         .message(from: "claude-docs", to: "claude-secretary", thread: ref("docs", 9, "Release notes"),
                  line: "Release notes are ready for the Speaker"),
         .mood(senator: "codex-flaky", .working),
+        .answered(thread: ref("ledger", 77, "Migration order"), a: "claude-migrate", b: "codex-ledger"),
+        .arrived(senator: "claude-new"),
+        .left(senator: "claude-modal"),
     ]
 
     private static func ref(_ committee: String, _ root: UInt64, _ title: String) -> TownThreadRef {
@@ -73,17 +77,21 @@ enum TownScript {
 
     /// The quiet town after the busy events' mood changes.
     static var busyState: TownState {
-        var state = quiet.state
+        var state = quiet
         for (i, committee) in state.committees.enumerated() {
-            for (j, senator) in committee.senators.enumerated() where senator.id == "codex-flaky" {
-                state.committees[i].senators[j].mood = .working
+            for (j, senator) in committee.senators.enumerated() {
+                if senator.id == "codex-flaky" { state.committees[i].senators[j].mood = .working }
+                if senator.id == "claude-modal" { state.committees[i].senators[j].mood = .stopped }
+            }
+            if committee.name == "web" {
+                state.committees[i].senators.append(s("claude-new", "new", .claude, .idle))
             }
         }
         return state
     }
 
     /// Thirty committees and sixty senators: the stress test.
-    static let large: TownInput = {
+    static let large: TownState = {
         let moods: [TownMood] = [.working, .idle, .idle, .working, .paused, .waiting, .idle, .stopped]
         let runtimes: [TownRuntime] = [.claude, .codex, .agy, .claude]
         var committees: [TownCommittee] = []
@@ -99,7 +107,7 @@ enum TownScript {
                 waiting: c % 7 == 0 ? [TownThreadRef(committee: "committee-\(c)", root: UInt64(c + 1), title: "Question")] : []
             ))
         }
-        return TownInput(state: TownState(committees: committees, hall: TownHall()))
+        return TownState(committees: committees, hall: TownHall())
     }()
 
     /// Visits for the large town: a dozen at once, more than are let out.

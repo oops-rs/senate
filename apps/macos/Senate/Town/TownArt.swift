@@ -112,6 +112,7 @@ final class TownArt {
     private(set) lazy var room = texture(TownLayout.room, drawRoom(TownLayout.room, hall: false))
     private(set) lazy var hall = texture(TownLayout.hallRoom, drawRoom(TownLayout.hallRoom, hall: true))
     private(set) lazy var raisedHand = texture(CGSize(width: 14, height: 14), drawRaised)
+    private(set) lazy var waitBadge = texture(CGSize(width: 22, height: 13), drawWaitBadge)
 
     init(palette: TownPalette) {
         self.palette = palette
@@ -158,7 +159,9 @@ final class TownArt {
     }
 
     static func drawPerson(_ ctx: CGContext, palette p: TownPalette, runtime: TownRuntime, pose: TownPose, visitor: Bool) {
-        let shirt = visitor ? p.inkSoft : p.shirt(runtime)
+        // The visitor is a person, not an agent: a coat in the colour of
+        // what waits on you, a letter in hand.
+        let shirt = visitor ? p.attention : p.shirt(runtime)
         let asleep = pose == .sleep
         // Shadow.
         fill(ctx, 0x000000, alpha: p.dark ? 0.28 : 0.12, CGPath(ellipseIn: CGRect(x: 4, y: 0.5, width: 16, height: 4.5), transform: nil))
@@ -188,11 +191,20 @@ final class TownArt {
         // Body.
         fill(ctx, shirt, round(CGRect(x: 5, y: 8, width: 14, height: 13.5), 5))
         if visitor {
-            // A coat's lapels and a letter held.
-            ctx.setStrokeColor(TownPalette.cg(p.dark ? 0x2A2A2D : 0xFFFFFF, alpha: 0.8))
+            // A coat's lapels, and a letter held in front.
+            ctx.setStrokeColor(TownPalette.cg(0x5C3400, alpha: 0.6))
             ctx.setLineWidth(1)
             ctx.move(to: CGPoint(x: 12, y: 9)); ctx.addLine(to: CGPoint(x: 9, y: 20)); ctx.strokePath()
             ctx.move(to: CGPoint(x: 12, y: 9)); ctx.addLine(to: CGPoint(x: 15, y: 20)); ctx.strokePath()
+            let letter = CGRect(x: 6.5, y: 9.5, width: 9, height: 6.5)
+            fill(ctx, 0xFFFFFF, round(letter, 1))
+            ctx.setStrokeColor(TownPalette.cg(0x8A4F00))
+            ctx.setLineWidth(0.8)
+            ctx.addPath(round(letter, 1)); ctx.strokePath()
+            ctx.move(to: CGPoint(x: letter.minX, y: letter.maxY))
+            ctx.addLine(to: CGPoint(x: letter.midX, y: letter.midY - 0.5))
+            ctx.addLine(to: CGPoint(x: letter.maxX, y: letter.maxY))
+            ctx.strokePath()
         } else {
             drawGlyph(ctx, runtime, at: CGPoint(x: 12, y: 14.6), color: p.dark ? 0x1B1B1E : 0xFFFFFF)
         }
@@ -318,6 +330,15 @@ final class TownArt {
         Self.fill(ctx, p.attention, CGPath(ellipseIn: CGRect(x: 0.5, y: 0.5, width: 13, height: 13), transform: nil))
         Self.fill(ctx, p.dark ? 0x1B1B1E : 0xFFFFFF, Self.round(CGRect(x: 6.1, y: 5, width: 1.8, height: 6), 0.9))
         Self.fill(ctx, p.dark ? 0x1B1B1E : 0xFFFFFF, CGPath(ellipseIn: CGRect(x: 6.1, y: 2.2, width: 1.8, height: 1.8), transform: nil))
+    }
+
+    /// "Waiting": a pill with three dots, over a visitor's head.
+    private func drawWaitBadge(_ ctx: CGContext) {
+        let p = palette
+        Self.fill(ctx, p.attention, Self.round(CGRect(x: 0.5, y: 0.5, width: 21, height: 12), 6))
+        for x in [CGFloat(6.5), 11, 15.5] {
+            Self.fill(ctx, p.dark ? 0x1B1B1E : 0xFFFFFF, CGPath(ellipseIn: CGRect(x: x - 1.4, y: 5.1, width: 2.8, height: 2.8), transform: nil))
+        }
     }
 
     private func drawTree(_ ctx: CGContext) {

@@ -57,6 +57,8 @@ struct MainWindow: View {
             return L("secretary.title")
         case .town:
             return L("town.title")
+        case let .threads(committee):
+            return committee
         case let .past(id):
             return store.history.row(id)?.name ?? L("tab.history")
         case let .desk(item):
@@ -94,6 +96,7 @@ struct MainWindow: View {
             case let .committee(name): CommitteePage(store: store, name: name)
             case .secretary: SecretaryPage(store: store)
             case .town: TownPage(store: store)
+            case let .threads(committee): CommitteeThreadsPage(store: store, committee: committee)
             case .section(.history): HistoryView(store: store)
             case let .past(id): PastSessionPage(store: store, sessionId: id)
             case .item, .section(.inbox): InboxView(store: store)
@@ -253,6 +256,14 @@ private struct Sidebar: View {
         .environment(\.defaultMinListRowHeight, Theme.rowHeight)
         // The archived committees: read when asked for, and on reconnecting.
         .task(id: store.showArchived && store.state.online) { await store.loadArchived() }
+        // The committees' threads, followed while online.
+        .task(id: "\(store.state.online) \(store.showInactive) \(store.state.groups.compactMap(\.committee))") {
+            if store.state.online {
+                await store.threads.start(committees: store.state.groups.compactMap(\.committee), archived: store.showInactive)
+            } else {
+                store.threads.stop()
+            }
+        }
     }
 
     private var searchField: some View {
@@ -317,6 +328,20 @@ private struct CommitteeGroup: View {
                 SessionRow(session: session)
                     .tag(CoreStore.Place.session(session.sessionId))
                     .contextMenu { SessionMenu(store: store, session: session) }
+            }
+            // Its threads: what its senators are saying to one another,
+            // newest first; "Show all" past the first few.
+            if let committee = group.committee {
+                let threads = store.threads.threads(committee)
+                ForEach(threads.prefix(ThreadsModel.shown), id: \.root) { thread in
+                    SidebarThreadRow(store: store, thread: thread)
+                        .tag(CoreStore.Place.thread(ThreadsModel.key(thread)))
+                }
+                if threads.count > ThreadsModel.shown || store.threads.more.contains(committee) {
+                    FixedRow(title: L("sidebar.threads_all")) { FixedSymbol(name: "ellipsis") }
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                        .tag(CoreStore.Place.threads(committee))
+                }
             }
         } label: {
             HStack(spacing: 6) {
@@ -851,5 +876,76 @@ private struct ArchivedRow: View {
         .accessibilityLabel(committee)
         .accessibilityValue(L("sidebar.archived"))
         .accessibilityIdentifier("archived-\(committee)")
+    }
+}
+
+/// A committee's thread in the sidebar: how it stands, its title, who is
+/// talking to whom, and a dot when something was said since it was opened.
+private struct SidebarThreadRow: View {
+    let store: CoreStore
+    let thread: CommitteeThread
+
+    var body: some View {
+        let t = thread
+        let unread = store.threads.unread(t)
+        HStack(spacing: 7) {
+            ThreadStateMark(state: t.state, waiting: t.waitsOn != nil || t.escalatedTo != nil)
+                .frame(width: 20, height: 20)
+            Text(verbatim: Mentions.shared.plain(t.title, committee: t.committee))
+                .font(Theme.Fonts.row.weight(unread ? .semibold : .regular))
+                .foregroundStyle(t.state == "archived" ? Theme.onSurfaceVariant : Theme.onSurface)
+                .lineLimit(1)
+            Spacer(minLength: Theme.Space.xs)
+            // Who to whom keeps its room; the title is cut first.
+            Text(verbatim: ThreadParties.line(t))
+                .font(Theme.Fonts.meta)
+                .foregroundStyle(Theme.onSurfaceVariant)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 120, alignment: .trailing)
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
+            if unread {
+                Circle().fill(Theme.primary).frame(width: 7, height: 7)
+                    .accessibilityHidden(true)
+            }
+        }
+        .help(Mentions.shared.plain(t.title, committee: t.committee))
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isStaticText)
+        .accessibilityLabel(Mentions.shared.plain(t.title, committee: t.committee))
+        .accessibilityValue([ThreadParties.line(t), ThreadStateMark.label(t.state, waiting: t.waitsOn != nil),
+                             unread ? L("a11y.unread") : nil].compactMap { $0 }.joined(separator: ", "))
+    }
+}
+
+/// "codex → lead": who opened a thread and whom it is to, by name.
+enum ThreadParties {
+    static func line(_ t: CommitteeThread) -> String {
+        let name = { (s: String) in
+            Mentions.shared.plain(s.hasPrefix("[") ? s : "[\(s)]", committee: t.committee)
+        }
+        let to = t.addressees.prefix(2).map(name).joined(separator: ", ")
+            + (t.addressees.count > 2 ? " +\(t.addressees.count - 2)" : "")
+        return to.isEmpty ? name(t.opener) : "\(name(t.opener)) → \(to)"
+    }
+}
+
+/// A thread's state as one small mark: waiting on a person (attention),
+/// in progress, open, archived.
+struct ThreadStateMark: View {
+    let state: String
+    let waiting: Bool
+
+    var body: some View {
+        Image(systemName: waiting ? "hand.raised.fill" : state == "processing" ? "ellipsis.bubble" :
+                state == "archived" ? "archivebox" : "bubble.left.and.bubble.right")
+            .font(.system(size: 12))
+            .foregroundStyle(waiting ? Theme.attention : state == "processing" ? Theme.primary : Theme.onSurfaceVariant)
+            .accessibilityHidden(true)
+    }
+
+    static func label(_ state: String, waiting: Bool) -> String {
+        waiting ? L("thread.state_waiting") : L("thread.state_\(state)")
     }
 }

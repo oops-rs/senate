@@ -17,6 +17,8 @@ mod cli_legacy;
 mod cli_secretary;
 #[path = "cli_remote.rs"]
 mod remote_cli;
+#[path = "cli_session_role.rs"]
+mod session_role;
 
 use std::io::{Read, Write};
 #[path = "cli_completion.rs"]
@@ -635,11 +637,11 @@ stdin.")]
         /// Connect to an already-running session on a paired machine.
         #[arg(long, add = ArgValueCandidates::new(remote_cli::complete_machines))]
         machine: Option<Name>,
-        /// The senator's primary name or alias (`committee::alias` for an
-        /// alias on one committee). Without one, choose a hosted session
-        /// from a list (in a terminal).
+        /// Primary name, alias, chair, committee::chair, secretary or speaker.
+        /// Bare chair follows this directory's committee. Without a selector,
+        /// choose a hosted session in the terminal.
         #[arg(add = ArgValueCandidates::new(completion::sessions))]
-        senator: Option<AliasName>,
+        senator: Option<String>,
         /// Select an exact native session ID (used by the app).
         #[arg(long, hide = true, conflicts_with = "senator")]
         session: Option<String>,
@@ -773,11 +775,12 @@ enum DebugCmd {
 enum SessionCmd {
     /// Repair two agy conversation records for one hosted terminal.
     Rebind {
-        /// The original senator or the terminal's host ID.
+        /// The original senator by name or role, or the terminal's host ID.
+        #[arg(add = ArgValueCandidates::new(completion::sessions))]
         host: String,
-        /// The live senator that should own this terminal.
-        #[arg(long)]
-        to: AliasName,
+        /// The live senator that should own this terminal, by name or role.
+        #[arg(long, add = ArgValueCandidates::new(completion::sessions))]
+        to: String,
     },
     /// List past sessions or search their conversations.
     History {
@@ -790,7 +793,7 @@ enum SessionCmd {
     },
     /// Read a past conversation.
     Show {
-        /// A session ID, senator name or committee-qualified alias.
+        /// Session ID, name, alias or role (chair, committee::chair, secretary, speaker).
         #[arg(add = ArgValueCandidates::new(completion::history))]
         session: String,
     },
@@ -842,7 +845,7 @@ enum SessionCmd {
   senate session stop --idle         Stop each one nobody is attached to
   senate session stop --all --force  Stop all, even if typed into lately")]
     Stop {
-        /// Sessions by name (`committee::alias`, an alias, or senator name).
+        /// Sessions by name, alias or role (chair, committee::chair, secretary, speaker).
         #[arg(required_unless_present_any = ["idle", "all"], add = ArgValueCandidates::new(completion::sessions))]
         names: Vec<String>,
         /// Every running session nobody is attached to.
@@ -855,6 +858,20 @@ enum SessionCmd {
         /// viewer attending it.
         #[arg(long)]
         force: bool,
+    },
+    /// Make the terminal a hosted session is attached in ring and flash its
+    /// title, to find the panel that holds it.
+    ///
+    /// Only that terminal's title and bell are touched, for a few seconds;
+    /// nothing reaches the agent's screen or input. A refused `senate
+    /// attach` does the same.
+    #[command(after_help = "Examples:
+  senate session find senate::main    Which panel holds it?")]
+    Find {
+        /// The senator's alias (`committee::alias` for one on one
+        /// committee) or primary name.
+        #[arg(add = ArgValueCandidates::new(completion::sessions))]
+        senator: AliasName,
     },
     /// Answer the permission prompt waiting in a hosted session's terminal,
     /// without attaching.
@@ -870,12 +887,11 @@ enum SessionCmd {
   senate session approve reviewer --deny     Refuse it
   senate session approve --once              The only prompt waiting")]
     Approve {
-        /// The senator's alias (`committee::alias` for one on one
-        /// committee) or primary name. Without one, the only session with
-        /// a prompt waiting; the answer must then be given (--once,
-        /// --always or --deny), and what it answers is printed first.
+        /// Name, alias or role (chair, committee::chair, secretary, speaker).
+        /// Without one, answer the only session with a prompt waiting. Give
+        /// --once, --always or --deny, and the command prints the prompt first.
         #[arg(add = ArgValueCandidates::new(completion::sessions))]
-        senator: Option<AliasName>,
+        senator: Option<String>,
         /// Allow it this once (the default).
         #[arg(long, conflicts_with_all = ["always", "deny"])]
         once: bool,
@@ -937,10 +953,9 @@ enum SessionCmd {
     /// hosted Claude session with no saved conversation opens with its
     /// original ID.
     Restore {
-        /// The senator's primary name or alias (`committee::alias` for an
-        /// alias on one committee).
+        /// Name, alias or role (chair, committee::chair, secretary, speaker).
         #[arg(add = ArgValueCandidates::new(completion::sessions))]
-        senator: AliasName,
+        senator: String,
         /// Attach to the new terminal after it is ready. Requires a TTY.
         #[arg(short = 'a', long)]
         attach: bool,
@@ -963,10 +978,9 @@ enum SessionCmd {
   senate session replace reviewer --prompt 'Pick up the gateway review'
   senate session replace refund-v2::reviewer --model opus --effort high")]
     Replace {
-        /// The senator's alias (`committee::alias` for one on one
-        /// committee) or primary name.
+        /// Name, alias or role (chair, committee::chair, secretary, speaker).
         #[arg(add = ArgValueCandidates::new(completion::sessions))]
-        senator: AliasName,
+        senator: String,
         /// A first instruction for the new session, sent once the seat is
         /// handed over, as an ordinary Senate request from you.
         #[arg(long, conflicts_with = "prompt_file")]
@@ -1065,7 +1079,7 @@ enum SenatorCmd {
 /// Which sessions `session pause` and `resume` are for.
 #[derive(Args)]
 struct PauseSelection {
-    /// Sessions by name (`committee::alias`, an alias, or senator name).
+    /// Sessions by name, alias or role (chair, committee::chair, secretary, speaker).
     #[arg(add = ArgValueCandidates::new(completion::sessions))]
     names: Vec<String>,
     /// Every one.
@@ -1770,7 +1784,14 @@ fn pick_alias(name: AliasName) -> anyhow::Result<AliasName> {
         return Ok(name);
     }
     let paths = Paths::from_env()?;
-    let known: KnownAliases = runtime(false)?.block_on(daemon_call(&paths, &Request::Aliases))?;
+    let known: KnownAliases = runtime(false)?
+        .block_on(ipc::request(
+            &paths.socket(),
+            &Request::Aliases,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        ))
+        .with_context(|| format!("look up alias {name}"))?;
     match known.resolve(&name, None) {
         AliasMatch::Ambiguous { candidates, .. } => {
             let chosen = choose_alias(&name, candidates)?;
@@ -1778,6 +1799,13 @@ fn pick_alias(name: AliasName) -> anyhow::Result<AliasName> {
         }
         _ => Ok(name),
     }
+}
+
+fn session_senator(paths: &Paths, written: &str) -> anyhow::Result<AliasName> {
+    if let Some(holder) = session_role::resolve(paths, written, None)? {
+        return Ok(AliasName::bare(holder.primary));
+    }
+    pick_alias(written.parse()?)
 }
 
 /// `senate session stop`: stops each chosen session as the daemon's `Stop`
@@ -1920,9 +1948,9 @@ fn pause_selector(
             .map(|primary| StopSelector::Named(vec![primary.to_string()])));
     }
     let mut names = Vec::new();
+    let paths = Paths::from_env()?;
     for name in which.names {
-        let parsed: AliasName = name.parse().map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
-        names.push(pick_alias(parsed)?.to_string());
+        names.push(session_senator(&paths, &name)?.to_string());
     }
     Ok(Some(StopSelector::Named(names)))
 }
@@ -2097,7 +2125,7 @@ async fn resume_sessions(
 fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
     let paths = Paths::from_env()?;
     let rt = runtime(false)?;
-    let reply: ipc::SessionsReply = rt.block_on(daemon_call(&paths, &Request::Sessions))?;
+    let reply = rt.block_on(attach_choices(&paths))?;
     anyhow::ensure!(
         !reply.rows.is_empty(),
         "{}",
@@ -2116,6 +2144,16 @@ fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
         .map(|row| ipc::AttachTarget::Session {
             session_id: row.session_id,
         }))
+}
+
+async fn attach_choices(paths: &Paths) -> anyhow::Result<ipc::SessionsReply> {
+    Ok(ipc::request(
+        &paths.socket(),
+        &Request::AttachChoices,
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+    )
+    .await?)
 }
 
 /// `senate session approve` with no name: the one session whose
@@ -2396,6 +2434,69 @@ fn render_chair_change(
     }
 }
 
+/// What `senate session find` did.
+fn render_found(found: &ipc::FindReply, locale: Locale) -> String {
+    let name = &found.name;
+    let device = found
+        .tty
+        .as_deref()
+        .map(|t| t.trim_start_matches("/dev/").to_owned());
+    match (found.attached, device, locale) {
+        (true, Some(d), Locale::Zh) => {
+            format!("{name} 在 {d} 打开；那个终端现在会响铃，标题闪烁「Senate: this terminal」。")
+        }
+        (true, Some(d), Locale::En) => format!(
+            "{name} is attached in {d}: that terminal now rings and shows \"Senate: this terminal\" in its title."
+        ),
+        (true, None, Locale::Zh) => {
+            format!(
+                "{name} 已在一个终端里打开；那个终端现在会响铃，标题闪烁「Senate: this terminal」。"
+            )
+        }
+        (true, None, Locale::En) => format!(
+            "{name} is attached in a terminal: it now rings and shows \"Senate: this terminal\" in its title."
+        ),
+        (false, _, Locale::Zh) => {
+            format!("{name} 没有在任何终端里打开；`senate attach {name}` 在这里打开它。")
+        }
+        (false, _, Locale::En) => {
+            format!("{name} is not attached in any terminal; `senate attach {name}` opens it here.")
+        }
+    }
+}
+
+/// `senate attach` refused: another terminal holds the session. It names
+/// that terminal (its device, and when someone last typed in it), says the
+/// terminal now rings and flashes its title, and what to do.
+fn attached_elsewhere(
+    name: &str,
+    tty: Option<&str>,
+    typed_secs_ago: Option<u64>,
+    locale: Locale,
+) -> String {
+    let device = tty.map(|t| t.trim_start_matches("/dev/").to_owned());
+    let typed = typed_secs_ago.map(crate::sessions::short);
+    let details = match (device, typed, locale) {
+        (Some(d), Some(t), Locale::Zh) => format!("（{d}，{t}前有人输入）"),
+        (Some(d), Some(t), Locale::En) => format!(" ({d}, last typed {t} ago)"),
+        (Some(d), None, Locale::Zh) => format!("（{d}）"),
+        (Some(d), None, Locale::En) => format!(" ({d})"),
+        (None, Some(t), Locale::Zh) => format!("（{t}前有人输入）"),
+        (None, Some(t), Locale::En) => format!(" (last typed {t} ago)"),
+        (None, None, _) => String::new(),
+    };
+    match locale {
+        Locale::Zh => format!(
+            "{name} 已经在另一个终端里打开{details}；那个终端现在会响铃，标题闪烁「Senate: this terminal」。在那里按 Ctrl-] 断开，或用 `senate attach {name} --read-only` 在这里旁观。"
+        ),
+        Locale::En => format!(
+            "{name} is already attached in another terminal{details}; that terminal now rings and shows \
+             \"Senate: this terminal\" in its title. Detach it there with Ctrl-], or watch it here with \
+             `senate attach {name} --read-only`."
+        ),
+    }
+}
+
 /// `senate spawn` with neither a runtime nor --profile: what to add.
 fn no_runtime(profiles: &[String], locale: Locale) -> String {
     let first = match locale {
@@ -2539,7 +2640,18 @@ async fn attach_target(
     read_only: bool,
 ) -> anyhow::Result<()> {
     use std::io::Write as _;
-    let info: ipc::AttachInfo = daemon_call(paths, &Request::AttachInfo { target }).await?;
+    let selector = match &target {
+        ipc::AttachTarget::Senator { senator } => senator.to_string(),
+        ipc::AttachTarget::Session { session_id } => session_id.clone(),
+    };
+    let info: ipc::AttachInfo = ipc::request(
+        &paths.socket(),
+        &Request::AttachInfo { target },
+        Duration::from_secs(1),
+        Duration::from_secs(6),
+    )
+    .await
+    .with_context(|| format!("look up terminal for {selector}"))?;
     let label = label.unwrap_or_else(|| info.primary.to_string());
     if let Some(tty) = info.tty {
         if read_only {
@@ -2553,7 +2665,23 @@ async fn attach_target(
             })
             .await;
         }
-        return crate::host::attach(&tty, paths, &label).await;
+        return match crate::host::attach(&tty, paths, &label).await {
+            Err(error) if error.downcast_ref::<crate::host::Busy>().is_some() => {
+                let rows: ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
+                let row = rows.rows.iter().find(|r| r.session_id == info.session_id);
+                let name = row.map_or_else(|| label.clone(), ipc::SessionRow::label);
+                Err(anyhow::anyhow!(
+                    "{}",
+                    attached_elsewhere(
+                        &name,
+                        row.and_then(|r| r.viewer_tty.as_deref()),
+                        row.and_then(|r| r.typed_secs_ago),
+                        BridgeConfig::locale_at(&paths.config()),
+                    )
+                ))
+            }
+            other => other,
+        };
     }
     anyhow::ensure!(
         !read_only,
@@ -2640,10 +2768,7 @@ fn choose_alias(
     // Sessions this machine hosts say more; any other senator is listed by
     // its alias alone.
     let rows = rt
-        .block_on(daemon_call::<crate::ipc::SessionsReply>(
-            &paths,
-            &Request::Sessions,
-        ))
+        .block_on(attach_choices(&paths))
         .map(|reply| reply.rows)
         .unwrap_or_default();
     let choices: Vec<crate::host::Choice> = candidates
@@ -3716,31 +3841,40 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             session,
             read_only,
         } => {
+            let paths = Paths::from_env()?;
             if let Some(machine) = machine {
-                let target = session
-                    .or_else(|| senator.map(|name| name.to_string()))
-                    .context("remote attach needs a session name")?;
-                return runtime(false)?.block_on(remote_cli::attach(
-                    &Paths::from_env()?,
-                    &machine,
-                    &target,
-                    read_only,
-                ));
+                use remote_cli::AttachSelector;
+                let target = if let Some(written) = senator {
+                    session_role::resolve(&paths, &written, Some(&machine))?
+                        .map_or(AttachSelector::Name(written), |holder| {
+                            AttachSelector::Role(holder.candidates)
+                        })
+                } else {
+                    AttachSelector::Name(session.context("remote attach needs a session name")?)
+                };
+                return runtime(false)?
+                    .block_on(remote_cli::attach(&paths, &machine, target, read_only));
             }
             let (target, label) = match (session, senator) {
                 (Some(session_id), _) => (ipc::AttachTarget::Session { session_id }, None),
-                (None, Some(name)) => (
-                    ipc::AttachTarget::Senator {
-                        senator: pick_alias(name.clone())?,
-                    },
-                    Some(name.to_string()),
-                ),
+                (None, Some(name)) => {
+                    let target = match session_role::resolve(&paths, &name, None)? {
+                        Some(holder) => ipc::AttachTarget::Session {
+                            session_id: holder
+                                .session_id
+                                .context("the role has no local hosted session")?,
+                        },
+                        None => ipc::AttachTarget::Senator {
+                            senator: pick_alias(name.parse()?)?,
+                        },
+                    };
+                    (target, Some(name))
+                }
                 (None, None) => match pick_attach_session()? {
                     Some(target) => (target, None),
                     None => return Ok(()),
                 },
             };
-            let paths = Paths::from_env()?;
             runtime(false)?.block_on(attach_target(&paths, target, label, read_only))
         }
         Cmd::SessionHost {
@@ -4084,6 +4218,13 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             } else if idle {
                 crate::sessions::StopSelector::Idle
             } else {
+                let names = names
+                    .into_iter()
+                    .map(|name| {
+                        Ok(session_role::resolve(&paths, &name, None)?
+                            .map_or(name, |holder| holder.primary.to_string()))
+                    })
+                    .collect::<anyhow::Result<_>>()?;
                 crate::sessions::StopSelector::Named(names)
             };
             runtime(false)?.block_on(stop_sessions(&paths, &selector, force, locale))
@@ -4105,6 +4246,12 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
         }
         SessionCmd::Rebind { host, to } => {
             let paths = Paths::from_env()?;
+            let host = session_role::resolve(&paths, &host, None)?
+                .map_or(host, |holder| holder.primary.to_string());
+            let to = match session_role::resolve(&paths, &to, None)? {
+                Some(holder) => AliasName::bare(holder.primary),
+                None => to.parse()?,
+            };
             let reply: ipc::RebindHostReply =
                 runtime(false)?.block_on(daemon_call(&paths, &Request::RebindHost { host, to }))?;
             println!(
@@ -4133,7 +4280,7 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             if attach {
                 require_attach_terminal()?;
             }
-            let senator = pick_alias(senator)?;
+            let senator = session_senator(&Paths::from_env()?, &senator)?;
             launch(
                 &Request::Restore {
                     senator,
@@ -4164,8 +4311,8 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             if prompt.as_deref().is_some_and(|p| p.trim().is_empty()) {
                 anyhow::bail!("the prompt is empty");
             }
-            let senator = pick_alias(senator)?;
             let paths = Paths::from_env()?;
+            let senator = session_senator(&paths, &senator)?;
             let locale = BridgeConfig::locale_at(&paths.config());
             let reply: crate::ipc::ReplaceReply = runtime(false)?.block_on(ipc::request(
                 &paths.socket(),
@@ -4192,6 +4339,15 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        SessionCmd::Find { senator } => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let senator = pick_alias(senator)?;
+            let found: ipc::FindReply =
+                runtime(false)?.block_on(daemon_call(&paths, &Request::FindSession { senator }))?;
+            println!("{}", render_found(&found, locale));
+            Ok(())
+        }
         SessionCmd::Approve {
             senator,
             once,
@@ -4202,7 +4358,7 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
             let senator = match senator {
-                Some(senator) => pick_alias(senator)?,
+                Some(senator) => session_senator(&paths, &senator)?,
                 None => {
                     let rows = runtime(false)?
                         .block_on(daemon_call::<ipc::SessionsReply>(
@@ -5025,5 +5181,42 @@ fn archiving_lists_what_it_hides_and_names_what_must_stop_first() {
     assert_eq!(
         render_archived(&info(false, None), Locale::En),
         "api-test was not archived"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn an_attach_held_elsewhere_says_where_and_what_to_do() {
+    assert_eq!(
+        attached_elsewhere("alpha::main", Some("/dev/ttys012"), Some(18), Locale::En),
+        "alpha::main is already attached in another terminal (ttys012, last typed 18s ago); \
+         that terminal now rings and shows \"Senate: this terminal\" in its title. Detach it there \
+         with Ctrl-], or watch it here with `senate attach alpha::main --read-only`."
+    );
+    assert!(
+        attached_elsewhere("alpha::main", None, None, Locale::En)
+            .starts_with("alpha::main is already attached in another terminal; ")
+    );
+    assert!(
+        attached_elsewhere("alpha::main", Some("/dev/ttys3"), None, Locale::Zh)
+            .contains("alpha::main 已经在另一个终端里打开（ttys3）")
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn find_says_which_terminal_rings_or_that_none_holds_it() {
+    let found = |attached, tty: Option<&str>| ipc::FindReply {
+        name: "senate::main".into(),
+        attached,
+        tty: tty.map(str::to_owned),
+    };
+    assert_eq!(
+        render_found(&found(true, Some("/dev/ttys012")), Locale::En),
+        "senate::main is attached in ttys012: that terminal now rings and shows \"Senate: this terminal\" in its title."
+    );
+    assert_eq!(
+        render_found(&found(false, None), Locale::En),
+        "senate::main is not attached in any terminal; `senate attach senate::main` opens it here."
     );
 }

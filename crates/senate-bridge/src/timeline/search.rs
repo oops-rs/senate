@@ -2,9 +2,9 @@
 //! This database is local, separate from bridge state and server traffic.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -86,6 +86,11 @@ impl Index {
         home.join("history").join(DB).is_file()
     }
 
+    pub(crate) fn identity(home: &Path) -> Option<(u64, u64)> {
+        let meta = fs::symlink_metadata(home.join("history").join(DB)).ok()?;
+        meta.is_file().then(|| (meta.dev(), meta.ino()))
+    }
+
     pub(crate) fn open(home: &Path) -> anyhow::Result<Self> {
         let dir = home.join("history");
         match fs::DirBuilder::new().mode(0o700).create(&dir) {
@@ -99,15 +104,20 @@ impl Index {
             "session search directory must be private"
         );
         let path = dir.canonicalize()?.join(DB);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&path)?;
-        let meta = file.metadata()?;
+        if let Err(error) = fs::symlink_metadata(&path)
+            && error.kind() == io::ErrorKind::NotFound
+        {
+            // Close the private temporary file before publishing its inode.
+            // Raw opens and closes of the live database can release SQLite's
+            // process-scoped POSIX locks on that inode.
+            let temporary = tempfile::NamedTempFile::new_in(&dir)?.into_temp_path();
+            match temporary.persist_noclobber(&path) {
+                Ok(()) => {}
+                Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let meta = fs::symlink_metadata(&path)?;
         ensure!(
             meta.is_file() && meta.mode() & 0o077 == 0,
             "session search index must be private"
@@ -121,7 +131,7 @@ impl Index {
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
             PRAGMA secure_delete = ON;
-            BEGIN;
+            BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS revision (v INTEGER NOT NULL);
             INSERT INTO revision SELECT abs(random() % 1000000000000000000) WHERE NOT EXISTS (SELECT 1 FROM revision);
             CREATE TABLE IF NOT EXISTS sources (session_id TEXT PRIMARY KEY, stamp BLOB, checkpoint BLOB);

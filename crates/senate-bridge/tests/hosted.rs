@@ -144,6 +144,205 @@ async fn wait_terminal_output(output: &mut (impl tokio::io::AsyncRead + Unpin), 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
+    use rustix::fs::{FlockOperation, flock};
+    use std::time::Instant;
+
+    let mut h = Harness::new().await;
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.start().await;
+    let db = rusqlite::Connection::open(h.paths.state_db()).unwrap();
+    let mut owners = Vec::new();
+    let mut sockets = Vec::new();
+    let mut primaries = Vec::new();
+    let now = chrono::Utc::now().timestamp_millis();
+    for i in 0..36 {
+        let committee = senate_core::CommitteeId::new(format!("desk-{i:02}")).unwrap();
+        let primary = path(&format!("claude-00000000-0000-4000-8000-{i:012}"));
+        let host = senate_core::EventId::new();
+        let native = format!("native-{i}");
+        let dir = h.paths.home().join("hosts").join(host.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        let running = i < 30;
+        db.execute(
+            "INSERT INTO sessions
+             (session_id, cwd, joined_committee, state, started_at, last_seen, runtime, agent, agent_source, host_id)
+             VALUES (?1, ?2, ?3, ?4, ?7, ?7, 'claude', ?5, 'session', ?6)",
+            rusqlite::params![
+                native, h.dir.path().to_str().unwrap(), committee.as_str(),
+                if running { "live" } else { "ended" }, primary.to_string(), host.to_string(), now
+            ],
+        ).unwrap();
+        if i >= 33 {
+            db.execute(
+                "INSERT INTO hosted_paused (agent, committee, paused_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![primary.to_string(), committee.as_str(), now],
+            )
+            .unwrap();
+        }
+        if running {
+            let owner = std::fs::File::create(dir.join("owner")).unwrap();
+            flock(&owner, FlockOperation::NonBlockingLockExclusive).unwrap();
+            owners.push(owner);
+        }
+        if i < 3 {
+            sockets.push(tokio::net::UnixListener::bind(dir.join("tty")).unwrap());
+        }
+        let alias = if i < 6 { path("main") } else { path("worker") };
+        h.server
+            .state
+            .inner
+            .lock()
+            .unwrap()
+            .aliases
+            .set(&committee, alias, primary.clone())
+            .unwrap();
+        primaries.push(primary.to_string());
+    }
+    let populated: senate_core::alias::KnownAliases = call(&h, &Request::Aliases).await;
+    assert!(
+        matches!(populated, senate_core::alias::KnownAliases::Scoped(aliases) if aliases.iter().count() == 36)
+    );
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(rows.rows.len(), 36);
+    assert_eq!(rows.rows.iter().filter(|row| row.paused).count(), 3);
+    let mut iter = sockets.into_iter();
+    let healthy = iter.next().unwrap();
+    let silent = iter.next().unwrap();
+    let no_screen = iter.next().unwrap();
+    let healthy_task = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = healthy.accept().await.unwrap();
+            stream.write_u8(3).await.unwrap();
+            let mut size = [0; 5];
+            stream.read_exact(&mut size).await.unwrap();
+            assert_eq!(size[0], 1);
+            stream.write_all(b"fixture screen").await.unwrap();
+            let _ = stream.read_to_end(&mut Vec::new()).await;
+        }
+    });
+    let no_screen_task = tokio::spawn(async move {
+        let (mut stream, _) = no_screen.accept().await.unwrap();
+        stream.write_u8(3).await.unwrap();
+        let _ = stream.read_to_end(&mut Vec::new()).await;
+    });
+
+    let open = |selector: Option<&str>| {
+        let mut cmd = tokio::process::Command::new(BIN);
+        testenv::isolate_async(&mut cmd, h.dir.path());
+        cmd.arg("attach")
+            .args(selector)
+            .env("SENATE_HOME", h.paths.home())
+            .kill_on_drop(true);
+        let (pty, pts) = pty_process::open().unwrap();
+        pty.resize(pty_process::Size::new(24, 80)).unwrap();
+        let child = pty_process::Command::from(cmd).spawn(pts).unwrap();
+        let (output, input) = pty.into_split();
+        (child, output, input)
+    };
+
+    let mut picker_times = Vec::new();
+    for delay in [Duration::ZERO, Duration::from_millis(1100)] {
+        h.server.state.inner.lock().unwrap().alias_lookup_delay = delay;
+        for (selector, picker) in [
+            (Some("main"), Some("which one?")),
+            (Some("desk-00::main"), None),
+            (Some(primaries[0].as_str()), None),
+            (None, Some("Attach to which session?")),
+        ] {
+            let start = Instant::now();
+            let (mut child, mut output, mut input) = open(selector);
+            let mut first = [0];
+            tokio::time::timeout(TIMEOUT, output.read_exact(&mut first))
+                .await
+                .unwrap()
+                .unwrap();
+            let first = start.elapsed();
+            if let Some(prompt) = picker {
+                tokio::time::timeout(
+                    TIMEOUT,
+                    wait_terminal_output(&mut output, prompt.as_bytes()),
+                )
+                .await
+                .unwrap();
+                let painted = start.elapsed();
+                eprintln!("{delay:?} {selector:?}: first byte {first:?}, picker {painted:?}");
+                let bound = if selector.is_none() { 1 } else { 2 };
+                picker_times.push((selector, delay, painted, Duration::from_secs(bound)));
+                input.write_all(b"\r").await.unwrap();
+            }
+            tokio::time::timeout(TIMEOUT, wait_terminal_output(&mut output, b"\x1b[c"))
+                .await
+                .unwrap();
+            input.write_all(b"\x1b[?62;22c").await.unwrap();
+            tokio::time::timeout(
+                TIMEOUT,
+                wait_terminal_output(&mut output, b"fixture screen"),
+            )
+            .await
+            .unwrap();
+            eprintln!(
+                "{delay:?} {selector:?}: first byte {first:?}, screen {:?}",
+                start.elapsed()
+            );
+            input.write_all(b"\x1d").await.unwrap();
+            assert!(
+                tokio::time::timeout(TIMEOUT, child.wait())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .success()
+            );
+        }
+    }
+    let mut failures = Vec::new();
+    for (primary, expected) in [
+        (&primaries[1], "terminal host did not answer in time"),
+        (
+            &primaries[2],
+            "terminal host did not send its initial screen in time",
+        ),
+    ] {
+        let start = Instant::now();
+        let (mut child, mut output, _input) = open(Some(primary));
+        let mut printed = Vec::new();
+        let mut first = None;
+        let outcome = tokio::time::timeout(Duration::from_secs(4), async {
+            let mut bytes = [0; 1024];
+            while let Ok(n @ 1..) = output.read(&mut bytes).await {
+                first.get_or_insert_with(|| start.elapsed());
+                printed.extend_from_slice(&bytes[..n]);
+            }
+            child.wait().await.unwrap()
+        })
+        .await;
+        let elapsed = start.elapsed();
+        let printed = String::from_utf8_lossy(&printed).into_owned();
+        eprintln!("{primary}: first byte {first:?}, exit {elapsed:?} {outcome:?} {printed}");
+        failures.push((primary, expected, outcome, printed, elapsed));
+    }
+    drop(silent);
+    healthy_task.abort();
+    no_screen_task.abort();
+    h.stop().await;
+    for (selector, delay, elapsed, bound) in picker_times {
+        assert!(
+            elapsed < bound,
+            "{selector:?} with {delay:?} alias lookup: picker took {elapsed:?}"
+        );
+    }
+    for (primary, expected, outcome, printed, elapsed) in failures {
+        assert!(elapsed < Duration::from_secs(3), "{primary}: {elapsed:?}");
+        assert!(!outcome.unwrap().success());
+        assert!(
+            printed.contains(primary) && printed.contains(expected),
+            "{printed}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fixture_terminal_launch_detach_restart_and_restore() {
     let mut h = Harness::new().await;
     h.config.hosted_session_limit = Some(1);
@@ -3468,11 +3667,21 @@ async fn spawn_attempt_expiry_prunes_the_receipt_and_refuses_reuse() {
 
 /// `senate <args>` against the harness's daemon; its output and success.
 async fn senate(h: &Harness, args: &[&str]) -> (bool, String) {
+    senate_in(h, &h.paths, h.dir.path(), args).await
+}
+
+async fn senate_in(
+    h: &Harness,
+    paths: &senate_bridge::Paths,
+    cwd: &std::path::Path,
+    args: &[&str],
+) -> (bool, String) {
     let mut cmd = tokio::process::Command::new(BIN);
     testenv::isolate_async(&mut cmd, h.dir.path());
     let out = cmd
         .args(args)
-        .env("SENATE_HOME", h.paths.home())
+        .current_dir(cwd)
+        .env("SENATE_HOME", paths.home())
         .output()
         .await
         .unwrap();
@@ -3482,6 +3691,152 @@ async fn senate(h: &Harness, args: &[&str]) -> (bool, String) {
         String::from_utf8_lossy(&out.stderr)
     );
     (out.status.success(), text)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_role_addresses_follow_the_chair_and_desk() {
+    let (mut h, _) = one_hosted_session().await;
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let row = &rows.rows[0];
+    let primary = row.primary.clone();
+    let cwd = h.workdir("role-commands", Some("refund-v2"));
+    // The in-process daemon regards this test as a local operator, but
+    // refuses its children for person-only requests like transcript reads.
+    let person = senate_bridge::Paths::new(h.dir.path().join("cli"));
+    person.ensure_home().unwrap();
+    let listener = tokio::net::UnixListener::bind(person.socket()).unwrap();
+    let daemon = h.socket();
+    let person_proxy = tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let mut bridge = tokio::net::UnixStream::connect(&daemon).await.unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut client, &mut bridge).await;
+        }
+    });
+
+    let (ok, error) = senate(&h, &["attach", "other::chair"]).await;
+    assert!(!ok && error.contains("other has no chair"), "{error}");
+    let (ok, error) = senate(&h, &["attach", "chair"]).await;
+    assert!(
+        !ok && error.contains("this directory has no committee"),
+        "{error}"
+    );
+    for args in [
+        &["spawn", "claude", "--alias", "chair"][..],
+        &["senator", "alias", "chair"],
+    ] {
+        let (ok, error) = senate(&h, args).await;
+        assert!(!ok && error.contains("address keyword"), "{error}");
+    }
+
+    {
+        let mut server = h.server.state.inner.lock().unwrap();
+        server.chair = Some((path("alice"), true));
+        server
+            .roster
+            .name_speaker(Some(path("alice").into()))
+            .unwrap();
+    }
+    let (ok, error) = senate(&h, &["attach", "refund-v2::chair"]).await;
+    assert!(!ok && error.contains("alice, a person"), "{error}");
+    let (ok, error) = senate(&h, &["session", "show", "speaker"]).await;
+    assert!(
+        !ok && error.contains("alice") && error.contains("no hosted session"),
+        "{error}"
+    );
+    let (ok, error) = senate(&h, &["session", "show", "secretary"]).await;
+    assert!(!ok && error.contains("desk has no secretary"), "{error}");
+
+    {
+        let mut server = h.server.state.inner.lock().unwrap();
+        server.chair = Some((path("claude-away"), true));
+        server
+            .roster
+            .set_secretaries(path("alice"), vec![path("claude-away"), primary.clone()])
+            .unwrap();
+    }
+    let (ok, error) = senate(&h, &["attach", "refund-v2::chair"]).await;
+    assert!(
+        !ok && error.contains("claude-away")
+            && error.contains("no Senate-owned session on this machine"),
+        "{error}"
+    );
+    for selector in ["secretary", "refund-v2::secretary"] {
+        let (ok, error) = senate_in(&h, &person, &cwd, &["session", "show", selector]).await;
+        assert!(!ok && error.contains("no readable conversation"), "{error}");
+    }
+    {
+        let mut server = h.server.state.inner.lock().unwrap();
+        server.chair = Some((primary.clone(), true));
+        server
+            .roster
+            .name_speaker(Some(primary.clone().into()))
+            .unwrap();
+    }
+    let (ok, show) = senate_in(&h, &person, &cwd, &["session", "show", "speaker"]).await;
+    assert!(!ok && show.contains("no readable conversation"), "{show}");
+    let (ok, pause) = senate_in(
+        &h,
+        &h.paths,
+        &cwd,
+        &["session", "pause", "chair", "--dry-run"],
+    )
+    .await;
+    assert!(ok && pause.contains("would pause"), "{pause}");
+    let names: Vec<String> = call(&h, &Request::SessionRoleNames).await;
+    assert!(
+        names.iter().any(|name| name == "refund-v2::chair"),
+        "{names:?}"
+    );
+    assert!(names.iter().any(|name| name == "speaker"), "{names:?}");
+
+    let (plain_ok, plain) = senate_in(
+        &h,
+        &person,
+        &cwd,
+        &["session", "approve", primary.as_str(), "--once"],
+    )
+    .await;
+    let (role_ok, role) = senate_in(
+        &h,
+        &person,
+        &cwd,
+        &["session", "approve", "refund-v2::chair", "--once"],
+    )
+    .await;
+    assert_eq!((role_ok, role), (plain_ok, plain));
+    let (ok, running) = senate(&h, &["session", "restore", "refund-v2::chair"]).await;
+    assert!(
+        !ok && running.contains("already has a running terminal"),
+        "{running}"
+    );
+    let (ok, paused) = senate(
+        &h,
+        &[
+            "session",
+            "pause",
+            "refund-v2::chair",
+            "--timeout",
+            "0",
+            "--force",
+        ],
+    )
+    .await;
+    assert!(ok && paused.contains("paused"), "{paused}");
+    let (ok, resume) = senate(&h, &["session", "resume", "refund-v2::chair", "--dry-run"]).await;
+    assert!(ok && resume.contains("would resume"), "{resume}");
+    let (ok, resume) = senate(&h, &["session", "resume", "refund-v2::chair"]).await;
+    assert!(ok && resume.contains("resumed"), "{resume}");
+    let (ok, stopped) = senate(&h, &["session", "stop", "refund-v2::chair", "--force"]).await;
+    assert!(ok && stopped.contains("stopped"), "{stopped}");
+    pty_attach_command(&h, &["attach", "refund-v2::chair"], false, b"\x1d").await;
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert!(
+        rows.rows
+            .iter()
+            .any(|row| row.primary == primary && row.is_running())
+    );
+    person_proxy.abort();
+    h.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4627,8 +4982,9 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
     assert_eq!(nudges(), 2, "{}", typed());
     assert!(!read(".fixture-prompts").contains("third note"));
 
-    // A person types a prompt: that turn takes what waited. A note right
-    // after it waits out the quiet time before its nudge.
+    // A person types a prompt and that turn takes what waited. The host's
+    // quiet period starts with those keys. The turn and hooks can use part
+    // or all of it before the fourth note arrives.
     std::fs::remove_file(project.join(".fixture-hold")).unwrap();
     let typed_at = std::time::Instant::now();
     attach(&h, "idler", b"prompt\r\x1d").await;
@@ -4643,17 +4999,14 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
     })
     .await;
     note("fourth note");
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    assert_eq!(nudges(), 2, "nudged over a typing person: {}", typed());
-    eventually("the nudge after the quiet time", TIMEOUT, || {
+    eventually("the fourth note is delivered by a nudge", TIMEOUT, || {
         read(".fixture-prompts")
             .contains("fourth note")
             .then_some(())
     })
     .await;
     assert_eq!(nudges(), 3, "{}", typed());
-    // fast_timing's quiet time is 2 s.
-    assert!(typed_at.elapsed() >= Duration::from_secs(2));
+    assert!(typed_at.elapsed() >= fast_timing().agy_nudge_quiet);
     eventually("the third nudged turn ended", TIMEOUT, || {
         (turns() == 4).then_some(())
     })
@@ -5776,5 +6129,244 @@ async fn spawn_seats_on_the_committee_bound_at_its_dir() {
         added(&two, &three).starts_with("refund-v2::"),
         "this directory's"
     );
+    h.stop().await;
+}
+
+/// Read the viewer's stream into `seen` until it holds `want`.
+async fn read_until(seen: &mut Vec<u8>, viewer: &mut tokio::net::UnixStream, want: &[u8]) {
+    let found = tokio::time::timeout(TIMEOUT, async {
+        let mut buf = [0u8; 4096];
+        while !seen.windows(want.len()).any(|w| w == want) {
+            let n = viewer.read(&mut buf).await.unwrap();
+            assert!(n > 0, "the host closed the viewer");
+            seen.extend_from_slice(&buf[..n]);
+        }
+    })
+    .await;
+    assert!(
+        found.is_ok(),
+        "waited for {:?} in {:?}",
+        String::from_utf8_lossy(want),
+        String::from_utf8_lossy(seen)
+    );
+}
+
+/// The attached terminal shows the session's name, not the agent's own
+/// titles; a refused second attach and `senate session find` make it ring
+/// and flash its title. All of it goes to the viewer only: nothing reaches
+/// the agent's input.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_attached_terminal_keeps_the_sessions_title_and_rings_when_sought() {
+    let mut h = Harness::new().await;
+    h.config.hosted_session_limit = Some(1);
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let project = h.workdir("titled", None);
+    let typed = project.join(".typed");
+    let fixture = h.dir.path().join("fixture-claude");
+    // On `paint`, the agent sets its own title, then paints.
+    std::fs::write(
+        &fixture,
+        format!(
+            "#!/bin/sh\n{RECORD_HOSTED_ARGV}\n\
+             while IFS= read -r line; do\n\
+             \x20 if [ \"$line\" = paint ]; then printf '\\033]0;agent title\\007fixture TUI\\r\\n'\n\
+             \x20 else printf '%s\\n' \"$line\" >> {typed:?}; fi\n\
+             done\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!(
+            "[companion]\nclaude_bin = {:?}\n",
+            fixture.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    h.config.committees.push(committee());
+    start(&mut h).await;
+    let _: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            attempt_id: None,
+            session: Default::default(),
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
+            committee: committee(),
+            alias: Some(path("titled")),
+            cwd: project.clone(),
+            chair: false,
+            secretary: false,
+            prompt: None,
+            model: Default::default(),
+        },
+    )
+    .await;
+    let tty: PathBuf = call(
+        &h,
+        &Request::Attach {
+            senator: path("titled").into(),
+        },
+    )
+    .await;
+
+    // The first viewer attaches and asks the agent to paint.
+    let mut first = tokio::net::UnixStream::connect(&tty).await.unwrap();
+    begin_viewer(&mut first).await;
+    first.write_all(&[2, 0, 6]).await.unwrap();
+    first.write_all(b"paint\r").await.unwrap();
+    let mut seen = Vec::new();
+    read_until(&mut seen, &mut first, b"fixture TUI").await;
+    assert!(
+        !seen
+            .windows(b"agent title".len())
+            .any(|w| w == b"agent title"),
+        "the agent's own title is kept from the viewer: {:?}",
+        String::from_utf8_lossy(&seen)
+    );
+
+    // A second viewer is refused, and the first rings and flashes.
+    let mut second = tokio::net::UnixStream::connect(&tty).await.unwrap();
+    assert_eq!(second.read_u8().await.unwrap(), 0, "busy");
+    seen.clear();
+    read_until(&mut seen, &mut first, b"Senate: this terminal\x07").await;
+    assert!(
+        seen.windows(2).any(|w| w == b"\x07\x1b"),
+        "the bell, then the title"
+    );
+    read_until(&mut seen, &mut first, b"\x1b[23;0t").await;
+
+    // `senate session find` does the same, and says the terminal holds it.
+    let found: senate_bridge::ipc::FindReply = call(
+        &h,
+        &Request::FindSession {
+            senator: path("titled").into(),
+        },
+    )
+    .await;
+    assert!(found.attached, "{found:?}");
+    seen.clear();
+    read_until(&mut seen, &mut first, b"Senate: this terminal\x07").await;
+    assert!(seen.starts_with(b"\x07"), "the bell first: {seen:?}");
+
+    // None of it reached the agent: only `paint` was typed, which the
+    // fixture paints rather than records.
+    assert!(
+        std::fs::read_to_string(&typed)
+            .unwrap_or_default()
+            .is_empty(),
+        "{:?}",
+        std::fs::read_to_string(&typed)
+    );
+    drop(first);
+    h.stop().await;
+}
+
+/// `senate attach` of a name that resolves to a session Senate does not
+/// host: says which session and committee it is, that it runs in its own
+/// terminal, and the hosted sessions with the same alias elsewhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attaching_a_session_senate_does_not_host_says_what_it_is() {
+    let (mut h, project, _) = fixture_daemon(1).await;
+    // A hosted `main` on refund-v2.
+    let hosted: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            attempt_id: None,
+            session: Default::default(),
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
+            committee: committee(),
+            alias: Some(path("main")),
+            cwd: project.clone(),
+            chair: false,
+            secretary: false,
+            prompt: None,
+            model: Default::default(),
+        },
+    )
+    .await;
+    // A session of alice's own on `other`, not hosted, also `main` there:
+    // registered by the real hook, as Claude Code runs it.
+    let wd = h.workdir("native", Some("other"));
+    let run_hook = |event: &'static str, hook_event: &'static str| {
+        let mut cmd = tokio::process::Command::new(BIN);
+        testenv::isolate_async(&mut cmd, h.dir.path());
+        cmd.args(["hook", event])
+            .env("SENATE_HOME", h.paths.home())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let input = serde_json::json!({
+            "session_id": "native-1", "cwd": wd, "hook_event_name": hook_event, "source": "startup"
+        })
+        .to_string();
+        async move {
+            let mut child = cmd.spawn().unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(TIMEOUT, child.wait())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .success()
+            );
+        }
+    };
+    run_hook("session-start", "SessionStart").await;
+    let other = senate_core::CommitteeId::new("other").unwrap();
+    let native_session = h.store().session("native-1").unwrap().unwrap();
+    let native = native_session.agent;
+    h.server
+        .state
+        .inner
+        .lock()
+        .unwrap()
+        .aliases
+        .set(&other, path("main"), native.clone())
+        .unwrap();
+    let refused = |name: &str| {
+        let request = Request::AttachInfo {
+            target: ipc::AttachTarget::Senator {
+                senator: name.parse().unwrap(),
+            },
+        };
+        let socket = h.socket();
+        async move {
+            match ipc::request::<serde_json::Value>(&socket, &request, TIMEOUT, TIMEOUT).await {
+                Err(ipc::ClientError::Remote(error)) => error.message,
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+    };
+    let message = refused("other::main").await;
+    assert!(
+        message.starts_with(&format!("other::main is [senator::{native}] on other."))
+            && message.contains("It runs in its own terminal, not one Senate hosts")
+            && message.contains("Hosted sessions with the same alias: `refund-v2::main`."),
+        "{message}"
+    );
+    // Once it has ended: how to reopen it in a terminal Senate hosts.
+    run_hook("session-end", "SessionEnd").await;
+    common::eventually("the native session ended", TIMEOUT, || {
+        let s = h.store().session("native-1").unwrap()?;
+        (!s.is_live()).then_some(())
+    })
+    .await;
+    let message = refused("other::main").await;
+    assert!(
+        message.contains("It has ended; `senate session restore other::main` reopens it"),
+        "{message}"
+    );
+    let _ = hosted;
     h.stop().await;
 }

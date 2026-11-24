@@ -984,3 +984,49 @@ extension CoreStoreTests {
         #expect(Thumbnails.url(for: "/bounded/\(Thumbnails.capacity + 19).png", home: nil) != nil)
     }
 }
+
+extension CoreStoreTests {
+    private func committeeThread(_ committee: String, _ root: UInt64, last: UInt64, state: String = "processing",
+                        other: String? = nil, waits: String? = nil) -> CommitteeThread {
+        CommitteeThread(committee: committee, root: root, title: "Thread \(root)", kind: "question",
+                        opener: "senator::codex", addressees: ["senator::lead"], owner: nil, state: state,
+                        waitsOn: waits, escalatedTo: nil, takeover: nil, lastSeq: last, lastAt: Date(),
+                        lastAuthor: nil, messageCount: nil, otherCommittee: other)
+    }
+
+    /// The sidebar's threads: newest first, each committee its own (its
+    /// side of a crossing), archived ones only with Show inactive, news since the
+    /// thread was last opened, kept live from activity.
+    @Test func committeeThreadsAreListedAndFollowed() async throws {
+        let store = store()
+        core.committeeThreadRows = [
+            committeeThread("refund-v2", 10, last: 12),
+            committeeThread("refund-v2", 20, last: 25, other: "payments"),
+            committeeThread("payments", 77, last: 26, other: "refund-v2"),
+            committeeThread("refund-v2", 30, last: 31, state: "archived"),
+        ]
+        await store.threads.start(committees: ["refund-v2", "payments"], archived: false)
+        #expect(store.threads.threads("refund-v2").map(\.root) == [20, 10])
+        #expect(store.threads.threads("payments").map(\.root) == [77], "each committee lists its side of a crossing")
+        #expect(store.threads.threads("refund-v2").allSatisfy { !store.threads.unread($0) }, "what was there is not news")
+        #expect(core.calls.contains("watch-activity"))
+
+        // Something is said in thread 10: read again, and it is news.
+        core.committeeThreadRows[0] = committeeThread("refund-v2", 10, last: 40)
+        core.pushActivity(ActivityBatch(events: [ActivityEntry(
+            committee: "refund-v2", seq: 40, at: Date(), kind: "answer", from: "senator::lead",
+            to: ["senator::codex"], onBehalfOf: nil, thread: 10, line: "done", state: nil)], cursors: [:], reset: false))
+        try await until(store) { $0.threads.threads("refund-v2").first?.root == 10 }
+        let ten = try #require(store.threads.threads("refund-v2").first)
+        #expect(store.threads.unread(ten))
+
+        // Opened: seen.
+        store.openThread(committee: "refund-v2", root: 10)
+        #expect(!store.threads.unread(ten))
+
+        // Show inactive: archived ones too.
+        await store.threads.start(committees: ["refund-v2"], archived: true)
+        #expect(store.threads.threads("refund-v2").map(\.root) == [10, 30, 20])
+        store.threads.stop()
+    }
+}

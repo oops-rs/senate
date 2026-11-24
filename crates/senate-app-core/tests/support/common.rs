@@ -18,9 +18,10 @@ use chrono::Utc;
 use senate_bridge::agent::AgentSource;
 use senate_bridge::approvals::{Approval, ApprovalKind, ResolvedBy};
 use senate_bridge::ipc::{
-    ApprovalsReply, ApproveReply, CommitteeStatus, DeskAction, DeskDecision, DeskItemDetail,
-    DeskOutcome, DocketReply, HostState, HostedModel, HostedPrompt, InboxReply, IpcError, Posted,
-    Reply, Request, SenateDocket, SessionRow, SessionsReply, StatusReply, StreamState, ThreadReply,
+    ActivityBatch, ActivityEntry, ApprovalsReply, ApproveReply, CommitteeStatus, CommitteeThread,
+    CommitteeThreadPage, DeskAction, DeskDecision, DeskItemDetail, DeskOutcome, DocketReply,
+    HostState, HostedModel, HostedPrompt, InboxReply, IpcError, Posted, Reply, Request,
+    SenateDocket, SessionRow, SessionsReply, StatusReply, StreamState, ThreadReply,
     TimelineDirection, TimelineItem, TimelineKind, TimelineReply, TimelineUpdate, WatchEvent,
 };
 use senate_bridge::session::{Runtime, Session, SessionState};
@@ -155,6 +156,7 @@ pub fn suspended(root: u64, title: &str, agent: &str) -> ThreadSummary {
         since: Seq(root),
         since_ts: Utc::now(),
         updated: Seq(root),
+        activity: None,
         steps: Vec::new(),
         links: Vec::new(),
         owner: None,
@@ -303,6 +305,7 @@ pub struct World {
     pub long: std::collections::BTreeMap<u64, usize>,
     pub sessions: SessionsReply,
     pub threads: Vec<ThreadSummary>,
+    activity_seq: u64,
     pub approvals: Vec<Approval>,
     pub docket: DocketReply,
     desk_receipts: std::collections::BTreeMap<EventId, DeskOutcome>,
@@ -363,6 +366,7 @@ impl World {
                 suspended(118, "退款要不要走审批？", "claude"),
                 suspended(131, "which env?", "codex"),
             ],
+            activity_seq: 500,
             approvals: vec![approval("019a-thread:7")],
             // Hosted terminals are opt-in (`hosted_sessions()`), so the
             // counts the other tests check stay theirs.
@@ -514,6 +518,94 @@ async fn serve(conn: UnixStream, world: Arc<Mutex<World>>, events: broadcast::Se
             )
             .await
             .unwrap();
+            return;
+        }
+        if let Request::ActivityWatch { committees, after } = &request {
+            world.lock().unwrap().requests.push(request.clone());
+            let id = committee();
+            let selected = committees
+                .as_ref()
+                .is_none_or(|committees| committees.contains(&id));
+            let head = world.lock().unwrap().activity_seq;
+            let cursor = after.get(&id).copied().unwrap_or(Seq(head));
+            let initial = ActivityBatch {
+                events: Vec::new(),
+                cursors: selected.then(|| (id.clone(), cursor)).into_iter().collect(),
+                reset: false,
+            };
+            if w.write_all(format!("{}\n", serde_json::to_string(&initial).unwrap()).as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if selected {
+                for (offset, (kind, from, line, state)) in [
+                    (
+                        "joined",
+                        "senator::reviewer",
+                        "Reviewer arrived",
+                        Some("unknown"),
+                    ),
+                    (
+                        "question",
+                        "senator::reviewer",
+                        "Can you check the refund policy?",
+                        None,
+                    ),
+                    ("answer", "senator::tester", "The scenarios pass", None),
+                    (
+                        "status",
+                        "senator::reviewer",
+                        "Refund policy reviewed",
+                        Some("archived"),
+                    ),
+                    ("state", "senator::tester", "Tester paused", Some("paused")),
+                    ("left", "senator::reviewer", "Reviewer left", Some("away")),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let seq = Seq(501 + offset as u64);
+                    if seq <= cursor {
+                        continue;
+                    }
+                    let entry = ActivityEntry {
+                        committee: id.clone(),
+                        seq,
+                        at: Utc::now(),
+                        kind: kind.into(),
+                        from: from.into(),
+                        to: vec!["senator::tester".into()],
+                        on_behalf_of: None,
+                        thread: matches!(kind, "question" | "answer" | "status")
+                            .then_some(Seq(502)),
+                        line: line.into(),
+                        state: state.map(str::to_owned),
+                    };
+                    let batch = ActivityBatch {
+                        events: vec![entry],
+                        cursors: Default::default(),
+                        reset: false,
+                    };
+                    if seq.0 > head {
+                        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                    }
+                    {
+                        let mut state = world.lock().unwrap();
+                        state.activity_seq = state.activity_seq.max(seq.0);
+                    }
+                    if w.write_all(
+                        format!("{}\n", serde_json::to_string(&batch).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            let _ = lines.next_line().await;
             return;
         }
         if let Request::TimelineWatch { session_id, after } = &request {
@@ -891,6 +983,95 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 None => Reply::err(IpcError::bad_request(format!("no session {label}"))),
             }
         }
+        Request::CommitteeThreads {
+            committee,
+            include_archived,
+            limit,
+            cursor,
+        } => {
+            let before = cursor
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(u64::MAX);
+            let limit = limit.unwrap_or(40).clamp(1, 100);
+            // Each committee its own threads; a crossing is in both logs.
+            let mut samples = match committee.as_str() {
+                "payments" => vec![
+                    (
+                        77,
+                        431,
+                        "Cross-committee refund policy",
+                        "active",
+                        Some(CommitteeId::new("refund-v2").unwrap()),
+                    ),
+                    (
+                        60,
+                        429,
+                        "Ledger migration freeze window",
+                        "processing",
+                        None,
+                    ),
+                ],
+                "infra" => vec![(31, 300, "Flaky watch test on CI", "active", None)],
+                "docs" => Vec::new(),
+                _ => vec![
+                    (
+                        419,
+                        430,
+                        "Cross-committee refund policy",
+                        "active",
+                        Some(CommitteeId::new("payments").unwrap()),
+                    ),
+                    (400, 410, "Confirm refund copy", "archived", None),
+                ],
+            };
+            if committee == crate::common::committee() && w.activity_seq >= 502 {
+                let state = match w.activity_seq {
+                    502 => "processing",
+                    503 => "active",
+                    _ => "archived",
+                };
+                samples.insert(
+                    0,
+                    (
+                        502,
+                        w.activity_seq.min(504),
+                        "Can you check the refund policy?",
+                        state,
+                        None,
+                    ),
+                );
+            }
+            let mut rows: Vec<_> = samples
+                .into_iter()
+                .filter(|&(_, updated, _, state, _)| {
+                    updated < before && (include_archived || state != "archived")
+                })
+                .map(
+                    |(root, updated, title, state, other_committee)| CommitteeThread {
+                        committee: committee.clone(),
+                        root: Seq(root),
+                        title: title.into(),
+                        kind: "question".into(),
+                        opener: "senator::reviewer".into(),
+                        addressees: vec!["senator::tester".into()],
+                        owner: Some("senator::tester".into()),
+                        state: state.into(),
+                        waits_on: None,
+                        escalated_to: None,
+                        takeover: None,
+                        last_seq: Seq(updated),
+                        last_at: Some(Utc::now()),
+                        last_author: Some("senator::tester".into()),
+                        message_count: Some(3),
+                        other_committee,
+                    },
+                )
+                .collect();
+            let more = rows.len() > limit;
+            rows.truncate(limit);
+            let next_cursor = rows.last().filter(|_| more).map(|t| t.last_seq.to_string());
+            Reply::ok(&CommitteeThreadPage { rows, next_cursor })
+        }
         Request::Stats { from, to, tz } => Reply::ok(&sample_stats(from, to, tz)),
         Request::SessionHistory {
             committee,
@@ -1053,6 +1234,7 @@ pub fn hosted_sessions() -> SessionsReply {
         started_at: (state == HostState::Running).then(|| Utc::now() - chrono::Duration::hours(2)),
         attached: false,
         typed_secs_ago: None,
+        viewer_tty: None,
         tty: "/tmp/none".into(),
         prompt: None,
         working: false,
@@ -1413,6 +1595,10 @@ pub fn busy_senate(w: &mut World) {
         senator: path(id),
         display_name: name.into(),
         active,
+        runtime: Some(senate_bridge::session::Runtime::Claude),
+        session_state: Some(if active { "idle" } else { "away" }.into()),
+        status_title: None,
+        session_id: None,
     };
     let committee = |name: &str,
                      chair: Option<(&str, &str, bool)>,
@@ -1693,6 +1879,7 @@ pub fn session_tree(w: &mut World) {
                 started_at: Some(ago(180)),
                 attached: false,
                 typed_secs_ago: None,
+                viewer_tty: None,
                 tty: "/tmp/none".into(),
                 prompt: None,
                 paused: false,
@@ -2548,6 +2735,7 @@ pub fn seat_secretary(w: &mut World, state: senate_bridge::ipc::DefaultSecretary
         started_at: (host == HostState::Running).then(Utc::now),
         attached: false,
         typed_secs_ago: None,
+        viewer_tty: None,
         tty: "/tmp/none".into(),
         prompt: None,
         working: false,
@@ -2606,6 +2794,7 @@ fn revive(w: &mut World, r: &senate_bridge::ipc::SessionHistoryRow) {
         started_at: Some(Utc::now()),
         attached: false,
         typed_secs_ago: None,
+        viewer_tty: None,
         tty: "/tmp/none".into(),
         prompt: None,
         working: false,

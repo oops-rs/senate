@@ -916,6 +916,7 @@ mod tests {
             since: Seq(root),
             since_ts: Utc::now(),
             updated: Seq(root),
+            activity: None,
             steps: Vec::new(),
             links: Vec::new(),
             owner: None,

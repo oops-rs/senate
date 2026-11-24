@@ -278,24 +278,31 @@ impl Shared {
         })
     }
 
-    /// The prompt waiting in a host's terminal, for `sessions`: its oldest
-    /// open notice, dated on the wall clock.
-    pub(super) fn hosted_prompt(&self, host_id: &EventId) -> Option<HostedPrompt> {
-        let states = self.store.hosted_approval_states().ok()?;
-        let (_, state) = states.into_iter().find(|(id, _)| id == host_id)?;
-        let notice = state
-            .notices
-            .iter()
-            .filter(|n| !n.unseated && n.archive.is_none())
-            .min_by_key(|n| n.at)?;
-        let ago = observed_at().saturating_sub(notice.at);
-        let since = chrono::Utc::now()
-            - chrono::Duration::from_std(Duration::from_nanos(ago)).unwrap_or_default();
-        Some(HostedPrompt {
-            tool: notice.tool.as_deref().map(tool_label),
-            since,
-            screen: notice.screen,
-        })
+    /// Each host's oldest open notice, dated on the wall clock.
+    pub(super) fn hosted_prompts(&self) -> BTreeMap<EventId, HostedPrompt> {
+        let observed = observed_at();
+        let now = chrono::Utc::now();
+        self.store
+            .hosted_approval_states()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(id, state)| {
+                let notice = state
+                    .notices
+                    .iter()
+                    .filter(|n| !n.unseated && n.archive.is_none())
+                    .min_by_key(|n| n.at)?;
+                let ago = Duration::from_nanos(observed.saturating_sub(notice.at));
+                Some((
+                    id,
+                    HostedPrompt {
+                        tool: notice.tool.as_deref().map(tool_label),
+                        since: now - chrono::Duration::from_std(ago).unwrap_or_default(),
+                        screen: notice.screen,
+                    },
+                ))
+            })
+            .collect()
     }
 
     async fn reconcile_approval_hosts(&self) -> Result<(), StoreError> {
@@ -822,7 +829,62 @@ fn observe_input(state: &mut HostApprovalState, at: u64) -> bool {
     if candidate {
         state.claude = None;
     }
-    close_notices(state, |notice| notice.at <= at) || candidate
+    close_notices(state, |notice| {
+        // A relayed Codex wait belongs to the task's requester. Typing
+        // shows the terminal is attended but says nothing about its native
+        // approval outcome.
+        notice.at <= at
+            && (notice.screen || notice.runtime != Runtime::Codex || notice.relay_thread.is_none())
+    }) || candidate
+}
+
+#[cfg(test)]
+#[test]
+fn typing_keeps_a_relayed_codex_wait_open_for_its_native_outcome() -> anyhow::Result<()> {
+    let ordinary = ApprovalNotice {
+        id: EventId::new(),
+        prompt: "ordinary".into(),
+        at: 100,
+        tool: None,
+        runtime: Runtime::Codex,
+        agent: "codex-test".parse()?,
+        committee: CommitteeId::new("fixture")?,
+        recipient: None,
+        seq: Some(Seq(1)),
+        relay_thread: None,
+        unseated: false,
+        archive: None,
+        answer: None,
+        append_attempted: true,
+        failures: 0,
+        screen: false,
+    };
+    let relayed = ApprovalNotice {
+        id: EventId::new(),
+        prompt: "relayed".into(),
+        seq: Some(Seq(3)),
+        relay_thread: Some(Seq(2)),
+        ..ordinary.clone()
+    };
+    let screen = ApprovalNotice {
+        id: EventId::new(),
+        prompt: "screen".into(),
+        seq: Some(Seq(4)),
+        screen: true,
+        ..relayed.clone()
+    };
+    let mut state = HostApprovalState {
+        notices: vec![ordinary, relayed, screen],
+        ..HostApprovalState::default()
+    };
+
+    assert!(observe_input(&mut state, 101));
+    assert!(state.notices[0].archive.is_some());
+    assert!(state.notices[1].archive.is_none());
+    assert!(state.notices[2].archive.is_some());
+    assert!(close_notices(&mut state, |notice| notice.prompt == "relayed"));
+    assert!(state.notices[1].archive.is_some());
+    Ok(())
 }
 
 fn open_notice(
