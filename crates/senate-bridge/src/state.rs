@@ -107,6 +107,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     agent_source     TEXT NOT NULL,
     host_id          TEXT
 );
+CREATE TABLE IF NOT EXISTS native_process_claims (
+    session_id TEXT PRIMARY KEY,
+    owner TEXT,
+    pending TEXT,
+    pending_id TEXT
+);
 CREATE TABLE IF NOT EXISTS hosted_native_seats (
     session_id TEXT PRIMARY KEY,
     retired INTEGER NOT NULL
@@ -363,12 +369,20 @@ struct HostedBinding<'a> {
     private_codex: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ClaimDecision {
+    Accepted,
+    Occupied,
+    NeedsAuthorization,
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
     has_host_id: bool,
 }
 
 fn prune_delivery(tx: &rusqlite::Transaction<'_>, cutoff: i64) -> Result<(), StoreError> {
+    tx.execute("DELETE FROM native_process_claims WHERE pending IS NULL AND session_id NOT IN (SELECT session_id FROM sessions)", [])?;
     tx.execute("DELETE FROM hosted_codex_backends WHERE session_id NOT IN (SELECT session_id FROM sessions)", [])?;
     tx.execute(
         "DELETE FROM session_ancestors
@@ -1258,6 +1272,126 @@ impl Store {
     }
 
     // ---- sessions --------------------------------------------------------
+
+    pub(crate) fn verified_native_owner(
+        &self,
+        session: &str,
+    ) -> Result<Option<crate::kernel_process::BoundProcess>, StoreError> {
+        self.conn()
+            .query_row(
+                "SELECT owner FROM native_process_claims WHERE session_id = ?1",
+                [session],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .map(|json| {
+                serde_json::from_str(&json).map_err(|error| StoreError::Corrupt(error.to_string()))
+            })
+            .transpose()
+    }
+
+    pub(crate) fn claim_native_process(
+        &self,
+        session: &str,
+        process: &crate::kernel_process::BoundProcess,
+        privileged: bool,
+    ) -> Result<ClaimDecision, StoreError> {
+        let encoded = serde_json::to_string(process)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let existing = tx
+            .query_row(
+                "SELECT owner, pending FROM native_process_claims WHERE session_id = ?1",
+                [session],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()?
+            .unwrap_or_default();
+        if let Some(owner) = existing.0 {
+            let owner: crate::kernel_process::BoundProcess = serde_json::from_str(&owner)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            if owner == *process {
+                return Ok(ClaimDecision::Accepted);
+            }
+            if owner.live() {
+                return Ok(ClaimDecision::Occupied);
+            }
+        }
+        if privileged {
+            if existing.1.as_deref() != Some(&encoded) {
+                tx.execute(
+                    "INSERT INTO native_process_claims (session_id, pending, pending_id) VALUES (?1, ?2, ?3)
+                     ON CONFLICT (session_id) DO UPDATE SET pending=excluded.pending, pending_id=excluded.pending_id",
+                    params![session, encoded, EventId::new().to_string()],
+                )?;
+                tx.commit()?;
+            }
+            return Ok(ClaimDecision::NeedsAuthorization);
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO native_process_claims (session_id, owner) VALUES (?1, ?2)",
+            params![session, encoded],
+        )?;
+        tx.commit()?;
+        Ok(ClaimDecision::Accepted)
+    }
+
+    pub(crate) fn pending_native_process(
+        &self,
+        session: &str,
+    ) -> Result<Option<(EventId, u32)>, StoreError> {
+        let row = self.conn().query_row(
+            "SELECT pending_id, pending FROM native_process_claims WHERE session_id = ?1 AND pending IS NOT NULL",
+            [session],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional()?;
+        let Some((id, encoded)) = row else {
+            return Ok(None);
+        };
+        let candidate: crate::kernel_process::BoundProcess = serde_json::from_str(&encoded)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        Ok(if candidate.live() {
+            Some((parse_host_id(&id)?, candidate.pid))
+        } else {
+            None
+        })
+    }
+
+    pub(crate) fn authorize_native_process(
+        &self,
+        session: &str,
+        approval: &EventId,
+    ) -> Result<bool, StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let pending = tx.query_row(
+            "SELECT pending FROM native_process_claims WHERE session_id = ?1 AND pending_id = ?2",
+            params![session, approval.to_string()],
+            |row| row.get::<_, String>(0),
+        ).optional()?;
+        let Some(pending) = pending else {
+            return Ok(false);
+        };
+        let candidate: crate::kernel_process::BoundProcess = serde_json::from_str(&pending)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        if !candidate.live() {
+            return Ok(false);
+        }
+        let changed = tx.execute(
+            "UPDATE native_process_claims SET owner=pending, pending=NULL, pending_id=NULL
+             WHERE session_id = ?1 AND pending_id = ?2",
+            params![session, approval.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(changed == 1)
+    }
 
     /// Register a session or refresh it. Marks it live and active now. Keeps
     /// an earlier explicit join, and keeps socket/token/pid/ancestors when
@@ -3029,6 +3163,33 @@ mod tests {
     /// Replaces the predecessor's migration test (the column it added exists
     /// from the start here): a session's runtime and agent are stored, read
     /// back read-only, and follow the latest hook.
+    #[test]
+    fn native_seat_confirmation_binds_the_exact_live_process_once() {
+        use crate::kernel_process::{self, BoundProcess};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.db");
+        let process = kernel_process::inspect(std::process::id()).unwrap();
+        let owner = BoundProcess::capture(process.identity).unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.claim_native_process("seat", &owner, true).unwrap(),
+            ClaimDecision::NeedsAuthorization
+        );
+        assert_eq!(store.verified_native_owner("seat").unwrap(), None);
+        let proposal = store.pending_native_process("seat").unwrap().unwrap();
+        assert!(
+            !store
+                .authorize_native_process("seat", &EventId::new())
+                .unwrap()
+        );
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+        assert!(store.authorize_native_process("seat", &proposal.0).unwrap());
+        assert!(!store.authorize_native_process("seat", &proposal.0).unwrap());
+        assert_eq!(store.verified_native_owner("seat").unwrap(), Some(owner));
+    }
+
     #[test]
     fn hosted_codex_backend_survives_restart_and_hook_refresh() {
         let directory = tempfile::tempdir().unwrap();

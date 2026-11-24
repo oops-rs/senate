@@ -28,7 +28,6 @@ pub(crate) struct Front {
     relay: Arc<Relay>,
     #[cfg(target_os = "macos")]
     pub(super) scope: Option<Arc<crate::mac_scope::Scope>>,
-    #[cfg(target_os = "macos")]
     pub(super) scope_fixture: bool,
     pub(super) process_checks: tokio::sync::Semaphore,
     #[cfg(target_os = "macos")]
@@ -55,7 +54,6 @@ impl Front {
             relay,
             #[cfg(target_os = "macos")]
             scope: None,
-            #[cfg(target_os = "macos")]
             scope_fixture: false,
             process_checks: tokio::sync::Semaphore::new(4),
             #[cfg(target_os = "macos")]
@@ -95,13 +93,21 @@ impl Front {
 
     /// The Senate a session is registered in, and the session.
     fn locate(&self, selector: &SessionSelector) -> Option<(Arc<Shared>, Session)> {
+        self.locate_with_activity(selector, true)
+    }
+
+    fn locate_with_activity(
+        &self,
+        selector: &SessionSelector,
+        touch: bool,
+    ) -> Option<(Arc<Shared>, Session)> {
         if selector.session_id.is_none() && selector.claude_pid.is_none() {
             return None;
         }
         self.senates
             .iter()
             .filter_map(|s| {
-                let session = s.resolve(selector).ok()?;
+                let session = s.resolve_with_activity(selector, touch).ok()?;
                 (session.state != SessionState::Ended).then(|| (s.clone(), session))
             })
             .max_by_key(|(_, session)| session.last_seen)
@@ -112,6 +118,183 @@ impl Front {
         self.primary().on_status()
     }
 
+    fn hosted_actor(
+        &self,
+        session_id: &str,
+        runtime: Runtime,
+    ) -> Result<Option<kernel_process::BoundProcess>, IpcError> {
+        let shared = self.primary();
+        let paths = Paths::new(&shared.home);
+        if let Some(host) = shared.store.codex_backend(session_id).map_err(internal)? {
+            return Ok(crate::host::codex_backend::owner(&paths, &host));
+        }
+        if runtime == Runtime::Codex {
+            return Ok(None);
+        }
+        let Some(host) = shared.store.session_host(session_id).map_err(internal)? else {
+            return Ok(None);
+        };
+        Ok(crate::host::actor_owner(&paths, &host))
+    }
+
+    pub(super) fn verify_role_owner(
+        &self,
+        peer: Option<u32>,
+        selector: &SessionSelector,
+    ) -> Result<(), IpcError> {
+        let no_owner =
+            || IpcError::bad_request("The caller has no verified authority for that session");
+        let (_, session) = self
+            .locate_with_activity(selector, false)
+            .ok_or_else(no_owner)?;
+        self.verify_session_instance(peer, &session)
+    }
+
+    pub(super) fn verify_session_instance(
+        &self,
+        peer: Option<u32>,
+        session: &Session,
+    ) -> Result<(), IpcError> {
+        let no_owner =
+            || IpcError::bad_request("The caller has no verified authority for that session");
+        let peer = peer.ok_or_else(no_owner)?;
+        if !session.is_live() {
+            return Err(no_owner());
+        }
+        let owner = match self.hosted_actor(&session.session_id, session.runtime)? {
+            Some(owner) => owner,
+            None => self
+                .primary()
+                .store
+                .verified_native_owner(&session.session_id)
+                .map_err(internal)?
+                .ok_or_else(no_owner)?,
+        };
+        if !owner.contains(peer, 64) {
+            return Err(no_owner());
+        }
+        Ok(())
+    }
+
+    pub(super) fn record_hook_owner(
+        &self,
+        peer: Option<u32>,
+        report: &HookReport,
+        native: bool,
+    ) -> Result<(), IpcError> {
+        use crate::state::ClaimDecision;
+        let no_owner =
+            || IpcError::bad_request("The native session's process could not be verified");
+        let peer = peer.ok_or_else(no_owner)?;
+        let shared = self.primary();
+        let stored = shared.store.session(&report.session_id).map_err(internal)?;
+        let (chosen, source) = if native {
+            (
+                agent::session_name(report.runtime, &report.session_id),
+                AgentSource::Session,
+            )
+        } else {
+            agent::choose(
+                &shared.config.agents,
+                report.runtime,
+                agent::Pins {
+                    env: report.agent_env.as_deref(),
+                    file: report.agent_file.as_deref(),
+                },
+            )
+        };
+        let senator = stored.as_ref().map_or(&chosen, |session| &session.agent);
+        let privileged = self.seat_of(senator).is_some()
+            || shared
+                .known_chairs()
+                .iter()
+                .any(|(_, chair)| chair == senator);
+        let pending_host = shared.hosts.pending_host(&report.session_id).or_else(|| {
+            report
+                .host
+                .as_ref()
+                .filter(|host| report.runtime == Runtime::Agy && shared.hosts.launching(host))
+                .cloned()
+        });
+        let paths = Paths::new(&shared.home);
+        let pending_owner = pending_host.as_ref().and_then(|host| {
+            if report.runtime == Runtime::Codex {
+                crate::host::codex_backend::owner(&paths, host)
+            } else {
+                crate::host::actor_owner(&paths, host)
+            }
+        });
+        let hosted_owner = pending_owner.or(self.hosted_actor(&report.session_id, report.runtime)?);
+        let daemon_owned = hosted_owner.is_some();
+        let root = if let Some(process) = hosted_owner {
+            if !process.contains(peer, 64) {
+                return Err(no_owner());
+            }
+            Some(process)
+        } else {
+            let ancestry = kernel_process::ancestors(peer, 64).map_err(|_| no_owner())?;
+            let candidate = if report.runtime == Runtime::Acp {
+                kernel_process::inspect(peer)
+                    .ok()
+                    .map(|process| process.identity)
+            } else {
+                ancestry.into_iter().find(|candidate| {
+                    kernel_process::inspect(candidate.pid).is_ok_and(|process| {
+                        process.identity == *candidate && process.name == report.runtime.as_str()
+                    })
+                })
+            };
+            candidate.and_then(|process| kernel_process::BoundProcess::capture(process).ok())
+        };
+        let Some(root) = root else {
+            if privileged {
+                return Err(no_owner());
+            }
+            return Ok(());
+        };
+        let mut same_seat_owner = false;
+        if !native && matches!(source, AgentSource::Env | AgentSource::File) {
+            for prior in shared
+                .store
+                .sessions()
+                .map_err(internal)?
+                .into_iter()
+                .filter(|session| {
+                    session.session_id != report.session_id
+                        && &session.agent == senator
+                        && session.is_live()
+                })
+            {
+                let prior_owner = self
+                    .hosted_actor(&prior.session_id, prior.runtime)?
+                    .or(shared
+                        .store
+                        .verified_native_owner(&prior.session_id)
+                        .map_err(internal)?);
+                if prior_owner.as_ref() != Some(&root) {
+                    return Err(no_owner());
+                }
+                same_seat_owner = true;
+            }
+        }
+        match shared
+            .store
+            .claim_native_process(
+                &report.session_id,
+                &root,
+                privileged && !daemon_owned && !same_seat_owner,
+            )
+            .map_err(internal)?
+        {
+            ClaimDecision::Accepted => Ok(()),
+            ClaimDecision::Occupied => Err(no_owner()),
+            ClaimDecision::NeedsAuthorization => Err(IpcError::bad_request(format!(
+                "Run senate session authorize {} to resume the privileged native seat",
+                report.session_id
+            ))),
+        }
+    }
+
     pub(crate) async fn dispatch(self: &Arc<Self>, request: Request) -> Reply {
         if crate::app_confirmation::required(&request) {
             return Reply::err(IpcError::new(
@@ -120,6 +303,21 @@ impl Front {
             ));
         }
         match request {
+            Request::NativeAuthorityCandidate { session_id } => wrap(
+                self.primary()
+                    .store
+                    .pending_native_process(&session_id)
+                    .map_err(internal),
+            ),
+            Request::AuthorizeNativeAuthority {
+                session_id,
+                approval,
+            } => wrap(
+                self.primary()
+                    .store
+                    .authorize_native_process(&session_id, &approval)
+                    .map_err(internal),
+            ),
             Request::ObserveAdmin { command } => self.on_observe_admin(command).await,
             Request::SetCard {
                 session,

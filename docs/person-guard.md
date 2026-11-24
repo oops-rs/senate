@@ -47,8 +47,7 @@ proof to the exact request digest and the Mach sender's process generation.
 Managed launchd hosting persists its daemon coalition before publishing the
 bridge. The scope covers dedicated hosted Codex backends. Existing shared backends
 remain advisory until their hosted sessions are restored to dedicated mode. Linux and WSL hosting remains advisory. Hook
-process queries and person-name reservation are in place. Persistent role
-reauthorization is pending. The app's signed XPC queue provides consent for
+process queries and person-name reservation are in place. Native role bindings persist by boot and process generation. The app's signed XPC queue provides consent for
 rebind and line-bearing grants through a dedicated Observe registry capability.
 
 From an operator terminal in this worktree, with the signed fixture binaries
@@ -109,6 +108,13 @@ native privileged seat moving to a different process requires reauthorization.
 Resolve a selector once and carry that proof through dispatch. Derive Git
 context from verified process or launch state. Observe requires runtime-owned
 transcript paths and matching native record IDs.
+
+Native role commands use a session proof distinct from operator proof. A
+different process cannot refresh a live binding. A privileged native
+seat moving to a new verified process waits for operator authorization.
+Run `senate session authorize <native-session-id>` from a person terminal
+to accept the current proposal. Its ID is consumed once and the daemon
+rechecks the proposed process before committing it.
 
 ## Ablation
 

@@ -39,6 +39,12 @@ impl Launches {
             .map(|pending| pending.published.subscribe())
     }
 
+    pub(super) fn pending_host(&self, session_id: &str) -> Option<EventId> {
+        lock(&self.0).iter().find_map(|(host, pending)| {
+            (pending.session_id.as_deref() == Some(session_id)).then(|| host.clone())
+        })
+    }
+
     /// Whether host `id` is still starting: not an orphan, whatever the
     /// session registry says yet.
     pub(super) fn launching(&self, id: &EventId) -> bool {

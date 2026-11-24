@@ -9,6 +9,53 @@ pub(crate) struct ProcessIdentity {
     pub birth: u64,
 }
 
+/// A persisted process instance. PID and start identity are scoped to one boot.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BoundProcess {
+    boot: String,
+    pub(crate) pid: u32,
+    birth: u64,
+}
+
+impl BoundProcess {
+    pub(crate) fn capture(process: ProcessIdentity) -> io::Result<Self> {
+        #[cfg(target_os = "macos")]
+        let boot = crate::mac_scope::boot_id()?;
+        #[cfg(target_os = "linux")]
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+            .trim()
+            .to_owned();
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let boot = String::new();
+        if boot.is_empty() {
+            return Err(io::Error::other("kernel boot identity is unavailable"));
+        }
+        Ok(Self {
+            boot,
+            pid: process.pid,
+            birth: process.birth,
+        })
+    }
+
+    pub(crate) fn live(&self) -> bool {
+        inspect(self.pid)
+            .ok()
+            .and_then(|process| Self::capture(process.identity).ok())
+            .is_some_and(|current| current == *self)
+    }
+
+    pub(crate) fn contains(&self, caller: u32, limit: usize) -> bool {
+        self.live()
+            && (caller == self.pid
+                || ancestors(caller, limit).is_ok_and(|ancestors| {
+                    ancestors.contains(&ProcessIdentity {
+                        pid: self.pid,
+                        birth: self.birth,
+                    })
+                }))
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Process {
     pub identity: ProcessIdentity,

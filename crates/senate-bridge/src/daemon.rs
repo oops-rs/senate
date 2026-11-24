@@ -761,10 +761,13 @@ pub async fn start_with_host_binary(
     start_bridge(options, host_binary, false, None, None, true).await
 }
 
-#[cfg(target_os = "macos")]
 fn debug_scope_fixture(home: &Path, fixture_bootstrap: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    let unsigned = crate::app_confirmation::team().is_none();
+    #[cfg(not(target_os = "macos"))]
+    let unsigned = true;
     cfg!(debug_assertions)
-        && crate::app_confirmation::team().is_none()
+        && unsigned
         && (fixture_bootstrap || std::env::var_os(crate::testenv::CONFINE_ENV).is_some())
         && home.canonicalize().ok().is_some_and(|home| {
             std::env::temp_dir()
@@ -785,7 +788,7 @@ async fn start_bridge(
     fixture_bootstrap: bool,
 ) -> anyhow::Result<DaemonHandle> {
     #[cfg(not(target_os = "macos"))]
-    let _ = (fixture_bootstrap, observe_consent);
+    let _ = observe_consent;
     let DaemonOptions {
         paths,
         config,
@@ -866,7 +869,6 @@ async fn start_bridge(
             tracing::warn!(%error, "macOS person requests and protected hosting are unavailable");
         }).ok()
     });
-    #[cfg(target_os = "macos")]
     let fixture = debug_scope_fixture(paths.home(), fixture_bootstrap);
     let common = Common {
         #[cfg(target_os = "macos")]
@@ -905,9 +907,9 @@ async fn start_bridge(
     #[cfg(target_os = "macos")]
     {
         front.scope = scope.as_ref().map(|(scope, _)| scope.clone());
-        front.scope_fixture = fixture;
         front.set_observe_consent(observe_consent);
     }
+    front.scope_fixture = fixture;
     front.observe = observe;
     front.remote = remote.as_ref().map(|(service, _)| service.clone());
     let front = Arc::new(front);
@@ -3456,6 +3458,7 @@ impl Shared {
                 wrap(result.map_err(server_error))
             }
             Request::Status => wrap(self.on_status()),
+            Request::NativeAuthorityCandidate { .. } | Request::AuthorizeNativeAuthority { .. } |
             Request::RemoteControl { .. } | Request::ObserveAdmin { .. } | Request::SetCard { .. } => {
                 Reply::err(IpcError::bad_request("local person socket only"))
             }
@@ -5034,6 +5037,14 @@ impl Shared {
     }
 
     fn resolve(&self, selector: &SessionSelector) -> Result<Session, IpcError> {
+        self.resolve_with_activity(selector, true)
+    }
+
+    fn resolve_with_activity(
+        &self,
+        selector: &SessionSelector,
+        touch: bool,
+    ) -> Result<Session, IpcError> {
         if let Some(companion) = self.companion_session(selector) {
             return Ok(companion);
         }
@@ -5075,9 +5086,11 @@ impl Shared {
                 ),
             ));
         };
-        self.store
-            .touch_session(&session.session_id)
-            .map_err(internal)?;
+        if touch {
+            self.store
+                .touch_session(&session.session_id)
+                .map_err(internal)?;
+        }
         Ok(session.clone())
     }
 
@@ -6632,31 +6645,48 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
         let (reply, last) = match ipc::read_line(&mut reader).await {
             Ok(None) => return,
             Ok(Some(line)) => {
+                let fixture = shared.scope_fixture
+                    || (cfg!(debug_assertions) && peer == Some(std::process::id()));
                 #[cfg(target_os = "macos")]
-                let (line, person_peer) = if let Some((ticket, body)) = line
-                    .strip_prefix("SCOPE1 ")
-                    .and_then(|line| line.split_once(' '))
-                {
-                    let authenticated = shared
-                        .scope
-                        .as_ref()
-                        .and_then(|scope| scope.consume(ticket, body.as_bytes()))
-                        .filter(|sender| Some(*sender) == peer);
-                    (body, authenticated)
-                } else {
-                    (
-                        line.as_str(),
-                        peer.filter(|pid| {
-                            shared.scope_fixture
-                                || (cfg!(debug_assertions)
-                                    && crate::app_confirmation::team().is_none()
-                                    && *pid == std::process::id())
-                        }),
-                    )
+                let (line, person_peer, session_peer) = {
+                    use crate::mac_scope::ProofKind;
+                    if let Some((ticket, body)) = line
+                        .strip_prefix("SCOPE1 ")
+                        .and_then(|line| line.split_once(' '))
+                    {
+                        let attested = shared
+                            .scope
+                            .as_ref()
+                            .and_then(|scope| scope.consume(ticket, body.as_bytes()))
+                            .filter(|(sender, _)| Some(sender.pid) == peer);
+                        (
+                            body,
+                            attested
+                                .filter(|(_, kind)| *kind == ProofKind::Operator)
+                                .map(|(sender, _)| sender.pid),
+                            attested
+                                .filter(|(_, kind)| *kind == ProofKind::Session)
+                                .map(|(sender, _)| sender.pid),
+                        )
+                    } else {
+                        let permitted = peer.filter(|_| fixture);
+                        (line.as_str(), permitted, permitted)
+                    }
                 };
                 #[cfg(not(target_os = "macos"))]
-                let (line, person_peer) = (line.as_str(), peer);
-                match serde_json::from_str::<Request>(line) {
+                let (line, person_peer, session_peer) = (line.as_str(), peer, peer);
+                let decoded = serde_json::from_str::<Request>(line);
+                let role_refusal = if fixture {
+                    None
+                } else {
+                    decoded
+                        .as_ref()
+                        .ok()
+                        .and_then(approval_guard::role_selector)
+                        .and_then(|selector| shared.verify_role_owner(session_peer, selector).err())
+                };
+                match decoded {
+                    Ok(_) if let Some(error) = role_refusal => (Reply::err(error), false),
                     Ok(Request::RemoteControl { command }) => {
                         let reply = match shared
                             .refuse_agent_caller(
@@ -6756,7 +6786,17 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                             Request::SessionHook(report) => (report, true),
                             _ => unreachable!(),
                         };
-                        let reply = match shared.bind_hook_process_claims(peer, &mut report).await {
+                        let checked = shared
+                            .bind_hook_process_claims(session_peer, &mut report)
+                            .await
+                            .and_then(|()| {
+                                if fixture {
+                                    Ok(())
+                                } else {
+                                    shared.record_hook_owner(session_peer, &report, native)
+                                }
+                            });
+                        let reply = match checked {
                             Ok(()) => {
                                 let verified = if native {
                                     Request::SessionHook(report)
@@ -6815,18 +6855,25 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         document,
                     }) if session != SessionSelector::default() => {
                         let _binding = shared.primary().session_bindings.read().await;
-                        let reply = match shared.primary().resolve(&session) {
-                            Ok(session) => match shared.verify_card_session(peer, &session).await {
-                                Ok(()) => wrap(
-                                    Box::pin(shared.set_observer_card(
-                                        Some(session),
-                                        target,
-                                        &document,
-                                    ))
-                                    .await,
-                                ),
-                                Err(error) => Reply::err(error),
-                            },
+                        let reply = match shared.primary().resolve_with_activity(&session, false) {
+                            Ok(session) => {
+                                let result = if fixture {
+                                    shared.verify_card_session(peer, &session).await
+                                } else {
+                                    shared.verify_session_instance(session_peer, &session)
+                                };
+                                match result {
+                                    Ok(()) => wrap(
+                                        Box::pin(shared.set_observer_card(
+                                            Some(session),
+                                            target,
+                                            &document,
+                                        ))
+                                        .await,
+                                    ),
+                                    Err(error) => Reply::err(error),
+                                }
+                            }
                             Err(error) => Reply::err(error),
                         };
                         (reply, false)

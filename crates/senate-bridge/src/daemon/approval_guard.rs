@@ -73,6 +73,9 @@ pub(crate) fn person_only(request: &Request) -> Option<&'static str> {
         Request::ObserveAdmin { .. } => {
             "Manage Observe grants from your own terminal or the Senate app"
         }
+        Request::NativeAuthorityCandidate { .. } | Request::AuthorizeNativeAuthority { .. } => {
+            "Authorize a native seat from your own terminal or the Senate app"
+        }
         Request::RebindHost { .. } => "Run `senate session rebind` from your own terminal",
         Request::Timeline { .. }
         | Request::SessionHistory { .. }
@@ -121,13 +124,47 @@ pub(crate) fn mac_operator_only(request: &Request) -> bool {
         | Request::Resume { .. }
         | Request::PruneHosts
         | Request::SetSecretarySession { .. }
+        | Request::DeskItem { .. }
+        | Request::Approvals
         | Request::Desk { set: Some(_) }
         | Request::Attach { .. } => true,
         Request::Restore { session, .. }
         | Request::Spawn { session, .. }
         | Request::Stop { session, .. }
-        | Request::SecretaryWork { session, .. } => session == &SessionSelector::default(),
+        | Request::SecretaryWork { session, .. }
+        | Request::Docket { session, .. } => session == &SessionSelector::default(),
         _ => false,
+    }
+}
+
+/// Session operations whose authority depends on the session's office or seat.
+pub(crate) fn role_selector(request: &Request) -> Option<&SessionSelector> {
+    match request {
+        Request::Route { session, .. }
+        | Request::Cover { session, .. }
+        | Request::Hold { session, .. }
+        | Request::Refer { session, .. }
+        | Request::Forward { session, .. }
+        | Request::Refuse { session, .. }
+        | Request::SpeakerAlias { session, .. }
+        | Request::SpeakerUnseat { session, .. }
+        | Request::ChairDocket { session }
+        | Request::ChairRoute { session, .. }
+        | Request::ChairCover { session, .. }
+        | Request::ChairEscalate { session, .. }
+        | Request::SecretaryCover { session, .. }
+        | Request::Docket { session, .. }
+        | Request::DeskOpenCommittee { session, .. }
+        | Request::SecretaryWork { session, .. }
+        | Request::SetChair { session, .. }
+        | Request::Spawn { session, .. }
+        | Request::Restore { session, .. }
+        | Request::Stop { session, .. }
+            if session != &SessionSelector::default() =>
+        {
+            Some(session)
+        }
+        _ => None,
     }
 }
 

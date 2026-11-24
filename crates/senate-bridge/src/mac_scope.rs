@@ -23,14 +23,25 @@ pub(crate) struct Scope {
     receipts: Mutex<HashMap<String, Receipt>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProofKind {
+    #[default]
+    Operator,
+    Session,
+}
+
 struct Receipt {
     request: [u8; 32],
     sender: ProcessIdentity,
+    kind: ProofKind,
     expires: Instant,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Claim {
+    #[serde(default)]
+    kind: ProofKind,
     request: [u8; 32],
 }
 
@@ -78,7 +89,7 @@ fn coalition(pid: i32, version: Option<u32>) -> std::io::Result<u64> {
     Ok(ids[0])
 }
 
-fn boot_id() -> std::io::Result<String> {
+pub(crate) fn boot_id() -> std::io::Result<String> {
     let mut bytes = [0_u8; 64];
     let mut len = bytes.len();
     // sysctl updates len and writes at most the supplied buffer size.
@@ -154,7 +165,7 @@ impl Scope {
         Ok((scope, macos::Listener(listener)))
     }
 
-    fn issue(&self, token: [u32; 8], request: [u8; 32]) -> Option<String> {
+    fn issue(&self, token: [u32; 8], request: [u8; 32], kind: ProofKind) -> Option<String> {
         if token[1] != rustix::process::geteuid().as_raw() {
             return None;
         }
@@ -167,7 +178,7 @@ impl Scope {
                 tracing::debug!(pid, %error, "could not attest caller coalition");
             })
             .ok()?;
-        if self.hosted.contains(&scope) {
+        if kind == ProofKind::Operator && self.hosted.contains(&scope) {
             tracing::debug!(pid, scope, "refused person proof for hosted coalition");
             return None;
         }
@@ -185,6 +196,7 @@ impl Scope {
             Receipt {
                 request,
                 sender,
+                kind,
                 expires: now + TTL,
             },
         );
@@ -192,14 +204,18 @@ impl Scope {
         Some(token)
     }
 
-    pub(crate) fn consume(&self, token: &str, request: &[u8]) -> Option<u32> {
+    pub(crate) fn consume(
+        &self,
+        token: &str,
+        request: &[u8],
+    ) -> Option<(ProcessIdentity, ProofKind)> {
         let proof = self.receipts.lock().ok()?.remove(token)?;
         let digest: [u8; 32] = Sha256::digest(request).into();
         if proof.expires <= Instant::now() || proof.request != digest {
             return None;
         }
         let current = kernel_process::inspect(proof.sender.pid).ok()?;
-        (current.identity == proof.sender).then_some(proof.sender.pid)
+        (current.identity == proof.sender).then_some((proof.sender, proof.kind))
     }
 }
 
@@ -222,16 +238,17 @@ extern "C" fn handle(
     tracing::debug!("received scope proof request");
     let proof = serde_json::from_slice::<Claim>(bytes)
         .ok()
-        .and_then(|claim| scope.issue(audit, claim.request));
+        .and_then(|claim| scope.issue(audit, claim.request, claim.kind));
     if let Ok(bytes) = serde_json::to_vec(&proof) {
         unsafe { macos::senate_xpc_send_reply(reply, bytes.as_ptr(), bytes.len()) };
     }
 }
 
-pub(crate) async fn prove(path: &Path, request: &[u8]) -> Option<String> {
+pub(crate) async fn prove(path: &Path, request: &[u8], kind: ProofKind) -> Option<String> {
     app_confirmation::team()?;
     let service = service(path.parent()?);
     let bytes = serde_json::to_vec(&Claim {
+        kind,
         request: Sha256::digest(request).into(),
     })
     .ok()?;
@@ -270,16 +287,24 @@ mod tests {
         let own_coalition = coalition(pid, Some(audit[7])).unwrap();
         let request = Sha256::digest(b"fixture").into();
         let eligible = Scope::default();
-        assert!(eligible.issue(audit, request).is_some());
+        assert!(
+            eligible
+                .issue(audit, request, ProofKind::Operator)
+                .is_some()
+        );
 
         let hosted = Scope {
             hosted: HashSet::from([own_coalition]),
             ..Scope::default()
         };
-        assert!(hosted.issue(audit, request).is_none());
+        assert!(hosted.issue(audit, request, ProofKind::Operator).is_none());
 
         audit[7] ^= 1;
-        assert!(eligible.issue(audit, request).is_none());
+        assert!(
+            eligible
+                .issue(audit, request, ProofKind::Operator)
+                .is_none()
+        );
     }
 
     #[test]
@@ -294,12 +319,16 @@ mod tests {
                 Receipt {
                     request: Sha256::digest(b"first").into(),
                     sender,
+                    kind: ProofKind::Operator,
                     expires: Instant::now() + TTL,
                 },
             );
         };
         seal("first");
-        assert_eq!(scope.consume("first", b"first"), Some(sender.pid));
+        assert_eq!(
+            scope.consume("first", b"first"),
+            Some((sender, ProofKind::Operator))
+        );
         assert_eq!(scope.consume("first", b"first"), None);
 
         seal("second");

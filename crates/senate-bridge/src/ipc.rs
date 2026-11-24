@@ -1044,6 +1044,13 @@ pub enum Request {
         #[serde(flatten)]
         model: HostedModel,
     },
+    NativeAuthorityCandidate {
+        session_id: String,
+    },
+    AuthorizeNativeAuthority {
+        session_id: String,
+        approval: EventId,
+    },
     /// Person-only repair of a legacy split hosted agy registration.
     RebindHost {
         host: String,
@@ -2881,22 +2888,35 @@ pub async fn request_line(socket: &Path, request: &Request) -> Result<Vec<u8>, C
     let body = serde_json::to_vec(request).map_err(|e| ClientError::Protocol(e.to_string()))?;
     let mut frame = Vec::new();
     #[cfg(target_os = "macos")]
-    if (crate::daemon::approval_guard::person_only(request).is_some()
-        || crate::daemon::approval_guard::mac_operator_only(request)
-        || matches!(
-            request,
-            Request::RemoteControl { .. }
-                | Request::SessionDrop { .. }
-                | Request::ActivityWatch { .. }
-                | Request::TimelineWatch { .. }
-                | Request::DeskDecide { .. }
-                | Request::Sessions
-        ))
-        && let Some(ticket) = crate::mac_scope::prove(socket, &body).await
     {
-        frame.extend_from_slice(b"SCOPE1 ");
-        frame.extend_from_slice(ticket.as_bytes());
-        frame.push(b' ');
+        use crate::mac_scope::ProofKind;
+        let kind = if crate::daemon::approval_guard::person_only(request).is_some()
+            || crate::daemon::approval_guard::mac_operator_only(request)
+            || matches!(
+                request,
+                Request::RemoteControl { .. }
+                    | Request::SessionDrop { .. }
+                    | Request::ActivityWatch { .. }
+                    | Request::TimelineWatch { .. }
+                    | Request::DeskDecide { .. }
+                    | Request::Sessions
+            ) {
+            Some(ProofKind::Operator)
+        } else if matches!(request, Request::Hook(_) | Request::SessionHook(_))
+            || matches!(request, Request::SetCard { session, .. } if session != &SessionSelector::default())
+            || crate::daemon::approval_guard::role_selector(request).is_some()
+        {
+            Some(ProofKind::Session)
+        } else {
+            None
+        };
+        if let Some(kind) = kind
+            && let Some(ticket) = crate::mac_scope::prove(socket, &body, kind).await
+        {
+            frame.extend_from_slice(b"SCOPE1 ");
+            frame.extend_from_slice(ticket.as_bytes());
+            frame.push(b' ');
+        }
     }
     #[cfg(not(target_os = "macos"))]
     let _ = socket;

@@ -592,6 +592,12 @@ pub async fn run(
         .and_then(|pid| i32::try_from(pid).ok())
         .and_then(Pid::from_raw)
         .context("the coding TUI has no process ID")?;
+    if let Ok(owner) = crate::kernel_process::inspect(pid.as_raw_pid() as u32)
+        .and_then(|process| crate::kernel_process::BoundProcess::capture(process.identity))
+    {
+        std::fs::write(dir.join("actor"), serde_json::to_vec(&owner)?)
+            .context("record the terminal actor's process identity")?;
+    }
     let mut startup_pid = file.try_clone()?;
     writeln!(startup_pid, "{pid}")?;
     drop(startup_pid);
@@ -988,6 +994,13 @@ async fn stop_group(child: &mut Child, pid: Pid) -> anyhow::Result<()> {
     }
     child.wait().await.context("stop the coding TUI group")?;
     Ok(())
+}
+
+pub(crate) fn actor_owner(
+    paths: &Paths,
+    id: &EventId,
+) -> Option<crate::kernel_process::BoundProcess> {
+    serde_json::from_slice(&std::fs::read(directory(paths, id).join("actor")).ok()?).ok()
 }
 
 pub(crate) fn mark_shared_codex_thread(paths: &Paths, id: &EventId) -> io::Result<()> {

@@ -86,6 +86,10 @@ impl Unpublished {
     }
 }
 
+pub(crate) fn owner(paths: &Paths, id: &EventId) -> Option<crate::kernel_process::BoundProcess> {
+    serde_json::from_slice(&std::fs::read(directory(paths, id).join("owner")).ok()?).ok()
+}
+
 struct BackendDirectory(PathBuf);
 
 impl Drop for BackendDirectory {
@@ -128,6 +132,11 @@ pub(crate) async fn supervise(
         .kill_on_drop(true)
         .spawn()
         .context("start protected Codex app-server")?;
+    let pid = backend.id().context("dedicated Codex backend pid")?;
+    let owner = crate::kernel_process::BoundProcess::capture(
+        crate::kernel_process::inspect(pid)?.identity,
+    )?;
+    std::fs::write(dir.join("owner"), serde_json::to_vec(&owner)?)?;
     let mut publication = tokio::net::unix::pipe::Receiver::from_owned_fd(
         rustix::io::fcntl_dupfd_cloexec(std::io::stdin(), 3)?,
     )?;

@@ -795,6 +795,8 @@ enum DebugCmd {
 
 #[derive(Subcommand)]
 enum SessionCmd {
+    /// Reauthorize a privileged native seat for its current verified process.
+    Authorize { session_id: String },
     /// Repair two agy conversation records for one hosted terminal.
     Rebind {
         /// The original senator by name or role, or the terminal's host ID.
@@ -4286,6 +4288,32 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             runtime(false)?.block_on(pause_sessions(
                 &paths, &selector, force, dry_run, timeout, locale,
             ))
+        }
+        SessionCmd::Authorize { session_id } => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(async {
+                let candidate: Option<(EventId, u32)> = daemon_call(
+                    &paths,
+                    &Request::NativeAuthorityCandidate {
+                        session_id: session_id.clone(),
+                    },
+                )
+                .await?;
+                let Some((approval, pid)) = candidate else {
+                    anyhow::bail!("No live process is waiting for authorization for this session");
+                };
+                let accepted: bool = daemon_call(
+                    &paths,
+                    &Request::AuthorizeNativeAuthority {
+                        session_id: session_id.clone(),
+                        approval,
+                    },
+                )
+                .await?;
+                anyhow::ensure!(accepted, "The pending process changed before authorization");
+                println!("Authorized session {session_id} for process {pid}");
+                Ok(())
+            })
         }
         SessionCmd::Rebind { host, to } => {
             let paths = Paths::from_env()?;
