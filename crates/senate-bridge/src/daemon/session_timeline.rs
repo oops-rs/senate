@@ -41,8 +41,8 @@ impl Shared {
                 ))
             })
             .collect();
-        let cache = self.session_titles.clone();
-        tokio::task::spawn_blocking(move || lock(&cache).refresh(visible))
+        let mut cache = self.session_titles.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || cache.refresh(visible))
             .await
             .unwrap_or_default()
     }

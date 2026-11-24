@@ -68,6 +68,7 @@ pub const SENATE: &str = "alice-desk";
 /// holding the Speaker's seat.
 pub fn status(sessions: Vec<Session>) -> StatusReply {
     StatusReply {
+        descriptors: None,
         paused: Default::default(),
         pid: 4242,
         version: "0.1.0".into(),

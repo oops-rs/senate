@@ -829,6 +829,7 @@ mod tests {
 
     fn status(streams: &[(&str, &str)]) -> StatusReply {
         StatusReply {
+            descriptors: None,
             paused: Default::default(),
             pid: 1,
             version: "0.1.0".into(),

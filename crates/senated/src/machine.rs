@@ -290,6 +290,7 @@ impl Machine {
         bridge.validate().map_err(MachineError::Invalid)?;
         let pauser = Pauser::default();
         let side = Arc::new(DeveloperMachine {
+            in_process: !plans.is_empty(),
             pauser: pauser.clone(),
             options: DaemonOptions {
                 paths: paths.clone(),
@@ -788,6 +789,7 @@ pub fn nested_notice(agent: &str, dir: &Path, locale: Locale) -> String {
 /// socket taken by another daemon, say) is a failure, retried under the
 /// assembly's supervision.
 struct DeveloperMachine {
+    in_process: bool,
     options: DaemonOptions,
     pauser: Pauser,
 }
@@ -799,7 +801,12 @@ impl Component for DeveloperMachine {
     }
 
     async fn run(&self, ctx: ComponentContext) -> anyhow::Result<()> {
-        let handle = daemon::start(self.options.clone()).await?;
+        let options = self.options.clone();
+        let handle = if self.in_process {
+            daemon::start_in_process(options).await?
+        } else {
+            daemon::start(options).await?
+        };
         let set = |pauser| {
             *self
                 .pauser
