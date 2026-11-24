@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use senate_core::{
     AnnouncementSection, Card, ChatSurface, NewGroup, PostTarget, Posted, SurfaceError,
 };
+use tokio::sync::Notify;
 
 /// The platform this surface reports, in mirrors, sources and accounts.
 pub(crate) const PLATFORM: &str = "chat";
@@ -112,6 +113,7 @@ struct State {
     invite_faults: VecDeque<SurfaceError>,
     invite_attempts: Vec<String>,
     cards: Vec<CardPost>,
+    next_card_receipt: Option<Arc<Notify>>,
     card_operations: HashMap<String, (PostTarget, Card, Posted)>,
     /// operation id → (the card ref, the card it carried). A reused id
     /// with another payload is refused, as the gateway does.
@@ -183,6 +185,13 @@ impl FakeSurface {
     /// Every card posted, as it stands now.
     pub(crate) fn cards(&self) -> Vec<CardPost> {
         self.lock().cards.clone()
+    }
+
+    /// Accept the next card immediately, but hold its receipt in flight.
+    pub(crate) fn hold_card_receipt(&self) -> Arc<Notify> {
+        let gate = Arc::new(Notify::new());
+        self.lock().next_card_receipt = Some(gate.clone());
+        gate
     }
 
     /// The card titled `title`, as it stands now.
@@ -354,38 +363,44 @@ impl ChatSurface for FakeSurface {
         card: &Card,
         operation_id: &str,
     ) -> Result<Posted, SurfaceError> {
-        let mut state = self.lock();
-        if !state.caps.cards {
-            return unsupported("cards");
-        }
-        if let Some((first_target, first_card, first)) =
-            state.card_operations.get(operation_id).cloned()
-        {
-            if first_target != target || first_card != *card {
-                state.conflicts += 1;
-                return Err(SurfaceError::Rejected(format!(
-                    "operation_conflict: {operation_id}"
-                )));
+        let (posted, gate) = {
+            let mut state = self.lock();
+            if !state.caps.cards {
+                return unsupported("cards");
             }
-            state.duplicates += 1;
-            return Ok(Posted {
-                duplicate: true,
-                ..first
+            if let Some((first_target, first_card, first)) =
+                state.card_operations.get(operation_id).cloned()
+            {
+                if first_target != target || first_card != *card {
+                    state.conflicts += 1;
+                    return Err(SurfaceError::Rejected(format!(
+                        "operation_conflict: {operation_id}"
+                    )));
+                }
+                state.duplicates += 1;
+                return Ok(Posted {
+                    duplicate: true,
+                    ..first
+                });
+            }
+            let posted = Self::mint(&mut state, &target);
+            state.card_operations.insert(
+                operation_id.to_owned(),
+                (target.clone(), card.clone(), posted.clone()),
+            );
+            state.cards.push(CardPost {
+                target,
+                message_ref: posted.message_ref.clone(),
+                operation_id: operation_id.to_owned(),
+                first: card.clone(),
+                now: card.clone(),
+                updates: 0,
             });
+            (posted, state.next_card_receipt.take())
+        };
+        if let Some(gate) = gate {
+            gate.notified().await;
         }
-        let posted = Self::mint(&mut state, &target);
-        state.card_operations.insert(
-            operation_id.to_owned(),
-            (target.clone(), card.clone(), posted.clone()),
-        );
-        state.cards.push(CardPost {
-            target,
-            message_ref: posted.message_ref.clone(),
-            operation_id: operation_id.to_owned(),
-            first: card.clone(),
-            now: card.clone(),
-            updates: 0,
-        });
         Ok(posted)
     }
 

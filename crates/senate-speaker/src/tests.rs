@@ -16,6 +16,7 @@ pub(crate) mod hub;
 mod memory;
 mod model_check;
 mod model_down;
+mod reply_progress;
 mod review;
 mod rig;
 mod secretary;

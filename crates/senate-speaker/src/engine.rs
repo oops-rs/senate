@@ -183,6 +183,7 @@ mod desk;
 mod gone;
 mod memory;
 mod offline;
+mod reply_progress;
 mod route;
 mod takeover;
 mod tasks;
@@ -349,6 +350,8 @@ struct CommitteeState {
     /// The `chat` this committee is stopped at until its interpretation
     /// returns.
     awaiting: Option<Seq>,
+    /// Only the chat at the head of this committee can be processing.
+    reply_progress: Option<tokio::sync::oneshot::Sender<reply_progress::Finished>>,
     /// Decisions already taken for a `chat`, so a step repeated after a
     /// stall or an interpretation acts on the same one.
     decisions: HashMap<Seq, Decision>,
@@ -1274,6 +1277,7 @@ impl Engine {
     /// Stop every fallback timer and Brain call (the actor is going away).
     pub(crate) fn shutdown(&mut self) {
         for state in self.committees.values_mut() {
+            drop(state.reply_progress.take());
             for open in state.open.values_mut() {
                 if let Some(timer) = open.timer.take() {
                     timer.abort();
@@ -1446,6 +1450,7 @@ impl Engine {
     fn stall(&mut self, committee: &CommitteeId, stall: &Stall) {
         warn!(%committee, error = %stall, "speaker paused on this committee; retrying shortly");
         if let Some(state) = self.committees.get_mut(committee) {
+            drop(state.reply_progress.take());
             if state.stalled {
                 return;
             }
@@ -1886,7 +1891,13 @@ impl Engine {
             return self.on_crossing(event).await;
         }
         let flow = match event.kind {
-            Kind::Chat => self.on_chat(event).await?,
+            Kind::Chat => {
+                let flow = self.on_chat(event).await?;
+                if matches!(flow, Flow::Done) {
+                    self.finish_reply_progress(event);
+                }
+                flow
+            }
             Kind::Binding => {
                 self.on_binding(event).await?;
                 Flow::Done
@@ -2846,6 +2857,7 @@ impl Engine {
                         locale: l,
                         work: self.does_work(),
                     };
+                    self.start_reply_progress(chat, l);
                     if self.mode == SpeakerMode::Agent {
                         self.start_conversation(chat, utterance);
                         return Ok(Flow::Await);
