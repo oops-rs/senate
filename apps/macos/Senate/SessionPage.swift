@@ -38,7 +38,7 @@ struct SessionPage: View {
                     ),
                     label: L("session.say"),
                     placeholder: L("session.say_placeholder", session.displayName),
-                    footnote: L("session.saying_as", store.state.person ?? "?", session.committee ?? ""),
+                    hint: L("session.saying_as", store.state.person ?? "?", session.committee ?? ""),
                     busy: store.isBusy("say:\(session.sessionId)"),
                     online: store.state.online
                 ) {

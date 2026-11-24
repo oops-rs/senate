@@ -205,7 +205,7 @@ private struct Composer: View {
             ),
             label: L("inbox.reply"),
             placeholder: L("inbox.reply_placeholder"),
-            footnote: L("inbox.replying_as", store.state.person ?? "?", String(row.root)),
+            hint: L("inbox.replying_as", store.state.person ?? "?", String(row.root)),
             busy: store.isBusy(row.key),
             online: store.state.online
         ) {
@@ -220,16 +220,35 @@ struct MessageComposer: View {
     @Binding var text: String
     let label: String
     let placeholder: String
-    /// Under the text: who it is sent as, and where.
-    let footnote: String
+    /// Under the text, only when it says what the reader cannot otherwise
+    /// see (the Secretary's first message starts it); else nil, and what
+    /// it would have said is VoiceOver's hint.
+    var footnote: String?
+    var hint: String?
     let busy: Bool
     let online: Bool
     let send: () -> Void
     @FocusState private var focused: Bool
 
+    /// Whether ⌘↩ (or the button) sends now: something to send, not
+    /// already sending, online, and no input method mid-composition.
+    nonisolated static func canSend(_ text: String, busy: Bool, online: Bool, composing: Bool) -> Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !busy && online && !composing
+    }
+
+    /// An input method is composing in the focused text (zh input): ⌘↩
+    /// is its, not ours.
+    private static var composing: Bool {
+        (NSApp.keyWindow?.firstResponder as? NSTextView)?.hasMarkedText() ?? false
+    }
+
+    private func trySend() {
+        guard Self.canSend(text, busy: busy, online: online, composing: Self.composing) else { return }
+        send()
+    }
+
     var body: some View {
-        let empty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let ready = !(busy || empty || !online)
+        let ready = Self.canSend(text, busy: busy, online: online, composing: false)
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             TextEditor(text: $text)
                 .font(Theme.Fonts.reading)
@@ -238,6 +257,7 @@ struct MessageComposer: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .focused($focused)
                 .accessibilityLabel(label)
+                .accessibilityHint(hint ?? footnote ?? "")
                 .overlay(alignment: .topLeading) {
                     if text.isEmpty {
                         Text(verbatim: placeholder)
@@ -249,20 +269,30 @@ struct MessageComposer: View {
                     }
                 }
             HStack(spacing: Theme.Space.s) {
-                Text(verbatim: footnote)
-                    .font(Theme.Fonts.meta)
-                    .foregroundStyle(Theme.onSurfaceVariant)
-                    .lineLimit(1)
-                    .padding(.leading, 5)
+                if let footnote {
+                    Text(verbatim: footnote)
+                        .font(Theme.Fonts.meta)
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                        .lineLimit(1)
+                        .padding(.leading, 5)
+                }
                 Spacer()
                 if busy { ProgressView().controlSize(.small) }
-                Button(action: send) {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(ready ? Theme.onPrimary : Theme.onSurfaceVariant)
-                        .frame(width: 30, height: 30)
-                        .background(ready ? Theme.primary : Theme.containerHigh, in: Circle())
-                        .contentShape(Circle())
+                Button(action: trySend) {
+                    // The key equivalent beside the icon, dimmer, as system
+                    // buttons show theirs.
+                    HStack(spacing: 5) {
+                        Text(verbatim: "⌘↩")
+                            .font(.system(size: 11, weight: .medium))
+                            .opacity(0.65)
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundStyle(ready ? Theme.onPrimary : Theme.onSurfaceVariant)
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(ready ? Theme.primary : Theme.containerHigh, in: Capsule())
+                    .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.return, modifiers: .command)

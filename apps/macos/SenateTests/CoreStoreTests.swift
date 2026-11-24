@@ -781,3 +781,16 @@ extension CoreStoreTests {
         #expect(store.archived == ["api-test"])
     }
 }
+
+extension CoreStoreTests {
+    /// ⌘↩ sends only something to send, once, online, and never while an
+    /// input method is composing.
+    @Test func theComposerSendsOnlyWhenItShould() {
+        #expect(MessageComposer.canSend("hello", busy: false, online: true, composing: false))
+        #expect(!MessageComposer.canSend("", busy: false, online: true, composing: false))
+        #expect(!MessageComposer.canSend("  \n\t ", busy: false, online: true, composing: false))
+        #expect(!MessageComposer.canSend("hello", busy: true, online: true, composing: false))
+        #expect(!MessageComposer.canSend("hello", busy: false, online: false, composing: false))
+        #expect(!MessageComposer.canSend("你好", busy: false, online: true, composing: true))
+    }
+}
