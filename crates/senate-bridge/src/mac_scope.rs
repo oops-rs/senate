@@ -150,6 +150,7 @@ impl Scope {
         };
         let listener = NonNull::new(listener)
             .ok_or_else(|| anyhow::anyhow!("cannot open the person scope service"))?;
+        tracing::debug!(service = %service(home), "registered macOS scope listener");
         Ok((scope, macos::Listener(listener)))
     }
 
@@ -161,8 +162,13 @@ impl Scope {
         let sender = kernel_process::inspect(u32::try_from(pid).ok()?)
             .ok()?
             .identity;
-        let scope = coalition(pid, Some(token[7])).ok()?;
+        let scope = coalition(pid, Some(token[7]))
+            .map_err(|error| {
+                tracing::debug!(pid, %error, "could not attest caller coalition");
+            })
+            .ok()?;
         if self.hosted.contains(&scope) {
+            tracing::debug!(pid, scope, "refused person proof for hosted coalition");
             return None;
         }
         let mut receipts = self.receipts.lock().ok()?;
@@ -182,6 +188,7 @@ impl Scope {
                 expires: now + TTL,
             },
         );
+        tracing::debug!(pid, scope, "issued one-time person scope proof");
         Some(token)
     }
 
@@ -212,6 +219,7 @@ extern "C" fn handle(
     let scope = unsafe { &*context.cast::<Arc<Scope>>() };
     let bytes = unsafe { std::slice::from_raw_parts(bytes, len) };
     let audit = unsafe { *audit.cast::<[u32; 8]>() };
+    tracing::debug!("received scope proof request");
     let proof = serde_json::from_slice::<Claim>(bytes)
         .ok()
         .and_then(|claim| scope.issue(audit, claim.request));
