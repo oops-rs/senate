@@ -582,6 +582,7 @@ senate session show <session-id>               # read one past conversation
 senate session watch                   # read-only grid of terminals without an interactive viewer
 senate session watch --all             # include attached, paused and stopped sessions
 senate session watch --committee ibot  # only that committee's sessions (repeat for several)
+                                       # in the grid: / finds a session, hjkl move, Enter attaches, ? keys
 senate session approve reviewer        # answer its permission prompt (--always, --deny)
 senate session approve --once          # the one prompt waiting, whoever's it is
 senate session stop reviewer           # end its terminal...
@@ -591,6 +592,15 @@ senate session resume --all            # ...and bring them back where they were
 senate session replace reviewer        # a fresh session takes the seat
 senate senator chair main --committee ibot # make an existing senator the chair
 ```
+
+In `senate session watch`, `/` or Ctrl-P opens a finder over every session
+(`committee::alias · runtime · model · state`, the chair marked): type to
+narrow it fzf-style, Ctrl-N/P or Ctrl-J/K to move, Enter to attach, Tab to show
+its tile, Esc to close. The grid takes vim keys: `hjkl` with a count (`3j`),
+`gg`/`G` (`5G` for the fifth), `H`/`L` or `[`/`]` for pages, `n`/`N` for the
+next match of the last find, `o` or Enter to attach, `?` for the keys. Nothing
+typed in the grid or the finder reaches a session; the same keys work for
+`--machine`.
 
 Session commands accept `<committee>::chair` for that committee's current
 chair, and `chair` for the committee shown by `senate where` in this directory.
