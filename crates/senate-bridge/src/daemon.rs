@@ -737,7 +737,7 @@ pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
 
 pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_bridge(options, host_binary, false, None, false).await
+    start_bridge(options, host_binary, false, None, None, false).await
 }
 
 /// Start the bridge against the loopback Senate listener owned by this
@@ -745,9 +745,10 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
 pub async fn start_in_process(
     options: DaemonOptions,
     observe: Option<Arc<senate_observe::Registry>>,
+    observe_consent: Option<Arc<senate_observe::AppConsentedGrants>>,
 ) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_bridge(options, host_binary, true, observe, false).await
+    start_bridge(options, host_binary, true, observe, observe_consent, false).await
 }
 
 /// Start the bridge with a companion Senate CLI at an explicit path.
@@ -755,7 +756,7 @@ pub async fn start_with_host_binary(
     options: DaemonOptions,
     host_binary: PathBuf,
 ) -> anyhow::Result<DaemonHandle> {
-    start_bridge(options, host_binary, false, None, true).await
+    start_bridge(options, host_binary, false, None, None, true).await
 }
 
 #[cfg(target_os = "macos")]
@@ -778,10 +779,11 @@ async fn start_bridge(
     host_binary: PathBuf,
     in_process: bool,
     observe: Option<Arc<senate_observe::Registry>>,
+    observe_consent: Option<Arc<senate_observe::AppConsentedGrants>>,
     fixture_bootstrap: bool,
 ) -> anyhow::Result<DaemonHandle> {
     #[cfg(not(target_os = "macos"))]
-    let _ = fixture_bootstrap;
+    let _ = (fixture_bootstrap, observe_consent);
     let DaemonOptions {
         paths,
         config,
@@ -895,6 +897,7 @@ async fn start_bridge(
     {
         front.scope = scope.as_ref().map(|(scope, _)| scope.clone());
         front.scope_fixture = fixture;
+        front.set_observe_consent(observe_consent);
     }
     front.observe = observe;
     front.remote = remote.as_ref().map(|(service, _)| service.clone());
@@ -909,6 +912,14 @@ async fn start_bridge(
         tokio::spawn(serve_ipc(front.clone(), listener, rx.clone())),
         tokio::spawn(hosted_approvals::observe(shared, observed, rx.clone())),
     ];
+    #[cfg(target_os = "macos")]
+    if let Some((_, scope_listener)) = scope {
+        let mut shutdown = rx.clone();
+        tasks.push(tokio::spawn(async move {
+            let _ = shutdown.wait_for(|stopping| *stopping).await;
+            drop(scope_listener);
+        }));
+    }
     #[cfg(target_os = "macos")]
     if let Some(listener) =
         crate::app_confirmation::macos::listen(&paths, front.app_confirmations.clone())

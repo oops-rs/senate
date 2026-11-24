@@ -291,18 +291,29 @@ impl Machine {
         let pauser = Pauser::default();
         // A separate grant store belongs to the carrier Senate. A broken
         // observer store must not prevent deliberation on an existing Senate.
-        let observe = plans.first().and_then(|plan| {
-            match senate_observe::Registry::open(&plan.dir, plan.listen) {
-                Ok(registry) => Some(registry),
-                Err(error) => {
-                    tracing::warn!(%error, "the machine observation service is unavailable");
-                    None
+        let (observe, observe_consent) = plans
+            .first()
+            .and_then(|plan| {
+                let result = if cfg!(target_os = "macos") {
+                    senate_observe::Registry::open_for_app_confirmation(&plan.dir, plan.listen)
+                        .map(|(registry, consent)| (Some(registry), Some(Arc::new(consent))))
+                } else {
+                    senate_observe::Registry::open(&plan.dir, plan.listen)
+                        .map(|registry| (Some(registry), None))
+                };
+                match result {
+                    Ok(observe) => Some(observe),
+                    Err(error) => {
+                        tracing::warn!(%error, "the machine observation service is unavailable");
+                        None
+                    }
                 }
-            }
-        });
+            })
+            .unwrap_or_default();
         let side = Arc::new(DeveloperMachine {
             in_process: !plans.is_empty(),
             observe: observe.clone(),
+            observe_consent,
             pauser: pauser.clone(),
             options: DaemonOptions {
                 paths: paths.clone(),
@@ -806,6 +817,7 @@ pub fn nested_notice(agent: &str, dir: &Path, locale: Locale) -> String {
 struct DeveloperMachine {
     in_process: bool,
     observe: Option<Arc<senate_observe::Registry>>,
+    observe_consent: Option<Arc<senate_observe::AppConsentedGrants>>,
     options: DaemonOptions,
     pauser: Pauser,
 }
@@ -819,7 +831,8 @@ impl Component for DeveloperMachine {
     async fn run(&self, ctx: ComponentContext) -> anyhow::Result<()> {
         let options = self.options.clone();
         let handle = if self.in_process {
-            daemon::start_in_process(options, self.observe.clone()).await?
+            daemon::start_in_process(options, self.observe.clone(), self.observe_consent.clone())
+                .await?
         } else {
             daemon::start(options).await?
         };

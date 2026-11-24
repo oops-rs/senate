@@ -170,6 +170,11 @@ pub(super) fn run(args: Observe) -> anyhow::Result<()> {
                 (GrantScope::Lines, Some(Lines::Published)) => Some(LinePolicy::Published),
                 _ => bail!("Choose --lines auto or --lines published with --scope lines"),
             };
+            if policy == Some(LinePolicy::Auto) {
+                eprintln!(
+                    "Automatic previews can disclose eligible first lines containing credentials, paths or commands."
+                );
+            }
             let command = AdminRequest::Create {
                 grant: CreateGrant {
                     name,

@@ -22,6 +22,8 @@ use crate::ipc::{DocketReply, PresidesReply, Presiding, SenateDocket};
 pub(crate) struct Front {
     senates: Vec<Arc<Shared>>,
     pub(super) observe: Option<Arc<senate_observe::Registry>>,
+    #[cfg(target_os = "macos")]
+    observe_consent: Option<Arc<senate_observe::AppConsentedGrants>>,
     pub(super) remote: Option<Arc<crate::remote::Service>>,
     relay: Arc<Relay>,
     #[cfg(target_os = "macos")]
@@ -46,6 +48,8 @@ impl Front {
     ) -> Self {
         Self {
             observe: None,
+            #[cfg(target_os = "macos")]
+            observe_consent: None,
             remote: None,
             senates: vec![senate],
             relay,
@@ -283,6 +287,14 @@ impl Front {
     }
 
     #[cfg(target_os = "macos")]
+    pub(super) fn set_observe_consent(
+        &mut self,
+        issuer: Option<Arc<senate_observe::AppConsentedGrants>>,
+    ) {
+        self.observe_consent = issuer;
+    }
+
+    #[cfg(target_os = "macos")]
     pub(super) async fn dispatch_app_confirmation(
         &self,
         request: crate::app_confirmation::ConfirmedRequest,
@@ -294,8 +306,26 @@ impl Front {
             Request::ObserveAdmin {
                 command: senate_observe::AdminRequest::Create { grant },
             } if grant.scope == senate_observe::Scope::Lines => {
-                self.on_observe_admin(senate_observe::AdminRequest::Create { grant })
-                    .await
+                let Some(issuer) = self.observe_consent.clone() else {
+                    return Reply::err(IpcError::bad_request(
+                        "The app-consented Observe registry is unavailable",
+                    ));
+                };
+                let me = match self.primary().api.me().await {
+                    Ok(me) => me,
+                    Err(error) => return Reply::err(server_error(error)),
+                };
+                let readable = me.committees.into_iter().chain(me.archived).collect();
+                match tokio::task::spawn_blocking(move || {
+                    issuer.create_after_app_consent(grant, readable)
+                })
+                .await
+                {
+                    Ok(result) => {
+                        wrap(result.map_err(|error| IpcError::bad_request(error.to_string())))
+                    }
+                    Err(error) => Reply::err(IpcError::internal(error)),
+                }
             }
             _ => Reply::err(IpcError::bad_request("Unexpected app confirmation request")),
         }

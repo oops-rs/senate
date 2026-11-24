@@ -49,7 +49,7 @@ bridge. Scope coverage for the shared Codex backend remains advisory until
 the dedicated backend lands. Linux and WSL hosting remains advisory. Hook
 process queries and person-name reservation are in place. Persistent role
 reauthorization is pending. The app's signed XPC queue provides consent for
-rebind. Lines issuance awaits the dedicated Observe registry capability.
+rebind and line-bearing grants through a dedicated Observe registry capability.
 
 From an operator terminal in this worktree, with the signed fixture binaries
 built from the same revision, run:
