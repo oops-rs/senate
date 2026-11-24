@@ -47,7 +47,11 @@ impl Unpublished {
             lease.as_os_str().len() <= crate::paths::SOCKET_PATH_LIMIT,
             "hosted Codex socket path is too long"
         );
-        let mut child = Command::new(bridge)
+        #[cfg(target_os = "linux")]
+        let mut launcher = crate::linux_scope::command(bridge, id);
+        #[cfg(not(target_os = "linux"))]
+        let mut launcher = Command::new(bridge);
+        let mut child = launcher
             .arg("session-codex-backend")
             .arg(id.to_string())
             .arg(program)

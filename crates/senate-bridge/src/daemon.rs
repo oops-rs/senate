@@ -873,7 +873,9 @@ async fn start_bridge(
     let common = Common {
         #[cfg(target_os = "macos")]
         owned_codex_backends: scope.is_some(),
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        owned_codex_backends: crate::linux_scope::available(),
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         owned_codex_backends: false,
         #[cfg(target_os = "macos")]
         protected_hosting: scope.is_some() || fixture,
@@ -6627,6 +6629,15 @@ async fn send_ipc_line<T: Serialize>(
     write.write_all(&line).await.is_ok()
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn protected_operator_class(request: &Request) -> bool {
+    #[cfg(target_os = "linux")]
+    if !crate::linux_scope::available() {
+        return false;
+    }
+    approval_guard::operator_only(request)
+}
+
 async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watch::Receiver<bool>) {
     use tokio::io::AsyncWriteExt;
 
@@ -6639,6 +6650,12 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
         .filter(|_| same_owner)
         .and_then(|cred| cred.pid())
         .and_then(|pid| u32::try_from(pid).ok());
+    #[cfg(target_os = "linux")]
+    let linux_peer = if crate::linux_scope::available() {
+        peer.and_then(|pid| crate::linux_scope::Peer::capture(&stream, pid).ok())
+    } else {
+        None
+    };
     let (read, mut write) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(read);
     loop {
@@ -6673,7 +6690,22 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         (line.as_str(), permitted, permitted)
                     }
                 };
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(target_os = "linux")]
+                let (line, person_peer, session_peer) = {
+                    let known = if crate::linux_scope::available() {
+                        linux_peer
+                            .as_ref()
+                            .and_then(crate::linux_scope::Peer::classify)
+                    } else {
+                        peer.map(|pid| (pid, false))
+                    };
+                    (
+                        line.as_str(),
+                        known.filter(|(_, hosted)| !hosted).map(|(pid, _)| pid),
+                        known.map(|(pid, _)| pid),
+                    )
+                };
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                 let (line, person_peer, session_peer) = (line.as_str(), peer, peer);
                 let decoded = serde_json::from_str::<Request>(line);
                 let role_refusal = if fixture {
@@ -6892,20 +6924,16 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         Box::pin(shared.guarded_dispatch(person_peer, guidance, request)).await,
                         false,
                     ),
-                    #[cfg(target_os = "macos")]
-                    Ok(request)
-                        if !shared.scope_fixture && approval_guard::mac_operator_only(&request) =>
-                    {
-                        (
-                            Box::pin(shared.guarded_dispatch(
-                                person_peer,
-                                "Run this command from your own terminal or the Senate app",
-                                request,
-                            ))
-                            .await,
-                            false,
-                        )
-                    }
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
+                    Ok(request) if !shared.scope_fixture && protected_operator_class(&request) => (
+                        Box::pin(shared.guarded_dispatch(
+                            person_peer,
+                            "Run this command from your own terminal or the Senate app",
+                            request,
+                        ))
+                        .await,
+                        false,
+                    ),
                     Ok(request) => (shared.dispatch(request).await, false),
                     Err(e) => (
                         Reply::err(IpcError::bad_request(format!("unreadable request: {e}"))),

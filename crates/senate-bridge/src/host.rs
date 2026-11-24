@@ -31,7 +31,9 @@ use rustix::fs::{FlockOperation, flock};
 use senate_core::EventId;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
+#[cfg(not(target_os = "linux"))]
+use tokio::process::Command;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::broadcast;
 
@@ -465,6 +467,9 @@ pub(crate) fn start(
     before_spawn: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<(Child, File)> {
     let dir = directory(paths, id);
+    #[cfg(target_os = "linux")]
+    let mut command = crate::linux_scope::command(host_binary, id);
+    #[cfg(not(target_os = "linux"))]
     let mut command = Command::new(host_binary);
     command
         .arg("session-host")

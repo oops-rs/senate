@@ -2891,7 +2891,7 @@ pub async fn request_line(socket: &Path, request: &Request) -> Result<Vec<u8>, C
     {
         use crate::mac_scope::ProofKind;
         let kind = if crate::daemon::approval_guard::person_only(request).is_some()
-            || crate::daemon::approval_guard::mac_operator_only(request)
+            || crate::daemon::approval_guard::operator_only(request)
             || matches!(
                 request,
                 Request::RemoteControl { .. }

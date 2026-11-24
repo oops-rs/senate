@@ -1229,6 +1229,15 @@ enum SetupCmd {
         #[command(subcommand)]
         command: ServiceCmd,
     },
+    /// Install the trusted Linux cgroup launcher as an administrator.
+    Guard {
+        /// Unprivileged build artifact. Defaults to senate-host-guard beside the CLI.
+        #[arg(long)]
+        helper: Option<PathBuf>,
+        /// SHA-256 of the trusted helper artifact.
+        #[arg(long)]
+        sha256: String,
+    },
     /// Check this machine, and say how to fix what is wrong.
     ///
     /// Each check prints ok, warn or fail, what it found and, where one
@@ -4816,6 +4825,15 @@ fn run_setup(command: SetupCmd, output: Output) -> anyhow::Result<()> {
             Ok(())
         }
         SetupCmd::Service { command } => run_service(command, output),
+        SetupCmd::Guard { helper, sha256 } => {
+            #[cfg(target_os = "linux")]
+            return crate::linux_scope::install(helper.as_deref(), &sha256);
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (helper, sha256);
+                anyhow::bail!("The cgroup launcher is only used on Linux and WSL");
+            }
+        }
         SetupCmd::Doctor { json } => run_doctor(json),
         SetupCmd::Clean { yes, delete_logs } => {
             let (paths, settings) = settings_here();

@@ -4757,6 +4757,7 @@ async fn repair_a_legacy_hosted_agy_split_preserves_each_seats_authority_and_que
         session::{CommitteeSource, Runtime},
         state::SessionUpsert,
     };
+    #[cfg(all(target_os = "macos", debug_assertions))]
     use senate_core::{Address, Kind, NewEvent};
     let (mut h, old, project) = hosted_agy_for_switch().await;
     let before: ipc::SessionsReply = call(&h, &Request::Sessions).await;

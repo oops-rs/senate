@@ -24,11 +24,12 @@ keeps its own authentication and operation allowlist.
 - **Linux and WSL.** A protected launcher places each host in a cgroup v2 scope
   before runtime execution. An administrator-owned subtree prevents migration.
   Read membership through a stable peer process handle. Where this facility is
-  absent, hosting continues with advisory ancestry checks. Startup, `senate
-  status`, and `senate setup doctor` surface that mode. The proposed `senate
-  setup guard` would install `/usr/local/libexec/senate-host-guard`, protect
-  `/sys/fs/cgroup/senate-hosted/<uid>`, and add a launch-only rule in
-  `/etc/sudoers.d/99-senate-host-guard`. The daemon never installs it.
+  absent, hosting continues with advisory ancestry checks. Startup, status,
+  and doctor surface that mode. `senate setup guard` explicitly installs the
+  root-owned `/usr/local/libexec/senate-host-guard` helper and creates
+  `/sys/fs/cgroup/senate-hosted`. The launcher enters the per-host scope and
+  drops elevated credentials before executing the host. The daemon never
+  installs it.
 
 Lineage covers processes born in the hosted scope. An independent scheduler can
 launch in a separate scope. A native agent can also detach from the user's
@@ -46,7 +47,7 @@ The macOS bridge checks one-time proofs for operator requests. It binds each
 proof to the exact request digest and the Mach sender's process generation.
 Managed launchd hosting persists its daemon coalition before publishing the
 bridge. The scope covers dedicated hosted Codex backends. Existing shared backends
-remain advisory until their hosted sessions are restored to dedicated mode. Linux and WSL hosting remains advisory. Hook
+remain advisory until their hosted sessions are restored to dedicated mode. Linux and WSL hosting is advisory until the administrator provisions it. Hook
 process queries and person-name reservation are in place. Native role bindings persist by boot and process generation. The app's signed XPC queue provides consent for
 rebind and line-bearing grants through a dedicated Observe registry capability.
 
@@ -60,6 +61,13 @@ python3 deploy/check-person-terminal.py target/person-guard-scope-fixture
 Expect `PASS: person terminal accepted; isolated grant list is empty`.
 The check uses a fresh home and loopback port, and unloads the disposable
 launchd job on exit.
+
+Build the launcher as a normal user with
+`sh deploy/build-host-guard.sh target/host-guard`. An administrator explicitly
+installs the trusted artifact with `sudo senate setup guard --helper <path>
+--sha256 <trusted-digest>`. The kernel must provide cgroup v2 and stable
+Unix peer PID handles. Restart the unprivileged daemon to pick up the
+provisioning.
 
 ## Codex backend
 

@@ -47,12 +47,18 @@ pub(super) const APP_CONFIRMATION: &str = "This operation requires confirmation 
 const RUNTIMES: [&str; 3] = ["claude", "codex", "agy"];
 
 pub(super) fn advisory_notice(locale: Locale) -> Option<&'static str> {
-    cfg!(target_os = "linux").then(|| {
-        locale.pick(
-            "此机器的人员专用守卫仅为提示。托管代理脱离进程树后可能通过检查。",
-            "The person-only guard is advisory on this machine. A hosted agent that detaches can pass the check.",
-        )
-    })
+    #[cfg(target_os = "linux")]
+    {
+        (!crate::linux_scope::available()).then(|| locale.pick(
+            "此机器的人员专用守卫仅为提示。托管代理脱离进程树后可能通过检查。运行 senate setup guard 进行设置。",
+            "The person-only guard is advisory on this machine. A hosted agent that detaches can pass. Run senate setup guard to enforce it.",
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = locale;
+        None
+    }
 }
 
 /// The requests that answer a permission prompt.
@@ -115,9 +121,9 @@ pub(crate) fn person_only(request: &Request) -> Option<&'static str> {
 }
 
 /// Operations documented as operator-only which previously relied on their CLI
-/// entry point. Enforce these at the macOS scope boundary as well.
-#[cfg(target_os = "macos")]
-pub(crate) fn mac_operator_only(request: &Request) -> bool {
+/// entry point. Enforce these at a protected scope boundary as well.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn operator_only(request: &Request) -> bool {
     match request {
         Request::Replace { .. }
         | Request::Pause { .. }
