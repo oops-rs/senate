@@ -211,12 +211,19 @@ struct DeskEntryDetail: View {
     var body: some View {
         ReadingColumn {
             if let detail {
+                // What it is and how it stands, when there is something to say.
+                let said = detail.origin != nil || outcome != nil || actionError != nil || busy
+                    || (detail.actions.contains(.forward) && detail.destination != nil)
+                    || (detail.actions.isEmpty && (detail.waitsOn ?? detail.blocked) != nil)
+                if said {
                 VStack(alignment: .leading, spacing: Theme.Space.m) {
                     if let origin = detail.origin {
                         Text(verbatim: L("desk.origin", origin)).font(Theme.Fonts.meta)
                             .foregroundStyle(Theme.onSurfaceVariant)
                     }
-                    if outcome == nil, let destination = detail.destination, let label = detail.destinationLabel {
+                    // Where it would go: only when it can be forwarded there.
+                    if outcome == nil, detail.actions.contains(.forward),
+                       let destination = detail.destination, let label = detail.destinationLabel {
                         Text(verbatim: L("desk.destination", label)).font(Theme.Fonts.text)
                             .foregroundStyle(Theme.onSurface)
                             .help(destination)
@@ -226,6 +233,7 @@ struct DeskEntryDetail: View {
                 }
                 .card()
                 .environment(\.mentionCommittee, item.committee)
+                }
                 ForEach(detail.thread.events, id: \.seq) { event in
                     VStack(alignment: .leading, spacing: Theme.Space.s) {
                         HStack {

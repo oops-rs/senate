@@ -149,6 +149,12 @@ enum Snapshot {
                     store.place = .desk(blocked)
                     await shot("desk-read-only")
                 }
+                // A question to the Speaker: answered here, as the Speaker.
+                if let question = store.docketEntries.first(where: { $0.seq == 63 }) {
+                    store.place = .desk(question)
+                    try? await Task.sleep(for: .seconds(1))
+                    await shot("desk-answer")
+                }
                 store.back()
             }
             if let busiest = store.roster.max(by: { $0.activeMembers < $1.activeMembers }) {
