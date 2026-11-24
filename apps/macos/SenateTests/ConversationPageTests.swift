@@ -3,6 +3,7 @@ import Foundation
 import Testing
 import WebKit
 @testable import Senate
+import SenateCore
 
 /// The conversation page in a real web view: what it renders, what it
 /// lets out, what the page's own world can reach.
@@ -177,5 +178,40 @@ extension ConversationPageTests {
         let selected = await page.evaluate("return window.getSelection().toString()") as? String ?? ""
         #expect(selected.contains("Paragraph 40 of a long reply"))
         #expect(selected.contains("Another needle"))
+    }
+}
+
+extension ConversationPageTests {
+    /// Commands back to back are one closed row; find and select-all still
+    /// reach what is inside, and find opens the group at a match.
+    @Test func aGroupOfCommandsIsClosedButFoundAndCopied() async throws {
+        let page = ConversationPage(store: nil)
+        for _ in 0..<500 where !page.isReady { try await Task.sleep(for: .milliseconds(20)) }
+        let call = { (seq: UInt64, title: String, status: String) in
+            TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
+                callId: "c\(seq)", name: "Bash", kind: "shell", status: status, statusLabel: status,
+                title: title, cwd: nil, output: "output of \(title)", exitCode: status == "failed" ? 1 : 0, diff: nil)))
+        }
+        let rows = ConversationRows.rows([
+            call(1, "cargo build", "completed"), call(2, "cargo test needle", "failed"), call(3, "git status", "running"),
+        ])
+        ConversationPage.fixtureRows["group"] = rows
+        page.show(.fixtureRows("group"))
+        for _ in 0..<100 {
+            if await page.evaluate("return document.querySelectorAll('.k-group').length") as? Int == 1 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let head = await page.evaluate("return document.querySelector('.group-head').textContent") as? String ?? ""
+        #expect(head.contains("3"), "the count: \(head)")
+        #expect(head.contains("git status"), "the running one: \(head)")
+        #expect(head.contains("✕ 1"), "a failure: \(head)")
+        let closed = await page.evaluate("return document.querySelector('.group-members').hidden") as? Bool
+        #expect(closed == true)
+        _ = await page.evaluate("await window.senate.find('needle', true, false); return true")
+        let opened = await page.evaluate("return document.querySelector('.group-members').hidden") as? Bool
+        #expect(opened == false, "find opened the group at its match")
+        _ = await page.evaluate("await window.senate.find(null, true, false); return true")
+        let text = await page.evaluate("return window.senate.plainText()") as? String ?? ""
+        #expect(text.contains("cargo build") && text.contains("git status"))
     }
 }

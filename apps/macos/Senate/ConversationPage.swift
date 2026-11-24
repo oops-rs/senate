@@ -10,6 +10,8 @@ enum ConversationSource: Hashable {
     #if DEBUG
     /// Tests: these messages, as an agent's replies.
     case fixture([String])
+    /// Tests: the rows set under this name (`fixtureRows`), as a session's.
+    case fixtureRows(String)
     #endif
 }
 
@@ -77,6 +79,11 @@ final class ConversationPage: NSObject {
     /// Message keys by source, the latest few sources kept in the core.
     private var keysBySource: [ConversationSource: Set<String>] = [:]
     private var recentSources: [ConversationSource] = []
+
+    #if DEBUG
+    /// Tests: rows to show under a name (`ConversationSource.fixtureRows`).
+    static var fixtureRows: [String: [ConversationRow]] = [:]
+    #endif
 
     /// The find bar's state, which its view reads.
     let find = PageFind()
@@ -167,7 +174,7 @@ final class ConversationPage: NSObject {
             case .thread:
                 _ = (store.thread, store.threadError)
             #if DEBUG
-            case .fixture:
+            case .fixture, .fixtureRows:
                 break
             #endif
             }
@@ -201,6 +208,10 @@ final class ConversationPage: NSObject {
             return (events.map { event in Row(id: event.seq, value: event) { [unowned self] in encode(event, committee: committee, root: root) } },
                     ["hasOlder": view.events.count > shownEvents, "loadingOlder": false, "working": false])
         #if DEBUG
+        case let .fixtureRows(name):
+            let rows = Self.fixtureRows[name] ?? []
+            return (rows.map { row in Row(id: row.id, value: row) { [unowned self] in encode(row, session: "fixture", committee: nil) } },
+                    ["hasOlder": false, "loadingOlder": false, "working": false])
         case let .fixture(texts):
             return (texts.enumerated().map { i, text in
                 Row(id: UInt64(i + 1), value: text) { [unowned self] in
@@ -264,6 +275,9 @@ final class ConversationPage: NSObject {
         case let .assistant(text):
             out["kind"] = "assistant"
             out["md"] = markdown("s/\(session)/\(row.id)", names(text))
+        case let .tools(members):
+            out["kind"] = "group"
+            out["members"] = members.map { encode($0, session: session, committee: committee) }
         case let .tool(call):
             out["kind"] = "tool"
             var tool: [String: Any] = ["callId": call.callId, "name": call.name, "kind": call.kind,
@@ -319,7 +333,7 @@ final class ConversationPage: NSObject {
             prefix = "t/\(committee)/\(root)/"
             ids = (store?.thread?.events ?? []).suffix(3).map(\.seq)
         #if DEBUG
-        case .fixture:
+        case .fixture, .fixtureRows:
             return []
         #endif
         }
@@ -415,7 +429,7 @@ final class ConversationPage: NSObject {
         vars["content-font"] = Theme.contentFont
         call("window.senate.theme(vars)", ["vars": vars])
         call("window.senate.labels(l)", ["l": [
-            "thinking": L("session.reasoning"), "copy": L("message.copy_code"),
+            "thinking": L("session.reasoning"), "copy": L("message.copy_code"), "commands": L("session.commands"),
             "earlier": L("session.earlier"), "working": L("status.working"),
         ]])
         if ProcessInfo.processInfo.environment["SENATE_APP_MD_DEBUG"] == "1" { call("window.senate.debug(true)", [:]) }
@@ -546,6 +560,12 @@ final class ConversationPage: NSObject {
             MainActor.assumeIsolated { if let id { self?.call("window.senate.openCall(id)", ["id": id]) } }
         })
         #if DEBUG
+        observers.append(center.addObserver(forName: Snapshot.scrollToTop, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.call("window.senate.scrollToTop()", [:]) }
+        })
+        observers.append(center.addObserver(forName: Snapshot.expandTools, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.call("window.senate.expandAll()", [:]) }
+        })
         observers.append(center.addObserver(forName: Snapshot.scrollToItem, object: nil, queue: .main) { [weak self] note in
             let id = note.object as? UInt64
             let at = (note.userInfo?["anchor"] as? String) ?? "top"
