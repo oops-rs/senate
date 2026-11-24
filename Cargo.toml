@@ -13,6 +13,7 @@ repository = "https://github.com/oops-rs/senate"
 # `workspace = true`.
 [workspace.dependencies]
 # Members, bottom of the stack first.
+senate-observe = { path = "crates/senate-observe", version = "0.12.3" }
 senate-observe-protocol = { path = "crates/senate-observe-protocol", version = "0.12.3" }
 senate-core = { path = "crates/senate-core", version = "0.12.3" }
 senate-markdown = { path = "crates/senate-markdown", version = "0.12.3" }

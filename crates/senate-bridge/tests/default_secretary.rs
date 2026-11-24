@@ -429,6 +429,7 @@ async fn an_agent_cannot_start_the_default_secretary() {
             "#!/bin/sh\n{RECORD_HOSTED_ARGV}\n\
              while [ ! -e .go ]; do sleep 0.05; done\n\
              {BIN:?} secretary ask 'open a committee' > .guard.tmp 2>&1; echo \"exit $?\" >> .guard.tmp; mv .guard.tmp .guard\n\
+             {BIN:?} observe token list > .observe.tmp 2>&1; echo \"exit $?\" >> .observe.tmp; mv .observe.tmp .observe\n\
              while IFS= read -r line; do :; done\n"
         ),
     )
@@ -460,6 +461,16 @@ async fn an_agent_cannot_start_the_default_secretary() {
         out.contains("inside the process tree of")
             && out.contains("Only the person starts the default secretary"),
         "{out}"
+    );
+    let observe = common::eventually("the hosted observe command came back", TIMEOUT, || {
+        std::fs::read_to_string(project.join(".observe")).ok()
+    })
+    .await;
+    assert!(
+        observe.contains("exit 1")
+            && observe.contains("inside the process tree of")
+            && observe.contains("Manage Observe grants"),
+        "{observe}"
     );
     let state: DefaultSecretary = call(&h, &Request::DefaultSecretary).await;
     assert_eq!(state.state, DefaultSecretaryState::NotRecorded);

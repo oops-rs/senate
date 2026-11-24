@@ -73,6 +73,7 @@ impl Server {
             triaged: false,
             built_in: None,
             simulator: None,
+            observe: None,
         }
     }
 }
@@ -94,9 +95,16 @@ pub struct ServerBuilder {
     triaged: bool,
     built_in: Option<SenatorName>,
     simulator: Option<Arc<dyn ChatSimulator>>,
+    observe: Option<Arc<senate_observe::Registry>>,
 }
 
 impl ServerBuilder {
+    /// Mount the machine-owned observer on its embedded loopback listener.
+    pub fn observe(mut self, registry: Arc<senate_observe::Registry>) -> Self {
+        self.observe = Some(registry);
+        self
+    }
+
     /// Serve simulated chat (`senate chat send`, [`senate_core::chat_sim`])
     /// through `simulator`, the mounted chat gateway. Without one, those
     /// requests are answered that this Senate has no chat platform.
@@ -168,6 +176,7 @@ impl ServerBuilder {
             triaged,
             built_in,
             simulator,
+            observe,
         } = self;
         config.validate_intervals()?;
         let auth: Arc<dyn Authenticate> = match auth {
@@ -295,7 +304,7 @@ impl ServerBuilder {
             source,
         })?;
 
-        let app = http::router(AppState {
+        let mut app = http::router(AppState {
             hub: hub.clone(),
             auth,
             epoch: epoch_header,
@@ -303,6 +312,11 @@ impl ServerBuilder {
             triaged,
             simulator,
         });
+        let observe = observe.filter(|registry| embedded && registry.address() == local_addr);
+        let observe_enabled = observe.is_some();
+        if let Some(registry) = observe {
+            app = app.merge(senate_observe::router(registry));
+        }
         let (stop_http, stopped) = oneshot::channel::<()>();
         let http_task = tokio::spawn(async move {
             let shutdown = async move {
@@ -312,7 +326,7 @@ impl ServerBuilder {
                 }
             };
             if embedded && local_addr.ip().is_loopback() {
-                serve_embedded_http(listener, app, shutdown).await;
+                serve_embedded_http(listener, app, observe_enabled, shutdown).await;
                 Ok(())
             } else {
                 axum::serve(listener, app)
@@ -379,25 +393,35 @@ async fn load_registry(
 async fn serve_embedded_http(
     mut listener: TcpListener,
     app: axum::Router,
+    observe_enabled: bool,
     shutdown: impl Future<Output = ()>,
 ) {
-    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
     use hyper_util::server::{conn::auto, graceful::GracefulShutdown};
     use hyper_util::service::TowerToHyperService;
 
     let mut builder = auto::Builder::new(TokioExecutor::new());
     builder.http2().max_concurrent_streams(8192);
+    if observe_enabled {
+        builder
+            .http1()
+            .timer(TokioTimer::new())
+            .header_read_timeout(Duration::from_secs(5));
+    }
     let builder = Arc::new(builder);
     let graceful = GracefulShutdown::new();
     tokio::pin!(shutdown);
     loop {
-        let stream = tokio::select! {
+        let (stream, address) = tokio::select! {
             // Axum's listener retries accept errors, including EMFILE/ENFILE.
-            (stream, _) = axum::serve::Listener::accept(&mut listener) => stream,
+            accepted = axum::serve::Listener::accept(&mut listener) => accepted,
             _ = &mut shutdown => break,
         };
         let builder = builder.clone();
-        let service = TowerToHyperService::new(app.clone());
+        let service = TowerToHyperService::new(
+            app.clone()
+                .layer(axum::Extension(axum::extract::ConnectInfo(address))),
+        );
         let watcher = graceful.watcher();
         tokio::spawn(async move {
             let connection = builder.serve_connection(TokioIo::new(stream), service);

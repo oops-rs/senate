@@ -21,6 +21,7 @@ use crate::ipc::{DocketReply, PresidesReply, Presiding, SenateDocket};
 
 pub(crate) struct Front {
     senates: Vec<Arc<Shared>>,
+    pub(super) observe: Option<Arc<senate_observe::Registry>>,
     pub(super) remote: Option<Arc<crate::remote::Service>>,
     relay: Arc<Relay>,
     pub(super) process_checks: tokio::sync::Semaphore,
@@ -38,6 +39,7 @@ impl Front {
         app_clients: Arc<std::sync::atomic::AtomicUsize>,
     ) -> Self {
         Self {
+            observe: None,
             remote: None,
             senates: vec![senate],
             relay,
@@ -96,6 +98,7 @@ impl Front {
 
     pub(crate) async fn dispatch(self: &Arc<Self>, request: Request) -> Reply {
         match request {
+            Request::ObserveAdmin { command } => self.on_observe_admin(command).await,
             Request::RemoteControl { .. } => Reply::err(IpcError::bad_request(
                 "remote control requires the local person socket",
             )),
@@ -253,6 +256,42 @@ impl Front {
 
     /// Register the session, and tell a presiding session what it presides
     /// over.
+    async fn on_observe_admin(&self, command: senate_observe::AdminRequest) -> Reply {
+        use senate_observe::AdminRequest;
+
+        let Some(registry) = self.observe.clone() else {
+            return Reply::err(IpcError::bad_request(
+                "Observe requires a machine-hosted Senate",
+            ));
+        };
+        let readable = if matches!(&command, AdminRequest::Create { .. }) {
+            match self.primary().api.me().await {
+                Ok(me) => me.committees.into_iter().chain(me.archived).collect(),
+                Err(error) => return Reply::err(server_error(error)),
+            }
+        } else {
+            BTreeSet::new()
+        };
+        match tokio::task::spawn_blocking(move || match command {
+            AdminRequest::Create { grant } => wrap(
+                registry
+                    .create(grant, readable)
+                    .map_err(|error| IpcError::bad_request(error.to_string())),
+            ),
+            AdminRequest::List => Reply::ok(&registry.list()),
+            AdminRequest::Revoke { id } => wrap(
+                registry
+                    .revoke(&id)
+                    .map_err(|error| IpcError::bad_request(error.to_string())),
+            ),
+        })
+        .await
+        {
+            Ok(reply) => reply,
+            Err(error) => Reply::err(IpcError::internal(error)),
+        }
+    }
+
     async fn on_hook(&self, report: HookReport, native: bool) -> Result<HookReply, IpcError> {
         let codex = report.runtime == Runtime::Codex;
         let target = self.primary().clone();

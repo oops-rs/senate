@@ -2667,6 +2667,7 @@ dependencies = [
  "security-framework",
  "senate-core",
  "senate-markdown",
+ "senate-observe",
  "senate-remote-admin",
  "serde",
  "serde_json",
@@ -2752,6 +2753,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "senate-observe"
+version = "0.12.3"
+dependencies = [
+ "axum",
+ "chrono",
+ "getrandom 0.4.3",
+ "hex",
+ "senate-core",
+ "senate-observe-protocol",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "url",
+]
+
+[[package]]
 name = "senate-observe-protocol"
 version = "0.12.3"
 dependencies = [
@@ -2793,6 +2815,7 @@ dependencies = [
  "reqwest",
  "senate-core",
  "senate-log",
+ "senate-observe",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2852,10 +2875,12 @@ dependencies = [
  "clap",
  "futures",
  "ractor",
+ "reqwest",
  "rusqlite",
  "senate-bridge",
  "senate-core",
  "senate-log",
+ "senate-observe",
  "senate-server",
  "senate-speaker",
  "senate-work",
