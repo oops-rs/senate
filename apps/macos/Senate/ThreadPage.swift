@@ -48,39 +48,22 @@ struct ThreadPage: View {
     /// with the thread as a whole.
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         let busy = store.isBusy(row.key)
-        // The thread's title, where it is, at the toolbar's leading edge.
+        // Everything the thread is, once, at the toolbar's leading edge:
+        // its title; where it is, who it is from and what kind; its state
+        // and how long it has been so. The title gives way first.
         ToolbarItem(placement: .navigation) {
-            VStack(alignment: .leading, spacing: 0) {
-                MentionText(row.title)
-                    .font(.headline)
-                    .lineLimit(1)
-                Text(verbatim: "#\(row.root) · \(row.committee)")
-                    .font(.caption)
-                    .foregroundStyle(Theme.onSurfaceVariant)
-            }
-            .padding(.horizontal, Theme.Space.xs)
-            .accessibilityElement(children: .combine)
-            .accessibilityAddTraits(.isHeader)
+            ThreadTitle(row: row, busy: busy)
         }
         // A title, on the window's ground: no glass behind it.
         .sharedBackgroundVisibility(.hidden)
         ToolbarSpacer(.flexible)
-        ToolbarItem(placement: .primaryAction) {
-            HStack(spacing: 6) {
-                if busy { ProgressView().controlSize(.small) }
-                Text(verbatim: row.triage == "needs_human" ? (row.triageLabel ?? row.stateLabel) : row.stateLabel)
-                    .font(Theme.Fonts.label)
-                    .foregroundStyle(Theme.onSurface)
-            }
-            .padding(.horizontal, Theme.Space.s)
-        }
         ToolbarItemGroup(placement: .primaryAction) {
             Button { Task { await store.take(row) } } label: {
                 Label(L("inbox.take"), systemImage: "hand.raised")
             }
                 // The page's one decisive action: tinted.
                 .buttonStyle(.borderedProminent)
-                .help(L("inbox.take"))
+                .help(L("inbox.take_help"))
                 .disabled(row.takeover != nil || busy || !store.state.online)
             Menu {
                 Button(role: .destructive) { confirmClose = true } label: {
@@ -120,11 +103,6 @@ private struct Conversation: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ThreadHeader(row: row)
-                .frame(maxWidth: Theme.readingWidth, alignment: .leading)
-                .padding(.horizontal, Theme.Space.xl)
-                .padding(.bottom, Theme.Space.s)
-                .frame(maxWidth: .infinity)
             if store.threadView(for: row) != nil {
                 ConversationPane(store: store, source: .thread(committee: row.committee, root: row.root))
             } else if let error = store.threadError {
@@ -151,45 +129,65 @@ private struct Conversation: View {
     }
 }
 
-/// The thread's title, where it is and why it waits on you.
-private struct ThreadHeader: View {
+/// The thread in the toolbar: its title, then "#root · committee · from
+/// X · kind" (and who took it over), then its state with its age, or what
+/// a person is needed for; why, in the state's tooltip.
+private struct ThreadTitle: View {
     let row: InboxThread
+    let busy: Bool
 
     var body: some View {
         let t = row
-        // Its title is in the window's toolbar; here, where it is and why.
-        VStack(alignment: .leading, spacing: Theme.Space.s) {
-            VStack(alignment: .leading, spacing: 2) {
-                TimedMention(date: t.since) { ago in
-                    var line = L("inbox.meta", String(t.root), from(t), t.stateLabel, ago)
-                    if let owner = t.owner { line += L("inbox.owner", owner) }
-                    if let takeover = t.takeover { line += L("inbox.taken_by", takeover) }
-                    if let escalated = t.escalatedTo { line += L("inbox.escalated_to", escalated) }
-                    return line
+        HStack(alignment: .center, spacing: Theme.Space.s) {
+            VStack(alignment: .leading, spacing: 0) {
+                MentionText(t.title)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                HStack(spacing: 4) {
+                    Text(verbatim: "#\(t.root) · \(t.committee) · " + L("thread.from"))
+                    MentionText(t.onBehalfOf.map { L("inbox.from_for", t.from, $0) } ?? t.from)
+                    Text(verbatim: "· \(t.kindLabel)")
+                    if let takeover = t.takeover {
+                        Text(verbatim: "· " + L("thread.taken_by", takeover))
+                    }
                 }
-                if let why = why(t) {
-                    MentionText(why)
-                }
+                .font(.caption)
+                .foregroundStyle(Theme.onSurfaceVariant)
+                .lineLimit(1)
             }
-            .font(Theme.Fonts.row)
-            .foregroundStyle(Theme.onSurfaceVariant)
-            HStack(spacing: Theme.Space.xs) {
-                Chip(text: t.committee)
-                Chip(text: t.kindLabel)
-                if t.escalated { Chip(text: L("inbox.escalated"), tone: .attention) }
-                if t.takeover != nil { Chip(text: L("inbox.taken"), tone: .accent) }
+            .layoutPriority(0)
+            // The state is never cut: the title is.
+            HStack(spacing: 4) {
+                if busy { ProgressView().controlSize(.mini) }
+                Text(verbatim: state(t))
+                    .font(Theme.Fonts.label)
+                    .foregroundStyle(t.triage == "needs_human" || t.escalated ? Theme.attention : Theme.onSurface)
+                Text(verbatim: "·").foregroundStyle(Theme.onSurfaceVariant)
+                Ago(date: t.since)
+                    .font(Theme.Fonts.label)
+                    .foregroundStyle(Theme.onSurfaceVariant)
             }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Theme.containerHigh, in: Capsule())
+            .fixedSize()
+            .layoutPriority(1)
+            .help(why(t) ?? "")
         }
-        .padding(.top, Theme.Space.l)
+        .padding(.horizontal, Theme.Space.xs)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
     }
 
-    private func from(_ t: InboxThread) -> String {
-        if let behalf = t.onBehalfOf { return L("inbox.from_for", t.from, behalf) }
-        return t.from
+    private func state(_ t: InboxThread) -> String {
+        t.triage == "needs_human" ? (t.triageLabel ?? t.stateLabel) : t.stateLabel
     }
 
     private func why(_ t: InboxThread) -> String? {
-        let parts = [t.triageLabel.map { L("inbox.triage", $0) }, t.reason].compactMap { $0 }
+        var parts = [t.reason].compactMap { $0 }
+        if let escalated = t.escalatedTo { parts.append(L("thread.escalated_to", escalated)) }
+        if let owner = t.owner { parts.append(L("thread.owner", owner)) }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }

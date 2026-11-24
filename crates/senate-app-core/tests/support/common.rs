@@ -1070,6 +1070,17 @@ pub fn thread_events(t: &ThreadSummary) -> Vec<Event> {
             format!("Waiting on a person: {reason}."),
         ));
     }
+    // Thread 1565's shape: the agent's statuses, one a repeat (left out).
+    let status = |seq: u64, title: Option<&str>| {
+        let mut payload = senate_core::StatusPayload::new(senate_core::StatusState::Processing);
+        payload.title = title.map(str::to_string);
+        let mut e = event(seq, Kind::Status, Address::senator(&agent), String::new());
+        e.meta.insert(senate_core::StatusPayload::META_KEY.into(), payload.value());
+        e
+    };
+    events.push(status(t.root.0 + 2, Some("Wait for startup seat reports")));
+    events.push(status(t.root.0 + 3, None));
+    events.push(status(t.root.0 + 4, Some("Cover the uplink reconnect cycle")));
     events
 }
 
