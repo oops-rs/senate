@@ -865,6 +865,44 @@ mod tests {
         }
     }
 
+    /// A child Senate whose Speaker is the person, seated in the Senate
+    /// above: the office names them, while `/v1/me`'s seat names the agent
+    /// working this Senate's desk. The person is shown, as themselves.
+    #[test]
+    fn the_speaker_is_the_offices_not_the_desks_worker() {
+        use crate::state::{speaker_is_person, speaker_mention};
+        let mut s = status(&[]);
+        s.speaker = Some(SpeakerSeat::Senator(path("claude-bd42dec6")));
+        s.roles = Some(senate_bridge::ipc::RolesReply {
+            office: Some(senate_core::Office {
+                speaker: senate_core::SenatorId::of("/senate".parse().unwrap(), path("alice")),
+                kind: senate_core::SenatorKind::Person,
+                desk: vec![path("claude-bd42dec6")],
+                built_in: None,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(speaker_mention(&s).as_deref(), Some("[senator::alice]"));
+        assert!(speaker_is_person(&s));
+        // An agent Speaker of this Senate: itself, not the person.
+        s.roles = Some(senate_bridge::ipc::RolesReply {
+            office: Some(senate_core::Office {
+                speaker: senate_core::SenatorId::here(path("claude")),
+                kind: senate_core::SenatorKind::Agent,
+                desk: Vec::new(),
+                built_in: None,
+            }),
+            ..Default::default()
+        });
+        assert_eq!(speaker_mention(&s).as_deref(), Some("[senator::claude]"));
+        assert!(!speaker_is_person(&s));
+        // An older daemon with no office: the seat.
+        s.roles = None;
+        s.speaker = Some(SpeakerSeat::Senator(path("alice")));
+        assert_eq!(speaker_mention(&s).as_deref(), Some("[senator::alice]"));
+        assert!(speaker_is_person(&s));
+    }
+
     fn thread(root: u64, agent: &str) -> ThreadSummary {
         ThreadSummary {
             root: Seq(root),

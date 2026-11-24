@@ -275,7 +275,7 @@ func docket(_ entries: [DocketEntry]) -> [DocketSenate] {
 func senate(roster: [RosterCommittee], chairs: [ChairLine] = []) -> SenateInfo {
     SenateInfo(
         key: "alice-desk", title: "alice-desk", senate: "alice-desk", primary: true,
-        serverUrl: "http://127.0.0.1:7001", me: "[senator::alice]", speaker: nil, presidingAgent: nil,
+        serverUrl: "http://127.0.0.1:7001", me: "[senator::alice]", speaker: nil, speakerIsYou: false, presidingAgent: nil,
         committees: [], roster: roster, chairs: chairs, children: [], uplink: nil)
 }
 
