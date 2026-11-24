@@ -276,6 +276,8 @@ pub struct Inner {
     pub speaker: Option<senate_core::SpeakerSeat>,
     /// The chair and its connection, for tests that exercise role routing.
     pub chair: Option<(SenatorName, bool)>,
+    /// The archived committees (`PUT …/archive`), as `/v1/me` lists them.
+    pub archived: Vec<CommitteeId>,
     /// `/v1/secretaries`: principal → its secretaries, in order.
     pub secretaries: senate_core::api::Secretaries,
     /// Refuse this many `PUT /v1/secretaries/…` with a 503 first.
@@ -602,6 +604,45 @@ async fn set_chair(
     .into_response()
 }
 
+/// `PUT /v1/committees/{committee}/archive`, like the server: the Speaker
+/// in person only.
+async fn archive(
+    State(st): St,
+    UrlPath(committee): UrlPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<senate_core::api::SetCommitteeArchive>,
+) -> Response {
+    let person = match auth(&st, &headers) {
+        Ok(person) => person,
+        Err(error) => return error,
+    };
+    let mut inner = st.inner.lock().unwrap();
+    let speaker = inner.roster.office().is_some_and(|office| {
+        office.kind == senate_core::SenatorKind::Person
+            && office.speaker.name().name().as_str() == person
+    });
+    if !speaker {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "only the Speaker in person archives or unarchives a committee",
+        );
+    }
+    let committee = CommitteeId::new(committee).unwrap();
+    let was = inner.archived.contains(&committee);
+    if request.archived && !was {
+        inner.archived.push(committee.clone());
+    } else if !request.archived && was {
+        inner.archived.retain(|c| c != &committee);
+    }
+    Json(senate_core::api::CommitteeArchiveInfo {
+        committee,
+        archived: request.archived,
+        seq: (request.archived != was).then_some(Seq(1)),
+    })
+    .into_response()
+}
+
 async fn me(State(st): St, headers: HeaderMap) -> Response {
     match auth(&st, &headers) {
         Ok(h) => {
@@ -631,8 +672,10 @@ async fn me(State(st): St, headers: HeaderMap) -> Response {
                             committees.push(id);
                         }
                     }
+                    committees.retain(|c| !inner.archived.contains(c));
                     committees
                 },
+                archived: inner.archived.clone(),
                 epoch: inner.epoch.clone(),
                 triaged: inner.triaged,
                 version: None,
@@ -1436,6 +1479,7 @@ impl FakeServer {
                 brief_broken: false,
                 secretaries: Default::default(),
                 refuse_secretaries: 0,
+                archived: Vec::new(),
                 brief_gate: None,
                 resolves: Vec::new(),
             }),
@@ -1487,6 +1531,10 @@ impl FakeServer {
             .route(
                 "/v1/secretary-teams/{principal}/session",
                 axum::routing::put(secretary_session),
+            )
+            .route(
+                "/v1/committees/{committee}/archive",
+                axum::routing::put(archive),
             )
             .route(
                 "/v1/committees/{committee}/chair",

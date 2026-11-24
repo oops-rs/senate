@@ -707,3 +707,41 @@ async fn history_pages_filters_searches_forgets_and_restores() {
     assert!(!later.rows.iter().any(|r| r.session_id == back.session_id));
     drop(daemon);
 }
+
+#[tokio::test]
+async fn archived_committees_are_listed_and_unarchived_through_the_facade() {
+    let (dir, socket, world) = setup();
+    world
+        .lock()
+        .unwrap()
+        .archived
+        .push(senate_core::CommitteeId::new("api-test").unwrap());
+    let daemon = FakeDaemon::start(&socket, Arc::clone(&world));
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en".into())).unwrap();
+    let listener = Arc::new(Listener::default());
+    core.start(listener.clone()).unwrap();
+
+    assert_eq!(core.archived_committees().await.unwrap(), ["api-test"]);
+    core.unarchive_committee("api-test".into()).await.unwrap();
+    assert!(core.archived_committees().await.unwrap().is_empty());
+    let requests = daemon.requests();
+    assert!(requests.iter().any(|r| matches!(
+        r,
+        Request::ArchiveCommittee { committee, archived: false, .. } if committee.as_str() == "api-test"
+    )));
+    // The roster is read again after.
+    let unarchived_at = requests
+        .iter()
+        .position(|r| matches!(r, Request::ArchiveCommittee { .. }))
+        .unwrap();
+    assert!(
+        requests[unarchived_at..]
+            .iter()
+            .any(|r| matches!(r, Request::Roster)),
+        "{requests:?}"
+    );
+    assert!(matches!(
+        core.unarchive_committee("Not A Name".into()).await,
+        Err(senate_app_core::ffi::CoreError::Invalid { .. })
+    ));
+}

@@ -1195,3 +1195,113 @@ async fn a_seat_whose_session_ended_is_away_at_once_and_its_mail_goes_to_the_des
     desk.stop().await;
     world.stop().await;
 }
+
+/// A committee archived below: its seats are no longer declared above, and
+/// a new thread relayed to it is answered in the asker's thread above,
+/// saying it is archived, rather than delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_archived_committee_below_leaves_the_parent_and_refuses_new_threads_clearly() {
+    let world = team_above().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(
+        dir.path(),
+        "alice",
+        Locale::En,
+        &under(&world, "tok-alice", "secretaries = [\"claude\"]\n"),
+    );
+    desk.start().await;
+    assert_eq!(
+        desk.wait_registration().await.registration,
+        Registration::Registered
+    );
+    let claude = desk.inbox("s-claude");
+    desk.session_start("s-claude", &claude).await.unwrap();
+    desk.wait_connected("claude", true).await;
+    speak(
+        &world.server_url(),
+        "tok-bob",
+        &NewEvent::new(refund(), Kind::Note, person("bob"), "the committee above"),
+    )
+    .await
+    .unwrap();
+    let declared = || {
+        world
+            .daemon()
+            .hub
+            .children()
+            .into_iter()
+            .find(|c| c.seats.iter().any(|s| s.committee == refund()))
+    };
+    eventually("claude's seat declared above", declared).await;
+
+    // Its session ends; alice, the Speaker, archives the committee below.
+    desk.session_end("s-claude", &claude).await;
+    desk.wait_connected("claude", false).await;
+    let top = desk.senate();
+    let archived = eventually_async("the committee archived", || async {
+        let response = reqwest::Client::new()
+            .put(format!(
+                "{}{}",
+                top.url,
+                senate_core::api::committee_archive_path(&refund())
+            ))
+            .bearer_auth(&top.token)
+            .json(&senate_core::api::SetCommitteeArchive {
+                archived: true,
+                id: senate_core::EventId::derived(0, "archive-refund"),
+            })
+            .send()
+            .await
+            .ok()?;
+        response.status().is_success().then_some(())
+    })
+    .await;
+    let () = archived;
+    eventually("no seat on it declared above", || {
+        world.daemon().hub.children().into_iter().find(|c| {
+            c.is_online(chrono::Utc::now()) && c.seats.iter().all(|s| s.committee != refund())
+        })
+    })
+    .await;
+
+    // bob above asks it: answered above, in bob's thread, not delivered.
+    let asked = speak(
+        &world.server_url(),
+        "tok-bob",
+        &NewEvent::new(refund(), Kind::Question, person("bob"), "still there?").to(alice_desk()),
+    )
+    .await
+    .unwrap();
+    let notice = eventually_async("the archived notice above", || async {
+        world
+            .events_of(&refund())
+            .await
+            .into_iter()
+            .find(|e| e.thread == Some(asked.seq) && e.body.contains("is archived"))
+    })
+    .await;
+    assert_eq!(notice.from, alice_desk());
+    assert!(
+        notice
+            .body
+            .contains("senate committees unarchive refund-v2"),
+        "{}",
+        notice.body
+    );
+    // Nothing new below.
+    let below = desk
+        .senate()
+        .daemon
+        .hub
+        .read(&refund(), senate_core::Seq::ZERO, 1000)
+        .await;
+    assert!(
+        below
+            .unwrap()
+            .iter()
+            .all(|e| !e.body.contains("still there?")),
+        "not delivered"
+    );
+    desk.stop().await;
+    world.stop().await;
+}

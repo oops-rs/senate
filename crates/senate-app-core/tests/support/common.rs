@@ -327,6 +327,8 @@ pub struct World {
     pub history: Vec<senate_bridge::ipc::SessionHistoryRow>,
     /// The machine's default secretary, as `default_secretary` reads it.
     pub secretary: senate_bridge::ipc::DefaultSecretaryState,
+    /// The archived committees, as `archived_committees` reads them.
+    pub archived: Vec<senate_core::CommitteeId>,
     /// Roots of threads that are settled: readable, in no inbox.
     pub settled: Vec<u64>,
 }
@@ -375,6 +377,7 @@ impl World {
             stream_ms: Default::default(),
             secretary: senate_bridge::ipc::DefaultSecretaryState::NotRecorded,
             history: Vec::new(),
+            archived: Vec::new(),
             settled: Vec::new(),
         }
     }
@@ -867,6 +870,26 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             }
         }
         Request::DefaultSecretary => Reply::ok(&secretary_reply(&w, None)),
+        Request::ArchivedCommittees => Reply::ok(&w.archived),
+        Request::ArchiveCommittee {
+            committee,
+            archived,
+            ..
+        } => {
+            let was = w.archived.contains(&committee);
+            if archived {
+                if !was {
+                    w.archived.push(committee.clone());
+                }
+            } else {
+                w.archived.retain(|c| c != &committee);
+            }
+            Reply::ok(&senate_core::api::CommitteeArchiveInfo {
+                committee,
+                archived,
+                seq: (archived != was).then_some(senate_core::Seq(1)),
+            })
+        }
         Request::EnsureSecretary => {
             use senate_bridge::ipc::{DefaultSecretaryState as St, EnsureAction};
             let action = match w.secretary {

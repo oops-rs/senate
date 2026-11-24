@@ -673,6 +673,35 @@ is the one thing it may do that the Speaker's office could not do before;
 it starts chairs and members as `spawn` does, and only at your request.
 `senate setup doctor` shows its state.
 
+### Archiving Committees
+
+A committee that has served its purpose (a test, a finished fix) can be
+archived. Nothing is deleted: archiving is an event in the committee's own
+log, and unarchiving undoes it.
+
+```sh
+senate committees archive api-test sim-relay   # lists what is hidden, asks once
+senate committees --archived                   # the archived ones
+senate committees unarchive api-test           # back again
+```
+
+An archived committee is gone from `senate committees`, the roster the app
+shows, completion and the sidebar (the app's Show archived lists it). It
+takes no new threads, seats, spawns or agent connections: each is refused
+with the `unarchive` command. Its open threads may still be answered and
+closed, and its log, memory and search stay readable. Archiving is refused
+while a hosted session on it runs (stop it first) or any agent is connected
+to it; stopped sessions keep their records. `senate where` says when a
+worktree is bound to an archived committee. A Senate registered under
+another stops declaring the committee's seats above, and a new thread sent
+down to it is answered, in the asker's thread above, that it is archived.
+
+Only the Speaker in person archives or unarchives: the server checks that
+the authenticated person is the Speaker, and accepts no one acting for the
+office. A person's agents use the person's token too, so the server alone
+cannot tell them apart; the machine refuses the request from inside a
+coding session's process tree, and no agent tool offers it.
+
 ### Where Each Command Lives
 
 The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
@@ -1161,16 +1190,16 @@ The Senate workspace contains 9 tightly scoped crates:
 
 | Crate | Version | Description |
 | :--- | :--- | :--- |
-| [`senate-core`](crates/senate-core) | `0.12.1` | Core domain types: identifiers, addressing, event envelopes, roster models, and `Hub` seams. |
-| [`senate-log`](crates/senate-log) | `0.12.1` | Append-only log engine supporting `MemoryStore`, `SqliteStore`, and `PgStore` (PostgreSQL). |
-| [`senate-server`](crates/senate-server) | `0.12.1` | Axum-powered HTTP API, Server-Sent Events (SSE) streaming, authentication, and presence leases. |
-| [`senate-speaker`](crates/senate-speaker) | `0.12.1` | Built-in model session engine (actor-based via `ractor`), triage, cover generation, and task synthesis. |
-| [`senate-work`](crates/senate-work) | `0.12.1` | Containerized autonomous worker (`DockerRunner`) and GitHub Pull Request automation (`GhForge`). |
-| [`senate-markdown`](crates/senate-markdown) | `0.12.1` | Markdown as a block tree with streaming diffs, and lazy HTML and terminal rendering with syntax highlighting. |
-| [`senate-remote-admin`](crates/senate-remote-admin) | `0.12.1` | Root-owned administrator helper for remote machine authorization (experimental). |
-| [`senate-bridge`](crates/senate-bridge) | `0.12.1` | Developer workstation bridge daemon, local IPC socket, MCP server, hooks, and the `senate` CLI. |
-| [`senated`](crates/senated) | `0.12.1` | Universal daemon executable (`--config`, `--machine`) and extensible assembly library (`Assembly`). |
-| [`senate-app-core`](crates/senate-app-core) | `0.12.1` | UniFFI Rust bridge backing the native SwiftUI macOS companion app. |
+| [`senate-core`](crates/senate-core) | `0.12.2` | Core domain types: identifiers, addressing, event envelopes, roster models, and `Hub` seams. |
+| [`senate-log`](crates/senate-log) | `0.12.2` | Append-only log engine supporting `MemoryStore`, `SqliteStore`, and `PgStore` (PostgreSQL). |
+| [`senate-server`](crates/senate-server) | `0.12.2` | Axum-powered HTTP API, Server-Sent Events (SSE) streaming, authentication, and presence leases. |
+| [`senate-speaker`](crates/senate-speaker) | `0.12.2` | Built-in model session engine (actor-based via `ractor`), triage, cover generation, and task synthesis. |
+| [`senate-work`](crates/senate-work) | `0.12.2` | Containerized autonomous worker (`DockerRunner`) and GitHub Pull Request automation (`GhForge`). |
+| [`senate-markdown`](crates/senate-markdown) | `0.12.2` | Markdown as a block tree with streaming diffs, and lazy HTML and terminal rendering with syntax highlighting. |
+| [`senate-remote-admin`](crates/senate-remote-admin) | `0.12.2` | Root-owned administrator helper for remote machine authorization (experimental). |
+| [`senate-bridge`](crates/senate-bridge) | `0.12.2` | Developer workstation bridge daemon, local IPC socket, MCP server, hooks, and the `senate` CLI. |
+| [`senated`](crates/senated) | `0.12.2` | Universal daemon executable (`--config`, `--machine`) and extensible assembly library (`Assembly`). |
+| [`senate-app-core`](crates/senate-app-core) | `0.12.2` | UniFFI Rust bridge backing the native SwiftUI macOS companion app. |
 | [`senate-e2e`](crates/senate-e2e) | — | Comprehensive end-to-end integration and lifecycle verification test suite. |
 
 ---

@@ -599,6 +599,37 @@ impl AppCore {
         Ok(())
     }
 
+    /// The archived committees, by name (`senate committees --archived`):
+    /// what "Show archived" lists. The roster leaves them out.
+    pub async fn archived_committees(&self) -> Result<Vec<String>, CoreError> {
+        let list: Vec<senate_core::CommitteeId> = self
+            .on_runtime(|driver| async move { driver.read(&Request::ArchivedCommittees).await })
+            .await?;
+        Ok(list.into_iter().map(|c| c.to_string()).collect())
+    }
+
+    /// Unarchive a committee, as the person (`senate committees unarchive
+    /// <name>`): the Speaker in person only, which the server checks. The
+    /// roster is read again after.
+    pub async fn unarchive_committee(&self, committee: String) -> Result<(), CoreError> {
+        let committee =
+            senate_core::CommitteeId::new(committee.trim()).map_err(|e| CoreError::Invalid {
+                message: e.to_string(),
+            })?;
+        self.on_runtime(|driver| async move {
+            let _: serde_json::Value = driver
+                .read(&Request::ArchiveCommittee {
+                    committee,
+                    archived: false,
+                    id: None,
+                })
+                .await?;
+            driver.refresh(crate::model::Refresh::Roster).await;
+            Ok(())
+        })
+        .await
+    }
+
     /// End a hosted session's terminal, as the person (`senate session
     /// stop <label>`). Never forced: the daemon spares a terminal someone
     /// is typing in, and says so.

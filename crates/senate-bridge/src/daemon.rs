@@ -3063,6 +3063,18 @@ impl Shared {
                 )
                 .await,
             )),
+            Request::ArchiveCommittee {
+                committee,
+                archived,
+                id,
+            } => wrap(self.on_archive_committee(committee, archived, id).await),
+            Request::ArchivedCommittees => wrap(
+                self.api
+                    .me()
+                    .await
+                    .map(|me| me.archived)
+                    .map_err(server_error),
+            ),
             Request::DefaultSecretary => wrap(self.on_default_secretary().await),
             Request::EnsureSecretary => {
                 self.sessions_changed(wrap(self.on_ensure_secretary().await))
@@ -5381,6 +5393,12 @@ impl Shared {
         if me.committees.contains(&committee) {
             return Ok(ipc::OpenCommitteeReply { opened: None });
         }
+        if me.archived.contains(&committee) {
+            return Err(IpcError::bad_request(archived_refusal(
+                &committee,
+                self.locale,
+            )));
+        }
         let person = &self.config.person;
         let body = self.locale.pick(
             format!("{person} 开设了委员会 {committee}"),
@@ -5392,6 +5410,58 @@ impl Shared {
         Ok(ipc::OpenCommitteeReply {
             opened: Some(posted.seq),
         })
+    }
+
+    /// `senate committees archive|unarchive`. Archiving is refused while a
+    /// hosted session on the committee runs here, naming each and how to
+    /// stop it; the server checks who may and that no agent is connected.
+    async fn on_archive_committee(
+        &self,
+        committee: CommitteeId,
+        archived: bool,
+        id: Option<EventId>,
+    ) -> Result<senate_core::api::CommitteeArchiveInfo, IpcError> {
+        if archived {
+            let running: Vec<String> = self
+                .on_sessions(false)
+                .await?
+                .rows
+                .into_iter()
+                .filter(|row| row.committee.as_ref() == Some(&committee) && row.is_running())
+                .map(|row| row.label())
+                .collect();
+            if !running.is_empty() {
+                let stop = running
+                    .iter()
+                    .map(|label| format!("`senate session stop {label}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(IpcError::bad_request(self.locale.pick(
+                    format!("{committee} 还有在运行的托管会话：{}。先停止它们：{stop}。", running.join(", ")),
+                    format!(
+                        "{committee} still has hosted sessions running: {}. Stop them first: {stop}.",
+                        running.join(", ")
+                    ),
+                )));
+            }
+        }
+        let request = senate_core::api::SetCommitteeArchive {
+            archived,
+            id: id.unwrap_or_default(),
+        };
+        let info = self
+            .api
+            .set_committee_archive(&committee, &request)
+            .await
+            .map_err(|error| match error.status() {
+                Some(404 | 405) => IpcError::bad_request(self.locale.pick(
+                    "这个 Senate 的服务器版本太旧，不支持归档委员会；请先升级它。",
+                    "This Senate's server is too old to archive committees; upgrade it first.",
+                )),
+                _ => self.refusal(error),
+            })?;
+        self.refresh_me().await;
+        Ok(info)
     }
 
     /// The Senates a qualified name is looked for in, nearest first: the
@@ -6592,6 +6662,17 @@ fn answered_for_me_by_a_secretary(
     event.kind == Kind::Answer
         && format::secretary_answer(event)
             .is_some_and(|(principal, secretary)| principal == me && secretary != companion)
+}
+
+/// What a committee that is archived says to a spawn, a join, a seat or a
+/// desk that would use it.
+pub(crate) fn archived_refusal(committee: &CommitteeId, locale: Locale) -> String {
+    locale.pick(
+        format!("委员会 {committee} 已归档；用 `senate committees unarchive {committee}` 恢复它。"),
+        format!(
+            "committee {committee} is archived; `senate committees unarchive {committee}` restores it"
+        ),
+    )
 }
 
 #[cfg(test)]

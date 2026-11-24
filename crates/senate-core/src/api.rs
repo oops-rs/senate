@@ -260,6 +260,10 @@ pub fn committee_seat_path(committee: &CommitteeId) -> String {
     format!("/v1/committees/{committee}/seat")
 }
 
+pub fn committee_archive_path(committee: &CommitteeId) -> String {
+    format!("/v1/committees/{committee}/archive")
+}
+
 pub fn secretaries_of_path(senator: &SenatorName) -> String {
     format!("{SECRETARIES_PATH}/{senator}")
 }
@@ -317,6 +321,25 @@ pub struct CommitteeSeatInfo {
     pub action: crate::CommitteeSeatAction,
     pub seq: Seq,
     pub duplicate: bool,
+}
+
+/// `PUT /v1/committees/{committee}/archive`: archive or unarchive it. Only
+/// the Speaker in person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetCommitteeArchive {
+    pub archived: bool,
+    /// Reuse the id when retrying the operation.
+    pub id: crate::EventId,
+}
+
+/// A committee's archive state after [`SetCommitteeArchive`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitteeArchiveInfo {
+    pub committee: CommitteeId,
+    pub archived: bool,
+    /// The event that changed it; `None` when it already was so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<Seq>,
 }
 
 /// Whether an explicit unseat currently bars the senator from this committee.
@@ -677,9 +700,13 @@ pub struct Me {
     #[serde(default)]
     pub agents: Vec<SenatorName>,
     /// Committees this person can join: every committee that has at least
-    /// one event; empty means none exist yet.
+    /// one event and is not archived; empty means none exist yet.
     #[serde(default)]
     pub committees: Vec<CommitteeId>,
+    /// The archived committees: hidden, readable, taking no new threads.
+    /// An older server says none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archived: Vec<CommitteeId>,
     /// The log's epoch; see the module docs.
     #[serde(default)]
     pub epoch: String,
@@ -914,6 +941,7 @@ mod tests {
             children: Vec::new(),
             agents: vec![path("claude"), path("codex")],
             committees: vec![c()],
+            archived: Vec::new(),
             epoch: "e1".into(),
             triaged: false,
             version: Some("0.4.0".into()),

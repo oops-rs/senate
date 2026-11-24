@@ -59,6 +59,12 @@ impl Shared {
             ));
         }
         let me = self.api.me().await.map_err(server_error)?;
+        if me.archived.contains(&committee) {
+            return Err(IpcError::bad_request(super::archived_refusal(
+                &committee,
+                self.locale,
+            )));
+        }
         let (opened, attempt) = if me.committees.contains(&committee) {
             let Some(attempt) = self.opened_here(&committee).await? else {
                 return Err(IpcError::bad_request(self.locale.pick(
