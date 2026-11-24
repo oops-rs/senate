@@ -3203,6 +3203,8 @@ impl Shared {
                 let aliases = lock(&self.display_aliases).as_ref().map(|(_, a)| a.clone());
                 wrap(self.session_rows(false, aliases).await)
             }
+            Request::ResolveSessionRole { role } => wrap(self.resolve_session_role(role).await),
+            Request::SessionRoleNames => wrap(self.session_role_names()),
             Request::Attach { senator } => wrap(self.on_attach(senator).await),
             Request::Receipt { committee, seq } => wrap(self.receipt(&committee, seq).await),
             Request::SetCommitteeSeat { committee, request } => {

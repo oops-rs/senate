@@ -387,6 +387,19 @@ async fn remote_test_child() {
     assert_eq!(rows[0].label, "refund-v2::main");
     let session = rows[0].session.clone();
     assert_eq!(session, launched.session_id);
+    client.server.state.inner.lock().unwrap().chair = Some((launched.senator.clone(), true));
+    let role_elsewhere = senate(client.paths.home())
+        .args(["attach", "refund-v2::chair"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!role_elsewhere.status.success());
+    let hint = String::from_utf8_lossy(&role_elsewhere.stderr);
+    assert!(
+        hint.contains("session on target")
+            && hint.contains("senate attach --machine target refund-v2::chair"),
+        "{hint}"
+    );
     pair(&target, &client, &person, "metadata", false, false, 60).await;
     let metadata = Client::open(&client.paths, &name("metadata")).unwrap();
     assert_eq!(metadata.list().await.unwrap().len(), 1);
@@ -490,7 +503,7 @@ async fn remote_test_child() {
     let remote = Client::open(&client.paths, &name("interactive")).unwrap();
     terminal(
         &client,
-        &["attach", "--machine", "interactive", "main"],
+        &["attach", "--machine", "interactive", "refund-v2::chair"],
         true,
     )
     .await;

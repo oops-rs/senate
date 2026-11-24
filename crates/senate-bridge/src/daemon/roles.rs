@@ -36,7 +36,7 @@ use senate_core::{
 use super::*;
 use crate::ipc::{
     ChairDocketReply, DeskRole, EscalateReply, EscalatedTo, Forwarded, RolesReply,
-    SecretariesReply, SecretaryOp, SendReply,
+    SecretariesReply, SecretaryOp, SendReply, SessionRole, SessionRoleHolder,
 };
 use crate::paths::HOSTED_KEY;
 
@@ -350,6 +350,138 @@ impl Shared {
     pub(crate) async fn current_chair(&self, committee: &CommitteeId) -> Option<SenatorName> {
         self.seed_chair(committee).await;
         self.chair_of(committee)
+    }
+
+    pub(super) async fn resolve_session_role(
+        &self,
+        role: SessionRole,
+    ) -> Result<SessionRoleHolder, IpcError> {
+        let (label, agents) = match role {
+            SessionRole::Chair { committee } => {
+                let chair = self.current_chair(&committee).await.ok_or_else(|| {
+                    IpcError::new(codes::NO_SESSION, format!("{committee} has no chair"))
+                })?;
+                (format!("{committee}::chair"), vec![chair])
+            }
+            SessionRole::Secretary { senate } => {
+                self.refresh_me().await;
+                if let Some(senate) = senate
+                    && !self
+                        .senate_path()
+                        .is_some_and(|local| local.ends_with(&senate))
+                {
+                    return Err(IpcError::new(
+                        codes::NO_SESSION,
+                        format!("this daemon does not serve the desk of {senate}"),
+                    ));
+                }
+                let agents = self.office().map_or_else(Vec::new, |office| {
+                    office
+                        .agent_workers()
+                        .filter(|name| Some(*name) != office.speaker_here())
+                        .cloned()
+                        .collect()
+                });
+                ("the Speaker's secretary".to_owned(), agents)
+            }
+            SessionRole::Speaker => {
+                self.refresh_me().await;
+                let speaker = match self.office() {
+                    Some(office) if office.kind == SenatorKind::Agent => {
+                        office.speaker_here().cloned().ok_or_else(|| {
+                            IpcError::new(
+                                codes::NO_SESSION,
+                                format!("the Speaker is seated in {}", office.speaker),
+                            )
+                        })?
+                    }
+                    Some(office) => {
+                        return Err(IpcError::new(
+                            codes::NO_SESSION,
+                            format!(
+                                "the Speaker ({}) is {:?} and has no hosted session",
+                                office.speaker.name(),
+                                office.kind
+                            ),
+                        ));
+                    }
+                    None => self
+                        .speaker_seat()
+                        .and_then(|seat| seat.senator().cloned())
+                        .ok_or_else(|| {
+                            IpcError::new(codes::NO_SESSION, "the Senate has no Speaker agent")
+                        })?,
+                };
+                ("the Speaker".to_owned(), vec![speaker])
+            }
+        };
+        let primary = agents.first().ok_or_else(|| {
+            IpcError::new(codes::NO_SESSION, "the Speaker's desk has no secretary")
+        })?;
+        if self.people().is_person(primary) {
+            return Err(IpcError::new(
+                codes::NO_SESSION,
+                format!("{label} is held by {primary}, a person without a hosted session"),
+            ));
+        }
+        let hosted = self.role_sessions()?;
+        let paths = Paths::new(&self.home);
+        let mut candidates = agents
+            .iter()
+            .filter_map(|agent| hosted.iter().find(|(session, _)| &session.agent == agent));
+        let selected = candidates
+            .clone()
+            .find(|(_, host)| crate::host::running(&paths, host).unwrap_or(false))
+            .or_else(|| candidates.next());
+        let (primary, session_id) = selected.map_or_else(
+            || (primary.clone(), None),
+            |(session, _)| (session.agent.clone(), Some(session.session_id.clone())),
+        );
+        Ok(SessionRoleHolder {
+            primary,
+            session_id,
+            candidates: agents,
+        })
+    }
+
+    fn role_sessions(&self) -> Result<Vec<(Session, EventId)>, IpcError> {
+        Ok(self
+            .store
+            .hosted_sessions()
+            .map_err(internal)?
+            .into_iter()
+            .filter(|(session, _)| !self.hosts.unpublished(&session.session_id))
+            .collect())
+    }
+
+    pub(super) fn session_role_names(&self) -> Result<Vec<String>, IpcError> {
+        let hosted: BTreeSet<_> = self
+            .role_sessions()?
+            .into_iter()
+            .map(|(session, _)| session.agent)
+            .collect();
+        let mut names: Vec<_> = self
+            .known_chairs()
+            .into_iter()
+            .filter(|(_, chair)| hosted.contains(chair))
+            .map(|(committee, _)| format!("{committee}::chair"))
+            .collect();
+        if let Some(office) = self.office() {
+            if office.kind == SenatorKind::Agent
+                && office
+                    .speaker_here()
+                    .is_some_and(|speaker| hosted.contains(speaker))
+            {
+                names.push("speaker".to_owned());
+            }
+            if office
+                .agent_workers()
+                .any(|worker| Some(worker) != office.speaker_here() && hosted.contains(worker))
+            {
+                names.push("secretary".to_owned());
+            }
+        }
+        Ok(names)
     }
 
     /// Whether `event` is addressed to `chair` on its committee and `agent`

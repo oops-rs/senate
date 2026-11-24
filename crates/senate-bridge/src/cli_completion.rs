@@ -184,9 +184,8 @@ fn candidates(values: impl IntoIterator<Item = String>) -> Vec<CompletionCandida
 }
 
 pub(super) fn sessions() -> Vec<CompletionCandidate> {
-    let Some(reply) = request::<SessionsReply>(&Request::Sessions) else {
-        return Vec::new();
-    };
+    let roles = request::<Vec<String>>(&Request::SessionRoleNames).unwrap_or_default();
+    let reply = request::<SessionsReply>(&Request::Sessions).unwrap_or_default();
     candidates(
         reply
             .rows
@@ -195,22 +194,27 @@ pub(super) fn sessions() -> Vec<CompletionCandidate> {
                 (Some(committee), Some(alias)) => format!("{committee}::{alias}"),
                 (_, Some(alias)) => alias.to_string(),
                 _ => row.primary.to_string(),
-            }),
+            })
+            .chain(roles),
     )
 }
 
 pub(super) fn history() -> Vec<CompletionCandidate> {
-    let Some(reply) = request::<ipc::SessionHistoryReply>(&Request::SessionHistory {
+    let roles = request::<Vec<String>>(&Request::SessionRoleNames).unwrap_or_default();
+    let rows = request::<ipc::SessionHistoryReply>(&Request::SessionHistory {
         committee: None,
         before: None,
         limit: Some(100),
-    }) else {
-        return Vec::new();
-    };
-    candidates(reply.rows.into_iter().flat_map(|row| {
-        let label = super::cli_history::label(&row);
-        [label, row.session_id]
-    }))
+    })
+    .map_or_else(Vec::new, |reply| reply.rows);
+    candidates(
+        rows.into_iter()
+            .flat_map(|row| {
+                let label = super::cli_history::label(&row);
+                [label, row.session_id]
+            })
+            .chain(roles),
+    )
 }
 
 pub(super) fn committees() -> Vec<CompletionCandidate> {

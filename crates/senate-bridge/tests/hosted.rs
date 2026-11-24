@@ -3667,11 +3667,21 @@ async fn spawn_attempt_expiry_prunes_the_receipt_and_refuses_reuse() {
 
 /// `senate <args>` against the harness's daemon; its output and success.
 async fn senate(h: &Harness, args: &[&str]) -> (bool, String) {
+    senate_in(h, &h.paths, h.dir.path(), args).await
+}
+
+async fn senate_in(
+    h: &Harness,
+    paths: &senate_bridge::Paths,
+    cwd: &std::path::Path,
+    args: &[&str],
+) -> (bool, String) {
     let mut cmd = tokio::process::Command::new(BIN);
     testenv::isolate_async(&mut cmd, h.dir.path());
     let out = cmd
         .args(args)
-        .env("SENATE_HOME", h.paths.home())
+        .current_dir(cwd)
+        .env("SENATE_HOME", paths.home())
         .output()
         .await
         .unwrap();
@@ -3681,6 +3691,152 @@ async fn senate(h: &Harness, args: &[&str]) -> (bool, String) {
         String::from_utf8_lossy(&out.stderr)
     );
     (out.status.success(), text)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_role_addresses_follow_the_chair_and_desk() {
+    let (mut h, _) = one_hosted_session().await;
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let row = &rows.rows[0];
+    let primary = row.primary.clone();
+    let cwd = h.workdir("role-commands", Some("refund-v2"));
+    // The in-process daemon regards this test as a local operator, but
+    // refuses its children for person-only requests like transcript reads.
+    let person = senate_bridge::Paths::new(h.dir.path().join("cli"));
+    person.ensure_home().unwrap();
+    let listener = tokio::net::UnixListener::bind(person.socket()).unwrap();
+    let daemon = h.socket();
+    let person_proxy = tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let mut bridge = tokio::net::UnixStream::connect(&daemon).await.unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut client, &mut bridge).await;
+        }
+    });
+
+    let (ok, error) = senate(&h, &["attach", "other::chair"]).await;
+    assert!(!ok && error.contains("other has no chair"), "{error}");
+    let (ok, error) = senate(&h, &["attach", "chair"]).await;
+    assert!(
+        !ok && error.contains("this directory has no committee"),
+        "{error}"
+    );
+    for args in [
+        &["spawn", "claude", "--alias", "chair"][..],
+        &["senator", "alias", "chair"],
+    ] {
+        let (ok, error) = senate(&h, args).await;
+        assert!(!ok && error.contains("address keyword"), "{error}");
+    }
+
+    {
+        let mut server = h.server.state.inner.lock().unwrap();
+        server.chair = Some((path("alice"), true));
+        server
+            .roster
+            .name_speaker(Some(path("alice").into()))
+            .unwrap();
+    }
+    let (ok, error) = senate(&h, &["attach", "refund-v2::chair"]).await;
+    assert!(!ok && error.contains("alice, a person"), "{error}");
+    let (ok, error) = senate(&h, &["session", "show", "speaker"]).await;
+    assert!(
+        !ok && error.contains("alice") && error.contains("no hosted session"),
+        "{error}"
+    );
+    let (ok, error) = senate(&h, &["session", "show", "secretary"]).await;
+    assert!(!ok && error.contains("desk has no secretary"), "{error}");
+
+    {
+        let mut server = h.server.state.inner.lock().unwrap();
+        server.chair = Some((path("claude-away"), true));
+        server
+            .roster
+            .set_secretaries(path("alice"), vec![path("claude-away"), primary.clone()])
+            .unwrap();
+    }
+    let (ok, error) = senate(&h, &["attach", "refund-v2::chair"]).await;
+    assert!(
+        !ok && error.contains("claude-away")
+            && error.contains("no Senate-owned session on this machine"),
+        "{error}"
+    );
+    for selector in ["secretary", "refund-v2::secretary"] {
+        let (ok, error) = senate_in(&h, &person, &cwd, &["session", "show", selector]).await;
+        assert!(!ok && error.contains("no readable conversation"), "{error}");
+    }
+    {
+        let mut server = h.server.state.inner.lock().unwrap();
+        server.chair = Some((primary.clone(), true));
+        server
+            .roster
+            .name_speaker(Some(primary.clone().into()))
+            .unwrap();
+    }
+    let (ok, show) = senate_in(&h, &person, &cwd, &["session", "show", "speaker"]).await;
+    assert!(!ok && show.contains("no readable conversation"), "{show}");
+    let (ok, pause) = senate_in(
+        &h,
+        &h.paths,
+        &cwd,
+        &["session", "pause", "chair", "--dry-run"],
+    )
+    .await;
+    assert!(ok && pause.contains("would pause"), "{pause}");
+    let names: Vec<String> = call(&h, &Request::SessionRoleNames).await;
+    assert!(
+        names.iter().any(|name| name == "refund-v2::chair"),
+        "{names:?}"
+    );
+    assert!(names.iter().any(|name| name == "speaker"), "{names:?}");
+
+    let (plain_ok, plain) = senate_in(
+        &h,
+        &person,
+        &cwd,
+        &["session", "approve", primary.as_str(), "--once"],
+    )
+    .await;
+    let (role_ok, role) = senate_in(
+        &h,
+        &person,
+        &cwd,
+        &["session", "approve", "refund-v2::chair", "--once"],
+    )
+    .await;
+    assert_eq!((role_ok, role), (plain_ok, plain));
+    let (ok, running) = senate(&h, &["session", "restore", "refund-v2::chair"]).await;
+    assert!(
+        !ok && running.contains("already has a running terminal"),
+        "{running}"
+    );
+    let (ok, paused) = senate(
+        &h,
+        &[
+            "session",
+            "pause",
+            "refund-v2::chair",
+            "--timeout",
+            "0",
+            "--force",
+        ],
+    )
+    .await;
+    assert!(ok && paused.contains("paused"), "{paused}");
+    let (ok, resume) = senate(&h, &["session", "resume", "refund-v2::chair", "--dry-run"]).await;
+    assert!(ok && resume.contains("would resume"), "{resume}");
+    let (ok, resume) = senate(&h, &["session", "resume", "refund-v2::chair"]).await;
+    assert!(ok && resume.contains("resumed"), "{resume}");
+    let (ok, stopped) = senate(&h, &["session", "stop", "refund-v2::chair", "--force"]).await;
+    assert!(ok && stopped.contains("stopped"), "{stopped}");
+    pty_attach_command(&h, &["attach", "refund-v2::chair"], false, b"\x1d").await;
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert!(
+        rows.rows
+            .iter()
+            .any(|row| row.primary == primary && row.is_running())
+    );
+    person_proxy.abort();
+    h.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

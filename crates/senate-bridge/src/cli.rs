@@ -17,6 +17,8 @@ mod cli_legacy;
 mod cli_secretary;
 #[path = "cli_remote.rs"]
 mod remote_cli;
+#[path = "cli_session_role.rs"]
+mod session_role;
 
 use std::io::{Read, Write};
 #[path = "cli_completion.rs"]
@@ -635,11 +637,11 @@ stdin.")]
         /// Connect to an already-running session on a paired machine.
         #[arg(long, add = ArgValueCandidates::new(remote_cli::complete_machines))]
         machine: Option<Name>,
-        /// The senator's primary name or alias (`committee::alias` for an
-        /// alias on one committee). Without one, choose a hosted session
-        /// from a list (in a terminal).
+        /// Primary name, alias, chair, committee::chair, secretary or speaker.
+        /// Bare chair follows this directory's committee. Without a selector,
+        /// choose a hosted session in the terminal.
         #[arg(add = ArgValueCandidates::new(completion::sessions))]
-        senator: Option<AliasName>,
+        senator: Option<String>,
         /// Select an exact native session ID (used by the app).
         #[arg(long, hide = true, conflicts_with = "senator")]
         session: Option<String>,
@@ -773,11 +775,12 @@ enum DebugCmd {
 enum SessionCmd {
     /// Repair two agy conversation records for one hosted terminal.
     Rebind {
-        /// The original senator or the terminal's host ID.
+        /// The original senator by name or role, or the terminal's host ID.
+        #[arg(add = ArgValueCandidates::new(completion::sessions))]
         host: String,
-        /// The live senator that should own this terminal.
-        #[arg(long)]
-        to: AliasName,
+        /// The live senator that should own this terminal, by name or role.
+        #[arg(long, add = ArgValueCandidates::new(completion::sessions))]
+        to: String,
     },
     /// List past sessions or search their conversations.
     History {
@@ -790,7 +793,7 @@ enum SessionCmd {
     },
     /// Read a past conversation.
     Show {
-        /// A session ID, senator name or committee-qualified alias.
+        /// Session ID, name, alias or role (chair, committee::chair, secretary, speaker).
         #[arg(add = ArgValueCandidates::new(completion::history))]
         session: String,
     },
@@ -842,7 +845,7 @@ enum SessionCmd {
   senate session stop --idle         Stop each one nobody is attached to
   senate session stop --all --force  Stop all, even if typed into lately")]
     Stop {
-        /// Sessions by name (`committee::alias`, an alias, or senator name).
+        /// Sessions by name, alias or role (chair, committee::chair, secretary, speaker).
         #[arg(required_unless_present_any = ["idle", "all"], add = ArgValueCandidates::new(completion::sessions))]
         names: Vec<String>,
         /// Every running session nobody is attached to.
@@ -870,12 +873,11 @@ enum SessionCmd {
   senate session approve reviewer --deny     Refuse it
   senate session approve --once              The only prompt waiting")]
     Approve {
-        /// The senator's alias (`committee::alias` for one on one
-        /// committee) or primary name. Without one, the only session with
-        /// a prompt waiting; the answer must then be given (--once,
-        /// --always or --deny), and what it answers is printed first.
+        /// Name, alias or role (chair, committee::chair, secretary, speaker).
+        /// Without one, answer the only session with a prompt waiting. Give
+        /// --once, --always or --deny, and the command prints the prompt first.
         #[arg(add = ArgValueCandidates::new(completion::sessions))]
-        senator: Option<AliasName>,
+        senator: Option<String>,
         /// Allow it this once (the default).
         #[arg(long, conflicts_with_all = ["always", "deny"])]
         once: bool,
@@ -937,10 +939,9 @@ enum SessionCmd {
     /// hosted Claude session with no saved conversation opens with its
     /// original ID.
     Restore {
-        /// The senator's primary name or alias (`committee::alias` for an
-        /// alias on one committee).
+        /// Name, alias or role (chair, committee::chair, secretary, speaker).
         #[arg(add = ArgValueCandidates::new(completion::sessions))]
-        senator: AliasName,
+        senator: String,
         /// Attach to the new terminal after it is ready. Requires a TTY.
         #[arg(short = 'a', long)]
         attach: bool,
@@ -963,10 +964,9 @@ enum SessionCmd {
   senate session replace reviewer --prompt 'Pick up the gateway review'
   senate session replace refund-v2::reviewer --model opus --effort high")]
     Replace {
-        /// The senator's alias (`committee::alias` for one on one
-        /// committee) or primary name.
+        /// Name, alias or role (chair, committee::chair, secretary, speaker).
         #[arg(add = ArgValueCandidates::new(completion::sessions))]
-        senator: AliasName,
+        senator: String,
         /// A first instruction for the new session, sent once the seat is
         /// handed over, as an ordinary Senate request from you.
         #[arg(long, conflicts_with = "prompt_file")]
@@ -1065,7 +1065,7 @@ enum SenatorCmd {
 /// Which sessions `session pause` and `resume` are for.
 #[derive(Args)]
 struct PauseSelection {
-    /// Sessions by name (`committee::alias`, an alias, or senator name).
+    /// Sessions by name, alias or role (chair, committee::chair, secretary, speaker).
     #[arg(add = ArgValueCandidates::new(completion::sessions))]
     names: Vec<String>,
     /// Every one.
@@ -1787,6 +1787,13 @@ fn pick_alias(name: AliasName) -> anyhow::Result<AliasName> {
     }
 }
 
+fn session_senator(paths: &Paths, written: &str) -> anyhow::Result<AliasName> {
+    if let Some(holder) = session_role::resolve(paths, written, None)? {
+        return Ok(AliasName::bare(holder.primary));
+    }
+    pick_alias(written.parse()?)
+}
+
 /// `senate session stop`: stops each chosen session as the daemon's `Stop`
 /// does, one after another, and says what it left and why. Fails when
 /// any stop failed.
@@ -1927,9 +1934,9 @@ fn pause_selector(
             .map(|primary| StopSelector::Named(vec![primary.to_string()])));
     }
     let mut names = Vec::new();
+    let paths = Paths::from_env()?;
     for name in which.names {
-        let parsed: AliasName = name.parse().map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
-        names.push(pick_alias(parsed)?.to_string());
+        names.push(session_senator(&paths, &name)?.to_string());
     }
     Ok(Some(StopSelector::Named(names)))
 }
@@ -3741,31 +3748,40 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             session,
             read_only,
         } => {
+            let paths = Paths::from_env()?;
             if let Some(machine) = machine {
-                let target = session
-                    .or_else(|| senator.map(|name| name.to_string()))
-                    .context("remote attach needs a session name")?;
-                return runtime(false)?.block_on(remote_cli::attach(
-                    &Paths::from_env()?,
-                    &machine,
-                    &target,
-                    read_only,
-                ));
+                use remote_cli::AttachSelector;
+                let target = if let Some(written) = senator {
+                    session_role::resolve(&paths, &written, Some(&machine))?
+                        .map_or(AttachSelector::Name(written), |holder| {
+                            AttachSelector::Role(holder.candidates)
+                        })
+                } else {
+                    AttachSelector::Name(session.context("remote attach needs a session name")?)
+                };
+                return runtime(false)?
+                    .block_on(remote_cli::attach(&paths, &machine, target, read_only));
             }
             let (target, label) = match (session, senator) {
                 (Some(session_id), _) => (ipc::AttachTarget::Session { session_id }, None),
-                (None, Some(name)) => (
-                    ipc::AttachTarget::Senator {
-                        senator: pick_alias(name.clone())?,
-                    },
-                    Some(name.to_string()),
-                ),
+                (None, Some(name)) => {
+                    let target = match session_role::resolve(&paths, &name, None)? {
+                        Some(holder) => ipc::AttachTarget::Session {
+                            session_id: holder
+                                .session_id
+                                .context("the role has no local hosted session")?,
+                        },
+                        None => ipc::AttachTarget::Senator {
+                            senator: pick_alias(name.parse()?)?,
+                        },
+                    };
+                    (target, Some(name))
+                }
                 (None, None) => match pick_attach_session()? {
                     Some(target) => (target, None),
                     None => return Ok(()),
                 },
             };
-            let paths = Paths::from_env()?;
             runtime(false)?.block_on(attach_target(&paths, target, label, read_only))
         }
         Cmd::SessionHost {
@@ -4109,6 +4125,13 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             } else if idle {
                 crate::sessions::StopSelector::Idle
             } else {
+                let names = names
+                    .into_iter()
+                    .map(|name| {
+                        Ok(session_role::resolve(&paths, &name, None)?
+                            .map_or(name, |holder| holder.primary.to_string()))
+                    })
+                    .collect::<anyhow::Result<_>>()?;
                 crate::sessions::StopSelector::Named(names)
             };
             runtime(false)?.block_on(stop_sessions(&paths, &selector, force, locale))
@@ -4130,6 +4153,12 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
         }
         SessionCmd::Rebind { host, to } => {
             let paths = Paths::from_env()?;
+            let host = session_role::resolve(&paths, &host, None)?
+                .map_or(host, |holder| holder.primary.to_string());
+            let to = match session_role::resolve(&paths, &to, None)? {
+                Some(holder) => AliasName::bare(holder.primary),
+                None => to.parse()?,
+            };
             let reply: ipc::RebindHostReply =
                 runtime(false)?.block_on(daemon_call(&paths, &Request::RebindHost { host, to }))?;
             println!(
@@ -4158,7 +4187,7 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             if attach {
                 require_attach_terminal()?;
             }
-            let senator = pick_alias(senator)?;
+            let senator = session_senator(&Paths::from_env()?, &senator)?;
             launch(
                 &Request::Restore {
                     senator,
@@ -4189,8 +4218,8 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             if prompt.as_deref().is_some_and(|p| p.trim().is_empty()) {
                 anyhow::bail!("the prompt is empty");
             }
-            let senator = pick_alias(senator)?;
             let paths = Paths::from_env()?;
+            let senator = session_senator(&paths, &senator)?;
             let locale = BridgeConfig::locale_at(&paths.config());
             let reply: crate::ipc::ReplaceReply = runtime(false)?.block_on(ipc::request(
                 &paths.socket(),
@@ -4227,7 +4256,7 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
             let senator = match senator {
-                Some(senator) => pick_alias(senator)?,
+                Some(senator) => session_senator(&paths, &senator)?,
                 None => {
                     let rows = runtime(false)?
                         .block_on(daemon_call::<ipc::SessionsReply>(
