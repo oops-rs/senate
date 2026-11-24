@@ -209,7 +209,7 @@ private struct Sidebar: View {
                     HStack {
                         Text(verbatim: L("sidebar.committees"))
                         Spacer()
-                        CommitteesMenu(store: store)
+                        SidebarFilter(store: store)
                     }
                 }
             }
@@ -384,15 +384,19 @@ extension CoreStore.Section {
     }
 }
 
-/// The menu on the Committees header: *Show inactive*.
-private struct CommitteesMenu: View {
+/// The sidebar's filter options, on its Committees header: *Show
+/// inactive* (stopped sessions, agents and committees no longer active,
+/// here and on the pages that list them). Filled while a filter is on.
+private struct SidebarFilter: View {
     @Bindable var store: CoreStore
 
     var body: some View {
         Menu {
             Toggle(L("roster.show_inactive"), isOn: $store.showInactive)
         } label: {
-            Image(systemName: store.showInactive ? "line.3.horizontal.decrease.circle.fill" : "ellipsis")
+            Image(systemName: store.showInactive
+                ? "line.3.horizontal.decrease.circle.fill"
+                : "line.3.horizontal.decrease.circle")
                 .foregroundStyle(store.showInactive ? Theme.primary : Theme.onSurfaceVariant)
                 .frame(width: 22, height: 18)
                 .contentShape(Rectangle())
@@ -401,8 +405,9 @@ private struct CommitteesMenu: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help(L("roster.show_inactive"))
-        .accessibilityLabel(L("sidebar.committees_menu"))
+        .help(L("sidebar.filter"))
+        .accessibilityLabel(L("sidebar.filter"))
+        .accessibilityValue(store.showInactive ? L("roster.show_inactive") : "")
     }
 }
 
@@ -422,19 +427,12 @@ struct AgentFilter: View {
             }
             .pickerStyle(.inline)
         } label: {
-            Image(systemName: store.agentFilter == nil
-                ? "line.3.horizontal.decrease"
+            Label(L("inbox.agent"), systemImage: store.agentFilter == nil
+                ? "line.3.horizontal.decrease.circle"
                 : "line.3.horizontal.decrease.circle.fill")
-                .foregroundStyle(store.agentFilter == nil ? Theme.onSurfaceVariant : Theme.primary)
-                .frame(width: 24, height: 24)
-                .contentShape(Rectangle())
         }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
         .menuIndicator(.hidden)
-        .fixedSize()
         .help(L("inbox.agent"))
-        .accessibilityLabel(L("inbox.agent"))
     }
 }
 

@@ -2218,6 +2218,23 @@
         }
       }
     },
+    "roster.hidden_help": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show inactive is in the sidebar's filter, on its Committees heading."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“显示不活跃的”在边栏的筛选中，位于“委员会”标题旁。"
+          }
+        }
+      }
+    },
     "roster.inactive": {
       "extractionState": "manual",
       "localizations": {
@@ -3797,6 +3814,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "委员会选项"
+          }
+        }
+      }
+    },
+    "sidebar.filter": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Filter"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "筛选"
           }
         }
       }

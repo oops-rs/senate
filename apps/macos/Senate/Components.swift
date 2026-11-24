@@ -298,24 +298,19 @@ struct ChairName: View {
     }
 }
 
-/// "Show inactive": the one switch for agents, sessions and committees no
-/// longer active, with how many it hides now.
-struct InactiveToggle: View {
-    @Bindable var store: CoreStore
+/// How many no-longer-active agents, sessions or committees a list hides:
+/// the pages follow the sidebar's *Show inactive* filter, set there.
+struct InactiveNote: View {
+    let store: CoreStore
     let hidden: Int
 
     var body: some View {
-        HStack(spacing: Theme.Space.s) {
-            if !store.showInactive && hidden > 0 {
-                Text(verbatim: L("roster.hidden", Int64(hidden)))
-                    .font(Theme.Fonts.meta)
-                    .foregroundStyle(Theme.onSurfaceVariant)
-            }
-            Toggle(L("roster.show_inactive"), isOn: $store.showInactive)
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .font(Theme.Fonts.row)
+        if !store.showInactive && hidden > 0 {
+            Text(verbatim: L("roster.hidden", Int64(hidden)))
+                .font(Theme.Fonts.meta)
+                .foregroundStyle(Theme.onSurfaceVariant)
+                .help(L("roster.hidden_help"))
+                .fixedSize()
         }
-        .fixedSize()
     }
 }

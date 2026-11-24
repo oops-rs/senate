@@ -37,7 +37,7 @@ struct SenatesView: View {
                         }
                     }
                     Spacer(minLength: Theme.Space.m)
-                    InactiveToggle(store: store, hidden: hidden)
+                    InactiveNote(store: store, hidden: hidden)
                 }
                 .padding(.top, Theme.Space.xl)
                 .padding(.bottom, Theme.Space.m)
