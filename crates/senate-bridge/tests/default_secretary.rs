@@ -777,3 +777,96 @@ async fn the_desk_names_and_unseats_with_its_own_tools() {
     );
     h.stop().await;
 }
+
+/// `senate committees archive`: refused while a hosted session on it runs
+/// here; once archived it is gone from the roster and listed as archived,
+/// spawns on it are refused naming `unarchive`, and unarchive restores it.
+/// An agent cannot archive.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_committee_is_archived_by_the_speaker_once_its_sessions_stop() {
+    let mut h = machine().await;
+    let project = h.dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let spawn = |alias: &str, dir: std::path::PathBuf| Request::Spawn {
+        attempt_id: None,
+        session: Default::default(),
+        runtime: Some(HostedRuntime::Claude),
+        profile: None,
+        committee: common::committee(),
+        alias: Some(path(alias)),
+        cwd: dir,
+        chair: false,
+        secretary: false,
+        prompt: None,
+        model: Default::default(),
+    };
+    let worker: SpawnReply = call(&h, &spawn("worker", project.clone())).await;
+    let archive = |archived| Request::ArchiveCommittee {
+        committee: common::committee(),
+        archived,
+        id: None,
+    };
+    let message = refused(&h, &archive(true)).await;
+    assert!(
+        message.contains("still has hosted sessions running")
+            && message.contains("`senate session stop refund-v2::worker`"),
+        "{message}"
+    );
+    let _: serde_json::Value = call(
+        &h,
+        &Request::Stop {
+            session: Default::default(),
+            senator: worker.senator.clone().into(),
+            force: true,
+        },
+    )
+    .await;
+    let info: senate_core::api::CommitteeArchiveInfo = call(&h, &archive(true)).await;
+    assert!(info.archived && info.seq.is_some());
+    let roster: Vec<ipc::RosterCommittee> = call(&h, &Request::Roster).await;
+    assert!(roster.iter().all(|r| r.committee != common::committee()));
+    let archived: Vec<CommitteeId> = call(&h, &Request::ArchivedCommittees).await;
+    assert_eq!(archived, [common::committee()]);
+    let message = refused(&h, &spawn("again", project.clone())).await;
+    assert!(
+        message
+            .contains("committee refund-v2 is archived; `senate committees unarchive refund-v2`"),
+        "{message}"
+    );
+
+    // An agent typing the command is refused, whatever it asks.
+    let agent_dir = h.dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        h.dir.path().join("fixture-claude"),
+        format!(
+            "#!/bin/sh\n{RECORD_HOSTED_ARGV}\n\
+             while [ ! -e .go ]; do sleep 0.05; done\n\
+             {BIN:?} committees unarchive refund-v2 > .guard.tmp 2>&1; echo \"exit $?\" >> .guard.tmp; mv .guard.tmp .guard\n\
+             while IFS= read -r line; do :; done\n"
+        ),
+    )
+    .unwrap();
+    let mut typist = spawn("typist", agent_dir.clone());
+    if let Request::Spawn { committee, .. } = &mut typist {
+        *committee = CommitteeId::new("other").unwrap();
+    }
+    let _: SpawnReply = call(&h, &typist).await;
+    std::fs::write(agent_dir.join(".go"), "").unwrap();
+    let out = common::eventually("the TUI's unarchive came back", TIMEOUT, || {
+        std::fs::read_to_string(agent_dir.join(".guard")).ok()
+    })
+    .await;
+    assert!(
+        out.contains("exit 1") && out.contains("the Speaker's own act"),
+        "{out}"
+    );
+    let still: Vec<CommitteeId> = call(&h, &Request::ArchivedCommittees).await;
+    assert_eq!(still, [common::committee()], "still archived");
+
+    let back: senate_core::api::CommitteeArchiveInfo = call(&h, &archive(false)).await;
+    assert!(!back.archived);
+    let roster: Vec<ipc::RosterCommittee> = call(&h, &Request::Roster).await;
+    assert!(roster.iter().any(|r| r.committee == common::committee()));
+    h.stop().await;
+}

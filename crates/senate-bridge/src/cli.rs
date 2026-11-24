@@ -95,6 +95,32 @@ impl Output {
 // The first paragraph of each doc comment is the one-line summary that
 // `senate --help` and `-h` print; the rest is shown by `senate help <command>`.
 // A new command also needs a place in `cli_help::GROUPS`.
+/// `senate committees archive|unarchive`.
+#[derive(Subcommand)]
+enum CommitteesCmd {
+    /// Archive committees: hidden from listings, the app and completion,
+    /// taking no new threads, seats or sessions; their log, memory and
+    /// search stay readable, and their open threads may still be answered.
+    ///
+    /// Only the Speaker in person, from their own terminal. Refused while a
+    /// hosted session on one runs (stop it first). On a terminal it lists
+    /// what will be hidden and asks once for them all.
+    Archive {
+        /// The committees.
+        #[arg(required = true, add = ArgValueCandidates::new(completion::committees))]
+        committees: Vec<CommitteeId>,
+        /// Do not ask.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Unarchive committees: listed and open for new threads again.
+    Unarchive {
+        /// The committees.
+        #[arg(required = true)]
+        committees: Vec<CommitteeId>,
+    },
+}
+
 /// `senate memory forget|correct`.
 #[derive(Subcommand)]
 enum MemoryCmd {
@@ -466,8 +492,20 @@ stdin.")]
         #[arg(long)]
         all: bool,
     },
-    /// List committees, chairs, active members and pending threads.
-    Committees,
+    /// List, archive or unarchive committees, with chairs and members.
+    #[command(after_help = "Examples:
+  senate committees                         The open ones
+  senate committees --archived              The archived ones
+  senate committees archive api-test sim-relay
+                                            Hide them (asks first on a terminal)
+  senate committees unarchive api-test      Bring one back")]
+    Committees {
+        /// List the archived committees instead.
+        #[arg(long)]
+        archived: bool,
+        #[command(subcommand)]
+        action: Option<CommitteesCmd>,
+    },
     /// Set or rename a senator's alias on its committee.
     Alias {
         /// Full senator ID, alias, or committee::alias.
@@ -1633,6 +1671,10 @@ async fn open_committee(paths: &Paths, committee: CommitteeId, locale: Locale) -
             format!("服务器上已有委员会 {committee}。"),
             format!("Committee {committee} is already open on the server."),
         ),
+        // Refused, with the reason to show (an archived committee).
+        Ok(Err(ipc::ClientError::Remote(error))) if error.code == ipc::codes::BAD_REQUEST => {
+            error.message
+        }
         Ok(Err(error)) => {
             tracing::debug!(%error, %committee, "opening the joined committee on the server");
             not_open_yet(&committee, locale)
@@ -2104,6 +2146,174 @@ fn profiles_example(config: &std::path::Path, locale: Locale) -> String {
             config.display()
         ),
     }
+}
+
+/// What one committee being archived hides, for the confirmation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArchivePlan {
+    committee: CommitteeId,
+    members: Vec<String>,
+    pending: usize,
+    /// Hosted sessions here on it, `(name, running)`.
+    sessions: Vec<(String, bool)>,
+}
+
+/// `senate committees archive`: what will be hidden, one block each.
+fn render_archive_plan(plans: &[ArchivePlan], locale: Locale) -> String {
+    let mut out = String::new();
+    for plan in plans {
+        let members = if plan.members.is_empty() {
+            "-".to_owned()
+        } else {
+            plan.members.join(", ")
+        };
+        let stopped = plan
+            .sessions
+            .iter()
+            .filter(|(_, running)| !running)
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        let sessions = if stopped.is_empty() {
+            "-".to_owned()
+        } else {
+            stopped.join(", ")
+        };
+        out.push_str(&match locale {
+            Locale::Zh => format!(
+                "{}\n  成员：{members}\n  待处理的 thread：{}\n  已停止的托管会话（记录保留）：{sessions}\n",
+                plan.committee, plan.pending
+            ),
+            Locale::En => format!(
+                "{}\n  members: {members}\n  open threads: {}\n  stopped hosted sessions (their records stay): {sessions}\n",
+                plan.committee, plan.pending
+            ),
+        });
+    }
+    out
+}
+
+/// The running hosted sessions that keep `plans` from being archived, with
+/// how to stop each; `None` when there are none.
+fn archive_blockers(plans: &[ArchivePlan], locale: Locale) -> Option<String> {
+    let running: Vec<String> = plans
+        .iter()
+        .flat_map(|plan| plan.sessions.iter().filter(|(_, running)| *running))
+        .map(|(name, _)| format!("`senate session stop {name}`"))
+        .collect();
+    (!running.is_empty()).then(|| {
+        locale.pick(
+            format!("还有托管会话在运行；先停止它们：{}。", running.join(", ")),
+            format!(
+                "Hosted sessions are still running on them; stop them first: {}.",
+                running.join(", ")
+            ),
+        )
+    })
+}
+
+fn render_archived(info: &senate_core::api::CommitteeArchiveInfo, locale: Locale) -> String {
+    let c = &info.committee;
+    match (info.archived, info.seq, locale) {
+        (true, Some(seq), Locale::Zh) => format!("已归档 {c}（seq {seq}）"),
+        (true, Some(seq), Locale::En) => format!("archived {c} (seq {seq})"),
+        (true, None, Locale::Zh) => format!("{c} 已经是归档的"),
+        (true, None, Locale::En) => format!("{c} was archived already"),
+        (false, Some(seq), Locale::Zh) => format!("已取消归档 {c}（seq {seq}）"),
+        (false, Some(seq), Locale::En) => format!("unarchived {c} (seq {seq})"),
+        (false, None, Locale::Zh) => format!("{c} 没有归档"),
+        (false, None, Locale::En) => format!("{c} was not archived"),
+    }
+}
+
+/// `senate committees archive <c>...`: check each, show what is hidden,
+/// ask once on a terminal (unless `--yes`), then archive each.
+fn archive_committees(
+    paths: &Paths,
+    committees: Vec<CommitteeId>,
+    yes: bool,
+    locale: Locale,
+) -> anyhow::Result<()> {
+    let rt = runtime(false)?;
+    let roster: Vec<ipc::RosterCommittee> = rt.block_on(daemon_call(paths, &Request::Roster))?;
+    let archived: Vec<CommitteeId> =
+        rt.block_on(daemon_call(paths, &Request::ArchivedCommittees))?;
+    let sessions: ipc::SessionsReply = rt.block_on(daemon_call(paths, &Request::Sessions))?;
+    let mut plans = Vec::new();
+    for committee in committees {
+        if archived.contains(&committee) {
+            println!(
+                "{}",
+                locale.pick(
+                    format!("{committee} 已经是归档的"),
+                    format!("{committee} was archived already")
+                )
+            );
+            continue;
+        }
+        let Some(row) = roster.iter().find(|row| row.committee == committee) else {
+            anyhow::bail!(
+                "{}",
+                locale.pick(
+                    format!("没有委员会 {committee}；`senate committees` 列出它们。"),
+                    format!("no committee {committee}; `senate committees` lists them")
+                )
+            );
+        };
+        plans.push(ArchivePlan {
+            committee: committee.clone(),
+            members: row.members.iter().map(|m| m.display_name.clone()).collect(),
+            pending: row.pending,
+            sessions: sessions
+                .rows
+                .iter()
+                .filter(|s| s.committee.as_ref() == Some(&committee))
+                .map(|s| (s.label(), s.is_running()))
+                .collect(),
+        });
+    }
+    if plans.is_empty() {
+        return Ok(());
+    }
+    if let Some(blockers) = archive_blockers(&plans, locale) {
+        anyhow::bail!("{blockers}");
+    }
+    if !yes {
+        anyhow::ensure!(
+            on_a_terminal(),
+            "{}",
+            locale.pick(
+                "没有终端可以确认；加上 --yes 直接归档。",
+                "There is no terminal to confirm on; add --yes to archive them."
+            )
+        );
+        print!("{}", render_archive_plan(&plans, locale));
+        print!(
+            "{}",
+            locale.pick(
+                format!("归档这 {} 个委员会？[y/N] ", plans.len()),
+                format!("Archive {} committee(s)? [y/N] ", plans.len())
+            )
+        );
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            println!("{}", locale.pick("没有归档。", "Nothing archived."));
+            return Ok(());
+        }
+    }
+    for plan in plans {
+        let info: senate_core::api::CommitteeArchiveInfo = rt.block_on(daemon_call(
+            paths,
+            &Request::ArchiveCommittee {
+                committee: plan.committee,
+                archived: true,
+                id: None,
+            },
+        ))?;
+        println!("{}", render_archived(&info, locale));
+    }
+    Ok(())
 }
 
 /// What `senate senator chair` did: who chaired `committee` before, who now.
@@ -2999,6 +3209,23 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     .map(|(committee, _)| committee),
                 _ => None,
             };
+            // A committee archived is not joined: it takes no new seats.
+            if let Some(named) = committee.as_ref()
+                && rt
+                    .block_on(daemon_call::<Vec<CommitteeId>>(
+                        &paths,
+                        &Request::ArchivedCommittees,
+                    ))
+                    .is_ok_and(|archived| archived.iter().any(|c| c.as_str() == named.as_str()))
+            {
+                anyhow::bail!(
+                    "{}",
+                    crate::daemon::archived_refusal(
+                        &CommitteeId::new(named.as_str())?,
+                        settings.locale
+                    )
+                );
+            }
             let committee = match kept {
                 Some(committee) => Some(committee),
                 None => {
@@ -3103,6 +3330,28 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     )
                 }
             );
+            // Bound to a committee since archived: said, with the way out.
+            if let Some((committee, _)) = &resolved.committee
+                && rt
+                    .block_on(daemon_call::<Vec<CommitteeId>>(
+                        &paths,
+                        &Request::ArchivedCommittees,
+                    ))
+                    .is_ok_and(|archived| archived.contains(committee))
+            {
+                println!(
+                    "{}",
+                    settings.locale.pick(
+                        format!(
+                            "这里绑定的委员会 {committee} 已归档：用 `senate committees unarchive {committee}` 恢复，或 `senate join <另一个>`。"
+                        ),
+                        format!(
+                            "This worktree is bound to {committee}, which is archived: \
+                             `senate committees unarchive {committee}` restores it, or `senate join <another>`."
+                        ),
+                    )
+                );
+            }
             Ok(())
         }
         Cmd::Inbox {
@@ -3516,13 +3765,50 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             let transport = config.transport().map_err(anyhow::Error::msg)?;
             runtime(false)?.block_on(codex_smoke(&transport, &thread, text.as_deref()))
         }
-        Cmd::Committees => {
+        Cmd::Committees { archived, action } => {
             let paths = Paths::from_env()?;
-            let roster: Vec<ipc::RosterCommittee> =
-                runtime(false)?.block_on(daemon_call(&paths, &Request::Roster))?;
             let locale = BridgeConfig::locale_at(&paths.config());
-            println!("{}", status::render_committees(&roster, locale, verbose));
-            Ok(())
+            match action {
+                Some(CommitteesCmd::Archive { committees, yes }) => {
+                    archive_committees(&paths, committees, yes, locale)
+                }
+                Some(CommitteesCmd::Unarchive { committees }) => {
+                    let rt = runtime(false)?;
+                    for committee in committees {
+                        let info: senate_core::api::CommitteeArchiveInfo =
+                            rt.block_on(daemon_call(
+                                &paths,
+                                &Request::ArchiveCommittee {
+                                    committee: committee.clone(),
+                                    archived: false,
+                                    id: None,
+                                },
+                            ))?;
+                        println!("{}", render_archived(&info, locale));
+                    }
+                    Ok(())
+                }
+                None if archived => {
+                    let list: Vec<CommitteeId> = runtime(false)?
+                        .block_on(daemon_call(&paths, &Request::ArchivedCommittees))?;
+                    if list.is_empty() {
+                        println!(
+                            "{}",
+                            locale.pick("没有已归档的委员会。", "No archived committees.")
+                        );
+                    }
+                    for committee in list {
+                        println!("{committee}");
+                    }
+                    Ok(())
+                }
+                None => {
+                    let roster: Vec<ipc::RosterCommittee> =
+                        runtime(false)?.block_on(daemon_call(&paths, &Request::Roster))?;
+                    println!("{}", status::render_committees(&roster, locale, verbose));
+                    Ok(())
+                }
+            }
         }
         Cmd::Alias {
             senator,
@@ -4591,4 +4877,51 @@ fn a_chair_change_says_who_chaired_before_and_who_now() {
         "main already chairs ibot."
     );
     assert!(render_chair_change(&ibot, Some("a"), Some("b"), Locale::Zh).contains("a → b"));
+}
+
+#[cfg(test)]
+#[test]
+fn archiving_lists_what_it_hides_and_names_what_must_stop_first() {
+    let plan = |committee: &str, sessions: Vec<(&str, bool)>| ArchivePlan {
+        committee: CommitteeId::new(committee).unwrap(),
+        members: vec!["claude1".into()],
+        pending: 2,
+        sessions: sessions
+            .into_iter()
+            .map(|(n, r)| (n.to_owned(), r))
+            .collect(),
+    };
+    let quiet = [
+        plan("api-test", vec![("api-test::claude1", false)]),
+        plan("sim-relay", vec![]),
+    ];
+    let text = render_archive_plan(&quiet, Locale::En);
+    assert!(
+        text.starts_with("api-test\n  members: claude1\n  open threads: 2\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("stopped hosted sessions (their records stay): api-test::claude1"),
+        "{text}"
+    );
+    assert!(text.contains("sim-relay\n"), "{text}");
+    assert_eq!(archive_blockers(&quiet, Locale::En), None);
+    let busy = [plan("api-test", vec![("api-test::claude1", true)])];
+    assert_eq!(
+        archive_blockers(&busy, Locale::En).unwrap(),
+        "Hosted sessions are still running on them; stop them first: `senate session stop api-test::claude1`."
+    );
+    let info = |archived, seq| senate_core::api::CommitteeArchiveInfo {
+        committee: CommitteeId::new("api-test").unwrap(),
+        archived,
+        seq,
+    };
+    assert_eq!(
+        render_archived(&info(true, Some(Seq(9))), Locale::En),
+        "archived api-test (seq 9)"
+    );
+    assert_eq!(
+        render_archived(&info(false, None), Locale::En),
+        "api-test was not archived"
+    );
 }

@@ -1,8 +1,11 @@
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
-use senate_core::api::{CommitteeSeatInfo, CommitteeSeatStatus, SetCommitteeSeat};
-use senate_core::{Address, CommitteeSeatChange, SenatorName};
+use senate_core::api::{
+    CommitteeArchiveInfo, CommitteeSeatInfo, CommitteeSeatStatus, SetCommitteeArchive,
+    SetCommitteeSeat,
+};
+use senate_core::{Address, CommitteeArchive, CommitteeSeatChange, SenatorKind, SenatorName};
 use serde::Deserialize;
 
 use super::{ApiFailure, AppState, Person, committee_path, json_body, query};
@@ -69,5 +72,45 @@ pub(super) async fn put_seat(
     };
     Ok(Json(
         state.hub.set_committee_seat(&committee, change, id).await?,
+    ))
+}
+
+/// Archive or unarchive a committee. Only the Speaker in person: the
+/// authenticated person is the Speaker, a person, and no one acts for the
+/// office here. (A person's agents hold the person's token too: the
+/// machine refuses this request from inside a coding session, which is the
+/// rest of the guard.)
+pub(super) async fn put_archive(
+    State(state): State<AppState>,
+    person: Person,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<SetCommitteeArchive>, JsonRejection>,
+) -> Result<Json<CommitteeArchiveInfo>, ApiFailure> {
+    let committee = committee_path(path)?;
+    let SetCommitteeArchive { archived, id } = json_body(body)?;
+    let speaker_in_person = state.hub.roster_now().office().is_some_and(|office| {
+        office.kind == SenatorKind::Person && office.speaker.name().name() == &person.0
+    });
+    if !speaker_in_person {
+        return Err(ApiFailure::forbidden(format!(
+            "only the Speaker in person archives or unarchives a committee; {} is not",
+            person.0
+        )));
+    }
+    let known = state.hub.committees_by_archive().await?;
+    if !known.0.contains(&committee) && !known.1.contains(&committee) {
+        return Err(ApiFailure::bad_request(format!(
+            "unknown committee {committee}"
+        )));
+    }
+    let change = CommitteeArchive {
+        archived,
+        by: person.0,
+    };
+    Ok(Json(
+        state
+            .hub
+            .set_committee_archive(&committee, change, id)
+            .await?,
     ))
 }

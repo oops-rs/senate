@@ -673,6 +673,35 @@ is the one thing it may do that the Speaker's office could not do before;
 it starts chairs and members as `spawn` does, and only at your request.
 `senate setup doctor` shows its state.
 
+### Archiving Committees
+
+A committee that has served its purpose (a test, a finished fix) can be
+archived. Nothing is deleted: archiving is an event in the committee's own
+log, and unarchiving undoes it.
+
+```sh
+senate committees archive api-test sim-relay   # lists what is hidden, asks once
+senate committees --archived                   # the archived ones
+senate committees unarchive api-test           # back again
+```
+
+An archived committee is gone from `senate committees`, the roster the app
+shows, completion and the sidebar (the app's Show archived lists it). It
+takes no new threads, seats, spawns or agent connections: each is refused
+with the `unarchive` command. Its open threads may still be answered and
+closed, and its log, memory and search stay readable. Archiving is refused
+while a hosted session on it runs (stop it first) or any agent is connected
+to it; stopped sessions keep their records. `senate where` says when a
+worktree is bound to an archived committee. A Senate registered under
+another stops declaring the committee's seats above, and a new thread sent
+down to it is answered, in the asker's thread above, that it is archived.
+
+Only the Speaker in person archives or unarchives: the server checks that
+the authenticated person is the Speaker, and accepts no one acting for the
+office. A person's agents use the person's token too, so the server alone
+cannot tell them apart; the machine refuses the request from inside a
+coding session's process tree, and no agent tool offers it.
+
 ### Where Each Command Lives
 
 The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`

@@ -461,9 +461,10 @@ impl Worker {
     /// The whole set every pass; it also tells the Senate above this one
     /// is online. Only seats cross, never content.
     async fn declare(&self) -> Result<(), Pass> {
-        let here = self
+        // An archived committee's seats are not declared: gone from above too.
+        let (here, _) = self
             .hub
-            .committees()
+            .committees_by_archive()
             .await
             .map_err(|e| Pass::Failed(format!("listing the committees here: {e}")))?;
         let aliases = Hub::aliases(self.hub.as_ref())
@@ -631,6 +632,11 @@ impl Worker {
             .unwrap_or_else(|| Locator::at(self.here(), committee.clone(), Address::Speaker));
         let down_key = format!("{DOWN}{}:{thread}", event.committee);
         let kept: Option<Brought> = self.get(&down_key).await?;
+        // A new thread for a committee archived here: said above, in its
+        // thread, and passed over (the committee takes no new threads).
+        if kept.is_none() && self.archived_here(&committee).await? {
+            return self.refuse_archived(event, &committee, thread).await;
+        }
         let brought = kept.as_ref().filter(|b| b.committee == committee);
         // The seat it is for: the one named, else the one its thread here
         // was brought to.
@@ -710,6 +716,49 @@ impl Worker {
             self.put(&down_key, &b).await?;
         }
         Ok(())
+    }
+
+    async fn archived_here(&self, committee: &CommitteeId) -> Result<bool, Pass> {
+        let (_, archived) = self
+            .hub
+            .committees_by_archive()
+            .await
+            .map_err(|e| Pass::Failed(format!("listing the committees here: {e}")))?;
+        Ok(archived.contains(committee))
+    }
+
+    /// Tell the asker above that `committee` here is archived.
+    async fn refuse_archived(
+        &self,
+        event: &Event,
+        committee: &CommitteeId,
+        thread: Seq,
+    ) -> Result<(), Pass> {
+        let name = &self.config.name;
+        let body = format!(
+            "The committee {committee} of {name} is archived and takes no new threads: \
+             this was not delivered. Its Speaker can unarchive it (`senate committees unarchive {committee}`)."
+        );
+        let up = NewEvent::new(
+            event.committee.clone(),
+            Kind::Note,
+            Address::child(name.clone(), committee.clone()),
+            body,
+        )
+        .to(event.from.clone())
+        .in_thread(thread)
+        .with_id(derived(event, "uplink:archived"));
+        match tokio::time::timeout(TIMEOUT, self.above.append(&up)).await {
+            Err(_) => Err(Pass::Lost("timed out".into())),
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => match lost_or_failed(&e) {
+                lost @ Pass::Lost(_) => Err(lost),
+                Pass::Failed(why) => {
+                    tracing::warn!(id = %event.id, "the Senate above refused the archived notice: {why}");
+                    Ok(())
+                }
+            },
+        }
     }
 
     /// The seat of this Senate on `committee` that `intended` names, if it

@@ -72,6 +72,9 @@ pub(super) fn person_only(request: &Request) -> Option<&'static str> {
         | Request::SetCommitteeSeat { .. } => {
             "Aliases and seats set as the person are the person's to change: run the command from your own terminal (a session names itself with `join`; the Speaker's desk has speaker_alias and speaker_unseat)"
         }
+        Request::ArchiveCommittee { .. } => {
+            "Archiving a committee is the Speaker's own act: run `senate committees archive` from your own terminal"
+        }
         Request::EnsureSecretary => {
             "Only the person starts the default secretary: ask it from your own terminal or the Senate app"
         }

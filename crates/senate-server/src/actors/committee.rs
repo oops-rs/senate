@@ -37,12 +37,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, MessagingErr, RpcReplyPort, SupervisionEvent};
-use senate_core::api::{CommitteeSeatInfo, Heartbeat};
+use senate_core::api::{CommitteeArchiveInfo, CommitteeSeatInfo, Heartbeat};
 use senate_core::hub::SCAN_PAGE;
 use senate_core::{
-    Address, AgentPresence, Appended, ChairPayload, CommitteeId, CommitteeSeatAction,
-    CommitteeSeatChange, CommitteeSeats, Event, EventId, HubError, Kind, Locale, Name, NewEvent,
-    People, PresenceBoard, PresencePayload, SenatorName, Seq, presence_event, reassign_event,
+    Address, AgentPresence, Appended, ArchiveFold, ChairPayload, CommitteeArchive, CommitteeId,
+    CommitteeSeatAction, CommitteeSeatChange, CommitteeSeats, Event, EventId, HubError, Kind,
+    Locale, Name, NewEvent, People, PresenceBoard, PresencePayload, SenatorName, Seq,
+    presence_event, reassign_event,
 };
 use senate_log::{LogError, LogStore};
 use tokio::sync::{broadcast, mpsc};
@@ -86,6 +87,16 @@ pub(crate) enum CommitteeMsg {
     /// Record activity and re-evaluate the lease in seat-change order.
     Heartbeat(Heartbeat, RpcReplyPort<Result<(), LogError>>),
     IsUnseated(SenatorName, RpcReplyPort<bool>),
+    /// Whether the committee is archived: the seq it was archived at.
+    IsArchived(RpcReplyPort<Option<Seq>>),
+    /// Archive or unarchive the committee (the Speaker in person, checked
+    /// by the caller). Refused while an agent is connected to it.
+    SetArchive {
+        change: CommitteeArchive,
+        id: EventId,
+        locale: Locale,
+        reply: RpcReplyPort<Result<CommitteeArchiveInfo, LogError>>,
+    },
     SetSeat {
         change: CommitteeSeatChange,
         id: EventId,
@@ -129,6 +140,8 @@ pub(crate) struct CommitteeState {
     leases: Leases,
     seats: CommitteeSeats,
     chair: ChairView,
+    /// Whether the committee is archived ([`CommitteeArchive`]).
+    archive: ArchiveFold,
     ticker: Option<JoinHandle<()>>,
     /// Whether the log already shows an agent's seat (a `presence`, or an
     /// event written as an agent). The first agent's seat makes it the
@@ -213,6 +226,7 @@ impl CommitteeState {
             let seq = appended.event.seq;
             self.observe_seat(&appended.event);
             self.chair.observe(&appended.event);
+            self.archive.observe(&appended.event);
             if !appended.duplicate && seq != self.fanned.next() {
                 tracing::warn!(
                     committee = %self.args.committee,
@@ -237,6 +251,62 @@ impl CommitteeState {
             }
         }
         result
+    }
+
+    /// What an archived committee says to what it refuses.
+    fn archived_refusal(&self) -> String {
+        let c = &self.args.committee;
+        format!("committee {c} is archived; `senate committees unarchive {c}` restores it")
+    }
+
+    /// Archive or unarchive: one event from the server, unless the
+    /// committee already is so. Archiving is refused while any agent is
+    /// connected to it (a stream or a recent heartbeat), naming them.
+    async fn set_archive(
+        &mut self,
+        change: CommitteeArchive,
+        id: EventId,
+        locale: Locale,
+    ) -> Result<CommitteeArchiveInfo, LogError> {
+        let committee = self.args.committee.clone();
+        if self.archive.archived().is_some() == change.archived {
+            return Ok(CommitteeArchiveInfo {
+                committee,
+                archived: change.archived,
+                seq: None,
+            });
+        }
+        if change.archived {
+            let mut connected = self.args.presence.agents_on(&committee);
+            connected.sort();
+            connected.dedup();
+            if !connected.is_empty() {
+                let list = connected
+                    .iter()
+                    .map(|a| Address::senator(a).in_text())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(LogError::Invalid(format!(
+                    "committee {committee} still has agents connected ({list}); stop their sessions first"
+                )));
+            }
+        }
+        let by = &change.by;
+        let body = match (change.archived, locale) {
+            (true, Locale::Zh) => format!("{by} 归档了委员会 `{committee}`。"),
+            (true, Locale::En) => format!("{by} archived the committee `{committee}`."),
+            (false, Locale::Zh) => format!("{by} 取消了委员会 `{committee}` 的归档。"),
+            (false, Locale::En) => format!("{by} unarchived the committee `{committee}`."),
+        };
+        let archived = change.archived;
+        let appended = self
+            .commit(change.event(committee.clone(), id, body))
+            .await?;
+        Ok(CommitteeArchiveInfo {
+            committee,
+            archived,
+            seq: Some(appended.event.seq),
+        })
     }
 
     async fn set_chair(
@@ -319,6 +389,9 @@ impl CommitteeState {
         let agent = &heartbeat.agent;
         if self.seats.is_unseated(agent) {
             return Ok(());
+        }
+        if self.archive.archived().is_some() && !heartbeat.left {
+            return Err(LogError::Invalid(self.archived_refusal()));
         }
         if heartbeat.left {
             // Its bridge says no session of it is bound here any more (its
@@ -483,15 +556,17 @@ impl CommitteeState {
     }
 }
 
-/// The presence, agent authors and chair recorded in the committee's log.
+/// The presence, agent authors, chair and archive state recorded in the
+/// committee's log.
 async fn restore_views(
     store: &dyn LogStore,
     committee: &CommitteeId,
     people: &People,
-) -> Result<(PresenceBoard, BTreeSet<SenatorName>, ChairView), LogError> {
+) -> Result<(PresenceBoard, BTreeSet<SenatorName>, ChairView, ArchiveFold), LogError> {
     let mut board = PresenceBoard::new();
     let mut authors = BTreeSet::new();
     let mut chair = ChairView::new(people.clone());
+    let mut archive = ArchiveFold::default();
     let mut after = Seq::ZERO;
     loop {
         let page = store.read(committee, after, SCAN_PAGE).await?;
@@ -505,9 +580,10 @@ async fn restore_views(
                 authors.insert(agent.clone());
             }
             chair.observe(event);
+            archive.observe(event);
         }
     }
-    Ok((board, authors, chair))
+    Ok((board, authors, chair, archive))
 }
 
 impl Actor for CommitteeActor {
@@ -523,7 +599,7 @@ impl Actor for CommitteeActor {
         let head = args.store.head(&args.committee).await?;
         let mut leases = Leases::new(args.leases);
         let people = args.seats.snapshot().people();
-        let (board, authors, chair) =
+        let (board, authors, chair, archive) =
             restore_views(args.store.as_ref(), &args.committee, &people).await?;
         let seats = board.seats().clone();
         let active = board.agents();
@@ -575,6 +651,7 @@ impl Actor for CommitteeActor {
             leases,
             seats,
             chair,
+            archive,
             ticker: None,
             seat_logged,
         })
@@ -621,6 +698,19 @@ impl Actor for CommitteeActor {
                             state.args.committee
                         ))),
                     );
+                    return Ok(());
+                }
+                // An archived committee takes no new threads; its open ones
+                // may still be answered and closed. The server's own events
+                // (presence, the unarchive) pass.
+                if state.archive.archived().is_some()
+                    && event.thread.is_none()
+                    && (event.from != senate_core::Address::Committee
+                        // Relayed in from another Senate: not the server's own.
+                        || event.meta.contains_key(senate_core::meta::ORIGIN))
+                    && event.kind != Kind::Presence
+                {
+                    reply_or_log(reply, Err(LogError::Invalid(state.archived_refusal())));
                     return Ok(());
                 }
                 if event.from == senate_core::Address::Committee
@@ -677,6 +767,10 @@ impl Actor for CommitteeActor {
                     );
                     return Ok(());
                 }
+                if state.archive.archived().is_some() {
+                    reply_or_log(reply, Err(HubError::Rejected(state.archived_refusal())));
+                    return Ok(());
+                }
                 let result = state
                     .attach(&myself, agent.clone(), conn, sender)
                     .await
@@ -703,12 +797,29 @@ impl Actor for CommitteeActor {
             CommitteeMsg::IsUnseated(senator, reply) => {
                 reply_or_log(reply, state.seats.is_unseated(&senator));
             }
+            CommitteeMsg::IsArchived(reply) => {
+                reply_or_log(reply, state.archive.archived());
+            }
+            CommitteeMsg::SetArchive {
+                change,
+                id,
+                locale,
+                reply,
+            } => {
+                let result = state.set_archive(change, id, locale).await;
+                reply_or_log(reply, result);
+            }
             CommitteeMsg::SetSeat {
                 change,
                 id,
                 locale,
                 reply,
             } => {
+                if change.action == CommitteeSeatAction::Join && state.archive.archived().is_some()
+                {
+                    reply_or_log(reply, Err(LogError::Invalid(state.archived_refusal())));
+                    return Ok(());
+                }
                 let event = state.seat_event(&change, id, locale);
                 match state.commit(event).await {
                     Ok(appended) => reply_or_log(reply, state.seat_receipt(change, appended)),
@@ -721,7 +832,10 @@ impl Actor for CommitteeActor {
                 }
             }
             CommitteeMsg::Contact(agent, reply) => {
-                state.contact(&agent).await;
+                // An archived committee seats nobody.
+                if state.archive.archived().is_none() {
+                    state.contact(&agent).await;
+                }
                 reply_or_log(reply, ());
             }
             CommitteeMsg::Presence(reply) => {

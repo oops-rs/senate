@@ -93,3 +93,81 @@ impl CommitteeSeats {
         })
     }
 }
+
+/// A committee archived (or unarchived) by the Speaker in person: an event
+/// in its own log, never a deletion. While archived, the committee takes no
+/// new threads, seats or agent connections; what is in it stays readable,
+/// and its open threads may still be answered and closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitteeArchive {
+    pub archived: bool,
+    /// The person who archived or unarchived it.
+    pub by: Name,
+}
+
+impl CommitteeArchive {
+    pub fn event(&self, committee: CommitteeId, id: EventId, body: String) -> NewEvent {
+        NewEvent::new(committee, Kind::Note, Address::Committee, body)
+            .with_id(id)
+            .with_meta(
+                meta::COMMITTEE_ARCHIVE,
+                serde_json::to_value(self).unwrap_or_default(),
+            )
+    }
+
+    pub fn of(event: &Event) -> Option<Self> {
+        if event.from != Address::Committee {
+            return None;
+        }
+        serde_json::from_value(event.meta.get(meta::COMMITTEE_ARCHIVE)?.clone()).ok()
+    }
+}
+
+/// Whether a committee is archived, folded from its log: the latest
+/// [`CommitteeArchive`] says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ArchiveFold {
+    archived: Option<Seq>,
+}
+
+impl ArchiveFold {
+    pub fn observe(&mut self, event: &Event) {
+        if let Some(change) = CommitteeArchive::of(event) {
+            self.archived = change.archived.then_some(event.seq);
+        }
+    }
+
+    /// The seq it was archived at, while it is.
+    pub fn archived(&self) -> Option<Seq> {
+        self.archived
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    #[test]
+    fn the_latest_change_says_whether_it_is_archived() {
+        let committee = CommitteeId::new("api-test").unwrap();
+        let change = |archived, seq| {
+            CommitteeArchive {
+                archived,
+                by: Name::new("wendell").unwrap(),
+            }
+            .event(committee.clone(), EventId::new(), String::new())
+            .into_event(Seq(seq), chrono::Utc::now())
+        };
+        let mut fold = ArchiveFold::default();
+        assert_eq!(fold.archived(), None);
+        fold.observe(&change(true, 4));
+        assert_eq!(fold.archived(), Some(Seq(4)));
+        fold.observe(&change(false, 9));
+        assert_eq!(fold.archived(), None);
+        // The same meta from anyone but the server is no change.
+        let mut forged = change(true, 12);
+        forged.from = Address::Speaker;
+        fold.observe(&forged);
+        assert_eq!(fold.archived(), None);
+    }
+}
