@@ -776,6 +776,19 @@ in its `data_dir` on every attach and detach and whenever that changes).
 
 ---
 
+New hosted terminals negotiate modified keys while headless and replay the
+keyboard mode on attach. Shift+Enter works when the viewer sends a distinct
+modified Enter, as Ghostty and Kitty do. Apple Terminal's default Shift+Enter
+is indistinguishable from Enter. Use Ctrl+J for a newline in Codex, Claude Code
+or Antigravity in that case. Claude Code and Antigravity also accept a trailing
+backslash followed by Enter.
+
+While an attached terminal can answer palette queries, new hosts let it
+supply fresh colors. Headless sessions use the system palette. Claude Code's
+auto theme can follow the viewer through terminal appearance reports. A
+runtime that only probes at startup may need a restart to change themes.
+The watch grid mirrors the colors the hosted runtime drew.
+
 Past sessions remain registered after their terminal stops. The History
 commands use local person-only IPC. Search builds a private, rebuildable
 SQLite index in `$SENATE_HOME/history` in the background, newest sessions

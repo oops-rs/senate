@@ -31,7 +31,12 @@ pub(super) struct Pastes {
 
 impl Pastes {
     pub(super) fn waiting_for_key(&self) -> bool {
-        self.state == State::Plain && !self.pending.is_empty()
+        self.state == State::Plain
+            && !self.pending.is_empty()
+            && !(self.pending.len() > 2
+                && super::keyboard::MODIFIED_ENTER
+                    .iter()
+                    .any(|key| key.starts_with(&self.pending)))
     }
 
     pub(super) fn flush_key(&mut self) -> Vec<u8> {
@@ -58,7 +63,7 @@ impl Pastes {
                 let (keys, detach) =
                     super::terminal::split_input(&self.pending[..found.unwrap_or(send)]);
                 if detach {
-                    output.extend_from_slice(&self.pending[..keys]);
+                    plain_keys(&mut output, &self.pending[..keys]);
                     return (output, true);
                 }
                 send = keys;
@@ -78,7 +83,12 @@ impl Pastes {
                         .unwrap_or(original);
                     part.extend_from_slice(END);
                 }
-                output.extend_from_slice(&part);
+                if self.state == State::Plain {
+                    plain_keys(&mut output, &part[..at]);
+                    output.extend_from_slice(START);
+                } else {
+                    output.extend_from_slice(&part);
+                }
                 self.state = match (self.state, drops) {
                     (State::Plain, Some(_)) => State::Paste,
                     (State::Plain, None) => State::Stream,
@@ -97,12 +107,32 @@ impl Pastes {
                     .find(|&n| marker.starts_with(&self.pending[self.pending.len() - n..]))
                     .unwrap_or(0);
                 let send = send.min(self.pending.len() - tail);
-                output.extend(self.pending.drain(..send));
+                if self.state == State::Plain {
+                    plain_keys(&mut output, &self.pending[..send]);
+                    self.pending.drain(..send);
+                } else {
+                    output.extend(self.pending.drain(..send));
+                }
                 break;
             }
         }
         (output, false)
     }
+}
+
+/// Preserve everything except the alternate xterm encoding of shifted
+/// Enter. Bracketed paste bodies never go through this translation.
+fn plain_keys(output: &mut Vec<u8>, mut bytes: &[u8]) {
+    use super::keyboard::{SHIFT_ENTER, XTERM_SHIFT_ENTER};
+    while let Some(at) = bytes
+        .windows(XTERM_SHIFT_ENTER.len())
+        .position(|window| window == XTERM_SHIFT_ENTER)
+    {
+        output.extend_from_slice(&bytes[..at]);
+        output.extend_from_slice(SHIFT_ENTER);
+        bytes = &bytes[at + XTERM_SHIFT_ENTER.len()..];
+    }
+    output.extend_from_slice(bytes);
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -280,6 +310,31 @@ fn copy(source: &Path, drops: &Path) -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn modified_enter_survives_split_reads_and_only_keys_are_translated() {
+        use super::super::keyboard::{SHIFT_ENTER, XTERM_SHIFT_ENTER};
+        for input in [SHIFT_ENTER, b"\x1b[13;2:1u", XTERM_SHIFT_ENTER] {
+            let expected = if input == XTERM_SHIFT_ENTER {
+                SHIFT_ENTER
+            } else {
+                input
+            };
+            for split in 1..input.len() {
+                let mut paste = Pastes::default();
+                assert_eq!(paste.feed(&input[..split], None).await, (Vec::new(), false));
+                if split > 2 {
+                    assert!(!paste.waiting_for_key());
+                }
+                assert_eq!(
+                    paste.feed(&input[split..], None).await,
+                    (expected.to_vec(), false)
+                );
+            }
+        }
+        let framed = [START, XTERM_SHIFT_ENTER, END].concat();
+        assert_eq!(Pastes::default().feed(&framed, None).await, (framed, false));
+    }
 
     #[tokio::test]
     async fn paste_frames_can_split_without_changing_text_or_keys() {
