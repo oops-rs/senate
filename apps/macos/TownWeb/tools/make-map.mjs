@@ -32,12 +32,11 @@ for (let gy = -RINGS; gy <= RINGS; gy++) {
       x: l.x * TILE, y: l.y * TILE, width: l.w * TILE, height: l.h * TILE, rotation: 0, visible: true,
       properties: [{ name: "gx", type: "int", value: gx }, { name: "gy", type: "int", value: gy }],
     });
-    // Trees in the lot's corners, a bush or two by the fence line.
+    // A tree or a bush in the garden column right of the house.
     const trees = [28, 27, 5, 16, 4];
-    put(l.x + 3, l.y + 1, trees[Math.floor(rnd() * trees.length)]);
-    put(l.x + 17, l.y + 1, trees[Math.floor(rnd() * trees.length)]);
-    if (rnd() < 0.6) put(l.x + 3, l.y + 12, trees[Math.floor(rnd() * trees.length)]);
-    if (rnd() < 0.6) put(l.x + 17, l.y + 12, 5);
+    put(l.x + 12, l.y + 1, trees[Math.floor(rnd() * trees.length)]);
+    if (rnd() < 0.7) put(l.x + 12, l.y + 4, rnd() < 0.5 ? 5 : trees[Math.floor(rnd() * trees.length)]);
+    if (rnd() < 0.4) put(l.x + 2, l.y + 8, 5);
   }
 }
 

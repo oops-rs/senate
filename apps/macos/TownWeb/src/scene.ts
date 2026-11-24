@@ -6,7 +6,7 @@
 import Phaser from "phaser";
 import { Director, type Action } from "./director.ts";
 import {
-  assign, door, house, lot, MAP_H, MAP_W, path, length, POST_OFFICE, px, seat, TILE, TOWN_HALL,
+  assign, door, house, lot, MAP_H, MAP_W, occupied, streetY, path, length, POST_OFFICE, px, seat, TILE, TOWN_HALL,
   type Cell, type Point,
 } from "./layout.ts";
 import { diff, homeOf, senatorsOf, seeded, threadKey, type Senator, type ThreadRef, type TownEvent, type TownState } from "./model.ts";
@@ -196,15 +196,14 @@ export class TownScene extends Phaser.Scene {
     this.touch();
   }
 
+  /** Frame the occupied lots (the committees', the post office, the hall). */
   fit() {
     const cam = this.cameras.main;
-    const cells = [...this.lots.values(), POST_OFFICE, TOWN_HALL];
-    const xs = cells.map((c) => lot(c).x), ys = cells.map((c) => lot(c).y);
-    const x0 = (Math.min(...xs) - 1) * TILE, y0 = (Math.min(...ys) - 2) * TILE;
-    const x1 = (Math.max(...xs) + 21) * TILE, y1 = (Math.max(...ys) + 17) * TILE;
-    const zoom = Math.min(cam.width / (x1 - x0), cam.height / (y1 - y0));
-    // Whole or half steps keep the pixel art crisp and the tiles seamless.
-    cam.setZoom(Phaser.Math.Clamp(Math.floor(zoom * 2) / 2 || 0.5, 0.5, 4));
+    const r = occupied([...this.lots.values(), POST_OFFICE, TOWN_HALL]);
+    const zoom = Math.min(cam.width / r.w, cam.height / r.h);
+    const x0 = r.x, y0 = r.y, x1 = r.x + r.w, y1 = r.y + r.h;
+    // The tiles are extruded, so any zoom is seamless.
+    cam.setZoom(Phaser.Math.Clamp(zoom, 0.5, 4));
     this.placeNight();
     cam.centerOn((x0 + x1) / 2, (y0 + y1) / 2);
     this.fitted = true;
@@ -441,7 +440,7 @@ export class TownScene extends Phaser.Scene {
     if (!sender || !home) {
       // A guest from elsewhere: in from the west road, to the post office, and away.
       const g = this.add.sprite(0, office.y, "people", FACE.guest).setOrigin(0.5, 1);
-      const edge = { x: TILE, y: (lot(POST_OFFICE).y + 15) * TILE };
+      const edge = { x: TILE, y: streetY(POST_OFFICE) };
       const route = [edge, { x: office.x, y: edge.y }, office];
       g.setPosition(edge.x, edge.y);
       this.walk(g, route, () => { send(); this.walk(g, [...route].reverse(), () => { g.destroy(); goHome(); }); });
@@ -506,7 +505,7 @@ export class TownScene extends Phaser.Scene {
       return;
     }
     const d = px(door(home.cell));
-    const y = (lot(home.cell).y + 15) * TILE;
+    const y = streetY(home.cell);
     const route = [{ x: TILE, y }, { x: d.x, y }, d, home.at];
     if (!arriving) route.reverse();
     sprite.setVisible(true).setAlpha(1).setAngle(0).setPosition(route[0]!.x, route[0]!.y);

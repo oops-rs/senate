@@ -1,12 +1,12 @@
 # Town (web)
 
-The Town page as a web game: [Phaser 3](https://phaser.io) (MIT) in the app's
+The Town page as a web game: [Phaser 4](https://phaser.io) (MIT) in the app's
 web view, a [Tiled](https://www.mapeditor.org) map, CC0 tiles and sprites,
 TypeScript bundled locally with esbuild. The same page runs in a plain
 browser with a scripted town.
 
 ```sh
-npm install          # Phaser, TypeScript, esbuild, vitest, tile-extruder
+npm install          # Phaser 4, TypeScript, esbuild, vitest, tile-extruder
 npm run map          # assets/town.tmj (+ the extruded tileset) from src/layout.ts
 npm test             # vitest: model, layout, director
 npm run build        # ../Senate/Web/town/: index.html, town.js, town.css, assets/
@@ -42,10 +42,10 @@ Swift checks against what it sent before acting.
 
 | | Phaser 3 | PixiJS 8 (+ @pixi/tilemap, pixi-viewport) | Godot 4 (web export / libgodot) |
 | --- | --- | --- | --- |
-| What it is | a 2D game framework: scenes, cameras, tweens, input, tilemaps, particles, loader | a 2D renderer; the rest from plugins or by hand | a full engine and editor |
+| What it is | a 2D game framework (Phaser 4: WebGL first, Canvas fallback): scenes, cameras, tweens, input, tilemaps, particles, loader | a 2D renderer; the rest from plugins or by hand | a full engine and editor |
 | Community | 40.8k GitHub stars, ~770k npm downloads a week; large example and plugin set | 48.9k stars, ~2.0M downloads a week (much of it non-game) | 120.7k stars; web is a secondary target |
 | Tiled / isometric | Tiled JSON loaded natively: orthogonal, isometric, staggered, hexagonal layers and object layers | no Tiled loader in core; @pixi/tilemap (~12k downloads a week) renders tiles, parsing and iso are yours | its own TileMap editor (iso included); Tiled via an import plugin |
-| Bundle | town.js here: 1,209 KB minified, 338 KB gzip (Phaser + the town) | ~600–700 KB minified for pixi.js alone, plus the plugins and the game code we would write | ~35–40 MB wasm + pack uncompressed; threads need cross-origin isolation (SharedArrayBuffer), a single-threaded export since 4.3 |
+| Bundle | town.js here: 1,385 KB minified, 378 KB gzip with Phaser 4.2.1 (1,209 / 338 with 3.90) | ~600–700 KB minified for pixi.js alone, plus the plugins and the game code we would write | ~35–40 MB wasm + pack uncompressed; threads need cross-origin isolation (SharedArrayBuffer), a single-threaded export since 4.3 |
 | In WKWebView | one script and a canvas (WebGL, canvas fallback), served from our own scheme under a strict CSP; works unchanged in a browser and on iOS | the same | a large wasm module and worker setup to serve from a custom scheme; libgodot embedding is a native engine in the app, not a web page |
 | Accessibility | canvas: none built in; we keep the native List view and DOM hover cards | the same; Pixi has an accessibility plugin (DOM shadows for interactive objects) | AccessKit screen-reader support on desktop; the web export has none |
 | Licence | MIT | MIT (plugins MIT) | MIT |
@@ -60,7 +60,8 @@ orders of magnitude bigger, needs threads/isolation or a degraded build,
 and moves the town into an editor and language the rest of the app does
 not use.
 
-Note: Phaser 4 (4.x, MIT) is now current; this spike uses 3.90, the last
-3.x, as asked. Moving to 4 is mostly mechanical (the WebGL renderer was
-rewritten; the scene, tilemap and tween APIs carry over) and is worth doing
-before the real build.
+The page is on Phaser 4.2.1 (moved from 3.90): the town's code needed no
+change (types, scenes, tilemaps, tweens, input, blend modes, generated
+textures all carried over); the bundle grew by 176 KB minified (40 KB gzip);
+the esbuild defines for the Canvas renderer and plugins are gone (4 reads
+only `WEBGL_RENDERER`/`WEBGL_DEBUG`).

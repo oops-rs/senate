@@ -8,9 +8,13 @@
 import { hash } from "./model.ts";
 
 export const TILE = 16;
-/** A lot: its house, its yard, the street below and the avenue on its left. */
-export const LOT_W = 20;
-export const LOT_H = 16;
+/**
+ * A lot, snug: the avenue (2 columns) on its left, the house (8 × 5) with a
+ * column of garden either side, a yard of two rows of senators, the street
+ * (2 rows) below.
+ */
+export const LOT_W = 14;
+export const LOT_H = 11;
 /** Lots each way from the centre: (2R+1)² cells. */
 export const RINGS = 3;
 /** Grass around the outermost lots. */
@@ -32,10 +36,10 @@ export function lot(cell: Cell): Rect {
   return { x: MARGIN + (cell.x + RINGS) * LOT_W, y: MARGIN + 2 + (cell.y + RINGS) * LOT_H, w: LOT_W, h: LOT_H };
 }
 
-/** The house on a lot: 8 × 5 tiles near its top, centred. */
+/** The house on a lot: 8 × 5 tiles at its top, between avenue and garden. */
 export function house(cell: Cell): Rect {
   const l = lot(cell);
-  return { x: l.x + 6, y: l.y + 2, w: 8, h: 5 };
+  return { x: l.x + 3, y: l.y + 1, w: 8, h: 5 };
 }
 
 /** The door: the middle of the house's bottom row, in tiles. */
@@ -49,11 +53,19 @@ export const streetY = (cell: Cell) => (lot(cell).y + LOT_H - 1) * TILE;
 /** The avenue on a lot's left: its two left columns. Its centre line, in px. */
 export const avenueX = (cell: Cell) => (lot(cell).x + 1) * TILE;
 
-/** Where the `i`th senator of a house stands in its yard, in px. */
+/** Where the `i`th senator of a house stands in its yard (seven a row, two rows), in px. */
 export function seat(cell: Cell, i: number): Point {
   const l = lot(cell);
-  const row = Math.floor(i / 6), col = i % 6;
-  return { x: (l.x + 5 + col * 2 + 0.5) * TILE, y: (l.y + 9 + row * 2 + 1) * TILE };
+  const row = Math.floor(i / 7) % 2, col = i % 7;
+  return { x: (l.x + 3 + col * 1.4 + 0.5) * TILE, y: (l.y + 7 + row * 1.5) * TILE };
+}
+
+/** The rectangle the occupied lots cover, in px: what "fit" frames. */
+export function occupied(cells: Cell[]): Rect {
+  const ls = cells.map(lot);
+  const x0 = Math.min(...ls.map((l) => l.x)), y0 = Math.min(...ls.map((l) => l.y)) - 1;
+  const x1 = Math.max(...ls.map((l) => l.x + l.w)) + 2, y1 = Math.max(...ls.map((l) => l.y + l.h));
+  return { x: x0 * TILE, y: y0 * TILE, w: (x1 - x0) * TILE, h: (y1 - y0) * TILE };
 }
 
 export const px = (p: Point): Point => ({ x: (p.x + 0.5) * TILE, y: (p.y + 0.5) * TILE });
