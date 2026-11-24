@@ -381,3 +381,61 @@ extension ConversationPageTests {
         #expect(link == "https://example.test/pr/1")
     }
 }
+
+extension ConversationPageTests {
+    /// The page never scrolls sideways: long unbroken tokens wrap, wide
+    /// tables and code scroll inside their own box, a long command title
+    /// is cut, at every width down to the window's narrowest.
+    @Test func thePageNeverScrollsSideways() async throws {
+        let token = String(repeating: "x", count: 400)
+        let table = "| " + (1...30).map { "column\($0)" }.joined(separator: " | ") + " |\n|"
+            + String(repeating: "---|", count: 30) + "\n| " + (1...30).map { "v\($0)" }.joined(separator: " | ") + " |"
+        let code = "```\n" + String(repeating: "let wide = 1; ", count: 60) + "\n```"
+        let page = try await page(["A token: \(token)", table, code, "`\(token)`"])
+        let call = { (seq: UInt64, title: String) in
+            TimelineEntry(seq: seq, at: nil, truncated: false, body: .tool(call: ToolCall(
+                callId: "c\(seq)", name: "Bash", kind: "shell", status: "completed", statusLabel: "completed",
+                title: title, cwd: nil, output: token, exitCode: 0, diff: nil)))
+        }
+        let rows = ConversationRows.rows([
+            call(1, "cargo test " + token), call(2, "git status " + token),
+            TimelineEntry(seq: 3, at: nil, truncated: false, body: .user(text: token)),
+            call(4, "ls " + token),
+        ])
+        ConversationPage.fixtureRows["wide"] = rows
+        for width in [360.0, 480.0, 700.0, 1000.0] {
+            page.web.setFrameSize(NSSize(width: width, height: 600))
+            try await Task.sleep(for: .milliseconds(80))
+            let sizes = await page.evaluate("""
+                const s = document.scrollingElement;
+                return s.scrollWidth + '/' + s.clientWidth
+                """) as? String ?? ""
+            let parts = sizes.split(separator: "/").compactMap { Int($0) }
+            #expect(parts.count == 2 && parts[0] <= parts[1], "messages at \(width): \(sizes)")
+        }
+        let guarded = await page.evaluate("""
+            const s = getComputedStyle(document.documentElement);
+            return s.overscrollBehaviorX + '/' + s.overflowX
+            """) as? String
+        #expect(guarded == "none/hidden", "no sideways bounce: \(guarded ?? "nil")")
+        page.show(.fixtureRows("wide"))
+        for _ in 0..<100 {
+            if await page.evaluate("return document.querySelectorAll('.k-group').length") as? Int == 1 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        _ = await page.evaluate("""
+            document.querySelectorAll('.k-group .tool-head, .k-tool .tool-head').forEach(h => h.click());
+            return true
+            """)
+        for width in [360.0, 700.0] {
+            page.web.setFrameSize(NSSize(width: width, height: 600))
+            try await Task.sleep(for: .milliseconds(80))
+            let sizes = await page.evaluate("""
+                const s = document.scrollingElement;
+                return s.scrollWidth + '/' + s.clientWidth
+                """) as? String ?? ""
+            let parts = sizes.split(separator: "/").compactMap { Int($0) }
+            #expect(parts.count == 2 && parts[0] <= parts[1], "commands at \(width): \(sizes)")
+        }
+    }
+}

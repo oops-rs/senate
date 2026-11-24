@@ -5,6 +5,9 @@
 :root { --fg: var(--light-fg); --dim: var(--light-dim); --accent: var(--light-accent); --agent: var(--light-agent); --surface: var(--light-surface); --container: var(--light-container); --high: var(--light-high); --outline: var(--light-outline); --success: var(--light-success); --danger: var(--light-danger); --success-bg: var(--light-success-bg); --danger-bg: var(--light-danger-bg); --committee: var(--light-committee); --attention: var(--light-attention); --attention-bg: var(--light-attention-bg); --tok-keyword: var(--light-tok-keyword); --tok-string: var(--light-tok-string); --tok-number: var(--light-tok-number); --tok-comment: var(--light-tok-comment); --tok-type: var(--light-tok-type); --tok-name: var(--light-tok-name); --tok-operator: var(--light-tok-operator); color-scheme: light dark; }
 @media (prefers-color-scheme: dark) { :root { --fg: var(--dark-fg); --dim: var(--dark-dim); --accent: var(--dark-accent); --agent: var(--dark-agent); --surface: var(--dark-surface); --container: var(--dark-container); --high: var(--dark-high); --outline: var(--dark-outline); --success: var(--dark-success); --danger: var(--dark-danger); --success-bg: var(--dark-success-bg); --danger-bg: var(--dark-danger-bg); --committee: var(--dark-committee); --attention: var(--dark-attention); --attention-bg: var(--dark-attention-bg); --tok-keyword: var(--dark-tok-keyword); --tok-string: var(--dark-tok-string); --tok-number: var(--dark-tok-number); --tok-comment: var(--dark-tok-comment); --tok-type: var(--dark-tok-type); --tok-name: var(--dark-tok-name); --tok-operator: var(--dark-tok-operator); } }
 html, body { margin: 0; background: var(--surface); color: var(--fg); }
+/* A vertical scroll view: the page neither scrolls nor bounces sideways
+   (wide tables and code scroll inside their own box). */
+html { overflow-x: hidden; overscroll-behavior-x: none; }
 body { font: 14px/1.5 -apple-system, "SF Pro Text", "PingFang SC", sans-serif; -webkit-font-smoothing: antialiased; }
 main { max-width: 700px; margin: 0 auto; padding: 8px 24px 24px; }
 .row { margin: 18px 0; overflow-wrap: anywhere; }
@@ -23,7 +26,7 @@ main { max-width: 700px; margin: 0 auto; padding: 8px 24px 24px; }
 .thinking-toggle { color: var(--dim); font-size: 12px; margin-bottom: 6px; }
 .thinking { color: var(--dim); font-style: italic; font-size: 13px; white-space: pre-wrap; margin: 4px 0 8px 15px; }
 .tool-head { display: flex; gap: 8px; align-items: center; background: var(--container); border-radius: 10px; padding: 7px 12px; font: 12.5px ui-monospace, "SF Mono", monospace; }
-.tool-head .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-head .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-head .kind { color: var(--dim); width: 16px; text-align: center; }
 .ok { color: var(--success); } .fail { color: var(--danger); } .run { color: var(--dim); }
 .output { max-height: 320px; overflow: auto; background: var(--high); border-radius: 10px; margin-top: 4px; padding: 8px 12px; font: 12.5px/1.45 ui-monospace, "SF Mono", monospace; white-space: pre-wrap; }
