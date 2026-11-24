@@ -1,7 +1,7 @@
 //! An in-person decision on a local cross-committee message awaiting the desk.
 //! Only the socket handler can enter the mutation, after checking the peer.
 use super::*;
-use crate::ipc::{DeskDecision, DeskItemDetail, DeskOutcome};
+use crate::ipc::{DeskAction, DeskDecision, DeskItemDetail, DeskOutcome};
 use senate_core::{
     Origin, SenatorKind,
     api::{Me, Resolved},
@@ -107,15 +107,42 @@ impl Shared {
         let (_, events) = self.thread_events(&committee, root).await?;
         let me = self.api.me().await.map_err(server_error)?;
         let destination = self.desk_destination(&item).await;
+        let docket = self.docket_item(&committee, seq).await;
         let blocked = if actor(&me).is_none() {
             Some(self.desk_no_authority().message)
         } else if let Err(error) = &destination {
             Some(error.message.clone())
         } else {
-            self.docket_item(&committee, seq)
-                .await
-                .err()
-                .map(|error| error.message)
+            docket.as_ref().err().map(|error| error.message.clone())
+        };
+        let (actions, waits_on) = match (actor(&me), &docket) {
+            (None, _) => (Vec::new(), Some(self.desk_no_authority().message)),
+            // Not reachable now: say only that.
+            (Some(_), Err(error)) if error.code != codes::BAD_REQUEST => {
+                (Vec::new(), Some(error.message.clone()))
+            }
+            (Some(_), Err(_)) => (
+                Vec::new(),
+                Some(
+                    self.locale
+                        .pick(
+                            "它已不在 desk 上：已经有人处理了。",
+                            "It is no longer on the desk: it has been settled.",
+                        )
+                        .to_owned(),
+                ),
+            ),
+            (Some(_), Ok((on_desk, _))) => match self.desk_answerable(on_desk) {
+                Err(why) => (Vec::new(), Some(why)),
+                Ok(()) => {
+                    let mut actions = Vec::new();
+                    if destination.is_ok() {
+                        actions.extend([DeskAction::Forward, DeskAction::Refuse]);
+                    }
+                    actions.extend([DeskAction::Answer, DeskAction::Close]);
+                    (actions, None)
+                }
+            },
         };
         Ok(DeskItemDetail {
             origin: origin_name(&item),
@@ -123,7 +150,34 @@ impl Shared {
             events,
             destination: destination.ok().map(|target| target.name()),
             blocked,
+            actions,
+            waits_on,
         })
+    }
+
+    /// Whether the Speaker in person may answer or close this desk item:
+    /// one addressed to the Speaker, to an away agent, or put to it to
+    /// pick; not a hosted approval (decided in Approvals), nor one held for
+    /// an offline child Senate. Why not, ready to show.
+    fn desk_answerable(&self, item: &senate_core::DocketItem) -> Result<(), String> {
+        if item.event.is_hosted_approval(&self.people()) {
+            return Err(self
+                .locale
+                .pick(
+                    "这是一个权限请求：在「批准」里回答它。",
+                    "A permission prompt: answer it from Approvals.",
+                )
+                .to_owned());
+        }
+        match &item.awaiting {
+            senate_core::Awaiting::ChildOffline { child } => Err(self.locale.pick(
+                format!("子 Senate {child} 离线；它在那里等着。"),
+                format!("The child Senate {child} is offline; it is held for it."),
+            )),
+            senate_core::Awaiting::Addressed
+            | senate_core::Awaiting::Away { .. }
+            | senate_core::Awaiting::Pick { .. } => Ok(()),
+        }
     }
 
     pub(super) async fn on_desk_decide(
@@ -150,13 +204,24 @@ impl Shared {
                 .meta
                 .get(meta::DESK_OUTCOME)
                 .and_then(|value| serde_json::from_value::<DeskOutcome>(value.clone()).ok());
-            if let Some(DeskOutcome::Refused { seq, .. }) = &mut recorded {
+            if let Some(
+                DeskOutcome::Refused { seq, .. }
+                | DeskOutcome::Answered { seq, .. }
+                | DeskOutcome::Closed { seq, .. },
+            ) = &mut recorded
+            {
                 *seq = existing.seq;
             }
             let matches = match (&decision, &recorded) {
                 (DeskDecision::Forward, Some(DeskOutcome::Delivered { .. })) => true,
                 (DeskDecision::Refuse { reason }, Some(DeskOutcome::Refused { .. })) => {
                     existing.body == reason.trim()
+                }
+                (DeskDecision::Answer { body }, Some(DeskOutcome::Answered { .. })) => {
+                    existing.body == body.trim()
+                }
+                (DeskDecision::Close { reason }, Some(DeskOutcome::Closed { reason: was, .. })) => {
+                    reason.as_deref().map(str::trim).filter(|r| !r.is_empty()) == was.as_deref()
                 }
                 _ => false,
             };
@@ -176,8 +241,16 @@ impl Shared {
                 "the desk action id already names a different event",
             ));
         }
-        self.docket_item(&committee, seq).await?;
-        let target = self.desk_destination(&item).await?;
+        // Not on the docket: whichever decision landed first settled it.
+        let (on_desk, _) = self.docket_item(&committee, seq).await.map_err(|error| {
+            if error.code != codes::BAD_REQUEST {
+                return error;
+            }
+            IpcError::bad_request(self.locale.pick(
+                "它已不在 desk 上：已经有人处理了（也许是 desk 上的 secretary）。",
+                "It is no longer on the desk: it has been settled already (perhaps by a secretary working the desk).",
+            ))
+        })?;
         let asker = item.on_behalf_of.clone().unwrap_or(item.from.clone());
         let office = |event: NewEvent| {
             event
@@ -193,7 +266,54 @@ impl Shared {
             )
         };
         match decision {
+            DeskDecision::Answer { body } => {
+                self.desk_answerable(&on_desk)
+                    .map_err(IpcError::bad_request)?;
+                let body = body.trim();
+                if body.is_empty() {
+                    return Err(IpcError::bad_request(
+                        self.locale.pick("回答不能为空。", "The answer is empty."),
+                    ));
+                }
+                let posted = self
+                    .post(source(Kind::Answer, body.to_owned()).with_meta(
+                        meta::DESK_OUTCOME,
+                        serde_json::json!({"kind": "answered", "by": me.person, "committee": committee, "seq": 0}),
+                    ))
+                    .await?;
+                Ok(DeskOutcome::Answered {
+                    committee,
+                    seq: posted.seq,
+                })
+            }
+            DeskDecision::Close { reason } => {
+                self.desk_answerable(&on_desk)
+                    .map_err(IpcError::bad_request)?;
+                let reason = reason
+                    .map(|r| r.trim().to_owned())
+                    .filter(|r| !r.is_empty());
+                let mut status =
+                    senate_core::StatusPayload::new(senate_core::StatusState::Archived);
+                status.reason = reason.clone();
+                let event = office(
+                    NewEvent::new(committee.clone(), Kind::Status, Address::Speaker, "")
+                        .in_thread(seq)
+                        .with_id(id.clone())
+                        .with_meta(meta::STATUS, status.value()),
+                )
+                .with_meta(
+                    meta::DESK_OUTCOME,
+                    serde_json::json!({"kind": "closed", "by": me.person, "reason": reason, "committee": committee, "seq": 0}),
+                );
+                let posted = self.post(event).await?;
+                Ok(DeskOutcome::Closed {
+                    committee,
+                    seq: posted.seq,
+                    reason,
+                })
+            }
             DeskDecision::Forward => {
+                let target = self.desk_destination(&item).await?;
                 let delivery_id = EventId::derived(
                     item.ts.timestamp_millis().cast_unsigned(),
                     &format!("person-desk-forward:{}:{id}", item.id),
@@ -246,6 +366,7 @@ impl Shared {
                 Ok(outcome)
             }
             DeskDecision::Refuse { reason } => {
+                self.desk_destination(&item).await?;
                 let reason = reason.trim();
                 if reason.is_empty() {
                     return Err(IpcError::bad_request(

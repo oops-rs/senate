@@ -10,19 +10,12 @@ use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
 use senate_bridge::ipc::{
     HostState, HostedRuntime, Request, RosterCommittee, SessionsReply, SpawnReply,
 };
-use senate_bridge::{BridgeConfig, Paths, testenv};
+use senate_bridge::{BridgeConfig, testenv};
 use senate_core::alias::AliasName;
 use senate_core::{Address, Hub, Kind, Locale, NewEvent, SenatorName};
 use std::os::unix::fs::PermissionsExt;
 
 const CLI: &str = env!("CARGO_BIN_EXE_senate-e2e-cli");
-
-struct Terminals(Paths);
-impl Drop for Terminals {
-    fn drop(&mut self) {
-        senate_bridge::host::kill_all(&self.0);
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replacing_a_hosted_chair_transfers_its_alias_and_prompt_on_the_server() {
@@ -58,7 +51,6 @@ async fn replacing_a_hosted_chair_transfers_its_alias_and_prompt_on_the_server()
     laptop.config = BridgeConfig::new(&world.server_url(), "tok-alice", name("alice"));
     laptop.config.locale = Locale::En;
     laptop.config.committees.push(committee());
-    let _cleanup = Terminals(laptop.paths.clone());
     laptop.daemon = Some(
         start_with_host_binary(
             DaemonOptions {
@@ -95,6 +87,7 @@ async fn replacing_a_hosted_chair_transfers_its_alias_and_prompt_on_the_server()
     );
     let prompt = "Continue the gateway review";
     let mut cmd = tokio::process::Command::new(CLI);
+    cmd.kill_on_drop(true);
     let out = testenv::isolate_async(&mut cmd, root.path())
         .env("SENATE_HOME", laptop.paths.home())
         .args(["session", "replace", "reviewer", "--prompt", prompt])
@@ -151,6 +144,7 @@ async fn replacing_a_hosted_chair_transfers_its_alias_and_prompt_on_the_server()
     // by the original ID when otherwise eligible.
     let list = |args: &[&str]| {
         let mut cmd = tokio::process::Command::new(CLI);
+        cmd.kill_on_drop(true);
         testenv::isolate_async(&mut cmd, root.path())
             .env("SENATE_HOME", laptop.paths.home())
             .args(args);

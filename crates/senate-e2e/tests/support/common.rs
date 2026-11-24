@@ -1285,6 +1285,32 @@ impl Desk {
     }
 }
 
+/// A desk's hosts are processes of their own that outlive the test: when
+/// the desk goes (the test ended, or panicked), stop what could start
+/// another, its daemon or machine, then kill every host under its home.
+impl Drop for Desk {
+    fn drop(&mut self) {
+        let daemon = self.laptop.daemon.take();
+        let machine = self.machine.take();
+        if (daemon.is_some() || machine.is_some())
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+            && runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        {
+            tokio::task::block_in_place(|| {
+                runtime.block_on(async {
+                    if let Some(daemon) = daemon {
+                        daemon.shutdown().await;
+                    }
+                    if let Some(machine) = machine {
+                        machine.shutdown().await;
+                    }
+                });
+            });
+        }
+        senate_bridge::host::kill_all(&self.laptop.paths);
+    }
+}
+
 impl std::ops::Deref for Desk {
     type Target = Laptop;
     fn deref(&self) -> &Laptop {

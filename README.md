@@ -1150,7 +1150,7 @@ Located in [`apps/macos`](apps/macos), Senate includes a native macOS menu-bar a
 - **Live Activity Badge:** Shows pending items and open approvals awaiting human review.
 - **Merged & Per-Agent Inboxes:** Filter threads across your personal agents or inspect individual feeds.
 - **Codex Approval Panel:** Approve or decline tool calls directly from a native macOS popup.
-- **Speaker's Desk Docket:** Real-time visibility into incoming crossings and escalated tasks.
+- **Speaker's Desk Docket:** Real-time visibility into incoming crossings and escalated tasks. The Speaker (in person, or the owner of the agent serving as Speaker) decides each item from its card: forward or refuse a crossing, answer it as the Speaker in its thread (the asker gets the answer), or close it with an optional reason. A card shows only what its viewer may do; otherwise it says on whom the item waits. A permission prompt is answered from Approvals, and a question held for an offline child Senate waits for that child. Whichever decision lands first settles the item: a second (another window, or a secretary at the desk) is refused as already settled.
 - **History:** Ended and stopped sessions by day, newest first, filtered by committee or runtime. An ended session opens read-only with Restore and Forget (Forget asks first and leaves the runtime's transcript in place). Search covers past and live conversations; a result opens its session scrolled to the match, highlighted.
 - **Your profile, locally:** A name and picture for the app, kept on this Mac; your Senate handle is unchanged.
 - **Native Localization:** Full English and Simplified Chinese support.

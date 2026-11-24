@@ -242,6 +242,9 @@ pub struct Inner {
     pub events: BTreeMap<String, Vec<Event>>,
     pub reject_appends: bool,
     pub reject_append_containing: Option<String>,
+    /// Roots a test puts on the Speaker's desk and why they wait, beside
+    /// the requests to the Speaker that carry an intended seat.
+    pub desk_awaiting: BTreeMap<(String, Seq), senate_core::Awaiting>,
     append_barrier: Option<AppendBarrier>,
     pub transient_append_delay: Option<Duration>,
     pub transient_append_attempts: usize,
@@ -1170,22 +1173,24 @@ async fn docket(
             .filter_map(|event| {
                 let intended = event
                     .meta
-                    .get(senate_core::meta::INTENDED)?
-                    .as_str()?
-                    .parse()
-                    .ok()?;
-                (event.kind == Kind::Request
-                    && event.to.contains(&Address::Speaker)
-                    && !events.iter().any(|reply| {
-                        reply.thread == Some(event.seq)
-                            && reply.from == Address::Speaker
-                            && (reply.kind == Kind::Answer
-                                || reply.meta.contains_key(senate_core::meta::FORWARDED_TO))
-                    }))
-                .then(|| senate_core::DocketItem {
+                    .get(senate_core::meta::INTENDED)
+                    .and_then(|v| v.as_str()?.parse().ok());
+                let set = inner.desk_awaiting.get(&(committee.clone(), event.seq));
+                let forwardable = intended.is_some()
+                    && event.kind == Kind::Request
+                    && event.to.contains(&Address::Speaker);
+                // Like the server: the Speaker writing in its thread, or
+                // its archive, settles it.
+                let settled = events.iter().any(|reply| {
+                    reply.thread == Some(event.seq)
+                        && (reply.from == Address::Speaker
+                            || senate_core::StatusPayload::of(reply)
+                                .is_some_and(|s| s.state == senate_core::StatusState::Archived))
+                });
+                ((forwardable || set.is_some()) && !settled).then(|| senate_core::DocketItem {
                     event: event.clone(),
-                    awaiting: senate_core::Awaiting::Addressed,
-                    intended: Some(intended),
+                    awaiting: set.cloned().unwrap_or(senate_core::Awaiting::Addressed),
+                    intended,
                 })
             })
             .collect::<Vec<_>>()
@@ -1448,6 +1453,7 @@ impl FakeServer {
                 events: BTreeMap::new(),
                 reject_appends: false,
                 reject_append_containing: None,
+                desk_awaiting: BTreeMap::new(),
                 append_barrier: None,
                 transient_append_delay: None,
                 transient_append_attempts: 0,

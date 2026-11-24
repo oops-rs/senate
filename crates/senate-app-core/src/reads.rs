@@ -73,6 +73,55 @@ pub struct StatusLink {
     pub url: String,
 }
 
+/// What the person may do with a desk item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum DeskAction {
+    Forward,
+    Refuse,
+    Answer,
+    Close,
+}
+
+impl From<senate_bridge::ipc::DeskAction> for DeskAction {
+    fn from(action: senate_bridge::ipc::DeskAction) -> Self {
+        use senate_bridge::ipc::DeskAction as A;
+        match action {
+            A::Forward => Self::Forward,
+            A::Refuse => Self::Refuse,
+            A::Answer => Self::Answer,
+            A::Close => Self::Close,
+        }
+    }
+}
+
+/// A decision on a desk item ([`crate::ffi::AppCore::decide_desk_item`]).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum DeskChoice {
+    Forward,
+    Refuse {
+        reason: String,
+    },
+    /// Answer as the Speaker (Markdown).
+    Answer {
+        body: String,
+    },
+    /// Close it with no answer, saying why when given.
+    Close {
+        reason: Option<String>,
+    },
+}
+
+impl From<DeskChoice> for senate_bridge::ipc::DeskDecision {
+    fn from(choice: DeskChoice) -> Self {
+        match choice {
+            DeskChoice::Forward => Self::Forward,
+            DeskChoice::Refuse { reason } => Self::Refuse { reason },
+            DeskChoice::Answer { body } => Self::Answer { body },
+            DeskChoice::Close { reason } => Self::Close { reason },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct DeskItemView {
     pub event_id: String,
@@ -82,38 +131,85 @@ pub struct DeskItemView {
     pub destination: Option<String>,
     pub destination_label: Option<String>,
     pub blocked: Option<String>,
+    /// Exactly what this person may do with it now.
+    pub actions: Vec<DeskAction>,
+    /// When nobody here can act: on whom or what it waits.
+    pub waits_on: Option<String>,
+}
+
+/// Which decision a [`DeskOutcomeView`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum DeskOutcomeKind {
+    Delivered,
+    Refused,
+    Answered,
+    Closed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct DeskOutcomeView {
+    pub kind: DeskOutcomeKind,
+    /// Kept for older callers: `kind == Delivered`.
     pub delivered: bool,
+    /// Where it went (delivered or refused); empty for an answer or close.
     pub destination: String,
     pub destination_label: String,
     pub committee: String,
     pub seq: u64,
+    /// Why it was closed, when said.
+    pub reason: Option<String>,
 }
 
 impl DeskOutcomeView {
     pub(crate) fn new(value: DeskOutcome, locale: Locale) -> Self {
-        let delivered = matches!(value, DeskOutcome::Delivered { .. });
-        let (destination, committee, seq) = match value {
+        let (kind, destination, committee, seq, reason) = match value {
             DeskOutcome::Delivered {
                 destination,
                 committee,
                 seq,
-            }
-            | DeskOutcome::Refused {
+            } => (
+                DeskOutcomeKind::Delivered,
                 destination,
                 committee,
                 seq,
-            } => (destination, committee, seq),
+                None,
+            ),
+            DeskOutcome::Refused {
+                destination,
+                committee,
+                seq,
+            } => (DeskOutcomeKind::Refused, destination, committee, seq, None),
+            DeskOutcome::Answered { committee, seq } => (
+                DeskOutcomeKind::Answered,
+                String::new(),
+                committee,
+                seq,
+                None,
+            ),
+            DeskOutcome::Closed {
+                committee,
+                seq,
+                reason,
+            } => (
+                DeskOutcomeKind::Closed,
+                String::new(),
+                committee,
+                seq,
+                reason,
+            ),
         };
         Self {
-            destination_label: crate::names::current().desk_destination(&destination, locale),
-            delivered,
+            destination_label: if destination.is_empty() {
+                String::new()
+            } else {
+                crate::names::current().desk_destination(&destination, locale)
+            },
+            kind,
+            delivered: kind == DeskOutcomeKind::Delivered,
             destination,
             committee: committee.to_string(),
             seq: seq.0,
+            reason,
         }
     }
 }
@@ -143,6 +239,8 @@ pub(crate) fn desk_item_view(
             .map(|raw| crate::names::current().desk_destination(raw, locale)),
         destination: detail.destination,
         blocked: detail.blocked,
+        actions: detail.actions.into_iter().map(DeskAction::from).collect(),
+        waits_on: detail.waits_on,
     }
 }
 
