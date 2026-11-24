@@ -270,7 +270,11 @@ extension Perf {
                 try? await Task.sleep(for: .seconds(4))
             }
             await phase("open a 64 KiB call") {
-                let big = store.timeline?.rows.first { row in
+                let calls = (store.timeline?.rows ?? []).flatMap { row -> [ConversationRow] in
+                    if case let .tools(members) = row.kind { return members }
+                    return [row]
+                }
+                let big = calls.first { row in
                     if case let .tool(call) = row.kind { return (call.output?.utf8.count ?? 0) > 60_000 }
                     return false
                 }

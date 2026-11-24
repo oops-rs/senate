@@ -13,7 +13,10 @@
 "use strict";
 (function () {
   const post = (msg) => window.webkit.messageHandlers.senate.postMessage(msg);
-  let labels = { thinking: "Thinking", copy: "Copy", earlier: "Show earlier", working: "working" };
+  let labels = { thinking: "Thinking", copy: "Copy", earlier: "Show earlier", working: "working", commands: "%lld commands" };
+  // A row's key: its id at the top level; "m" and its id inside a group of
+  // commands (whose own id is its first command's).
+  const key = (row) => row.key || String(row.id);
   const rows = new Map();       // row id -> row data
   const open = new Set();       // ids of open tool rows / thinking lines
   const docs = new Map();       // message key -> { key, el, blocks: Map(id -> block) }
@@ -239,9 +242,9 @@
   function thinkingArea(row) {
     const area = el("div", "thinking-area");
     if (row.thinking && row.thinking.length) {
-      const isOpen = open.has(row.id);
+      const isOpen = open.has(key(row));
       const t = el("div", "thinking-toggle", (isOpen ? "▾ " : "▸ ") + labels.thinking);
-      t.dataset.toggle = String(row.id);
+      t.dataset.toggle = key(row);
       t.setAttribute("role", "button"); t.setAttribute("aria-expanded", String(isOpen));
       area.appendChild(t);
       if (isOpen) area.appendChild(thinkingBlock(row));
@@ -256,9 +259,27 @@
     return messageBody(md);
   }
 
+  function groupHead(row) {
+    const k = key(row), isOpen = open.has(k), ms = row.members;
+    const done = (m) => m.tool.status === "completed" || m.tool.status === "failed";
+    const running = ms.find((m) => !done(m));
+    const failed = ms.filter((m) => m.tool.status === "failed" || (m.tool.exit != null && m.tool.exit !== 0)).length;
+    const shown = running || ms[ms.length - 1];
+    const head = el("div", "tool-head group-head");
+    head.dataset.toggle = k;
+    head.setAttribute("role", "button"); head.setAttribute("aria-expanded", String(isOpen));
+    head.appendChild(el("span", "kind", "≡"));
+    head.appendChild(el("span", "count", labels.commands.replace("%lld", String(ms.length))));
+    head.appendChild(el("span", "title", shown.tool.title));
+    if (failed) head.appendChild(el("span", "fail", "✕ " + failed));
+    else head.appendChild(el("span", running ? "run" : "ok", running ? "…" : "✓"));
+    head.appendChild(el("span", "run", isOpen ? "▾" : "▸"));
+    return head;
+  }
+
   function render(row) {
     const r = el("div", "row k-" + row.kind);
-    r.dataset.id = String(row.id);
+    r.dataset.id = key(row);
     switch (row.kind) {
       case "user": r.appendChild(el("div", "typed", row.text)); break;
       case "assistant":
@@ -276,10 +297,26 @@
         if (row.mine) { r.appendChild(content); r.appendChild(head); } else { r.appendChild(head); r.appendChild(content); }
         break;
       }
+      case "group": {
+        // Commands back to back: a count and the running (else the last)
+        // one; open, each as its own row. The members are always here,
+        // hidden while closed, so find and select-all reach them.
+        r.appendChild(groupHead(row));
+        const box = el("div", "group-members");
+        box.hidden = !open.has(key(row));
+        if (row.thinking && row.thinking.length) box.appendChild(thinkingBlock(row));
+        for (const m of row.members) {
+          m.key = "m" + m.id;
+          rows.set(m.key, m);
+          box.appendChild(render(m));
+        }
+        r.appendChild(box);
+        break;
+      }
       case "tool": {
-        const c = row.tool, isOpen = open.has(row.id);
+        const c = row.tool, isOpen = open.has(key(row));
         const head = el("div", "tool-head");
-        head.dataset.toggle = String(row.id);
+        head.dataset.toggle = key(row);
         head.setAttribute("role", "button"); head.setAttribute("aria-expanded", String(isOpen));
         head.appendChild(el("span", "kind", { shell: "›", read: "▤", edit: "✎", write: "✎", search: "⌕", fetch: "◎", sub_agent: "◆" }[c.kind] || "•"));
         head.appendChild(el("span", "title", c.title));
@@ -366,8 +403,26 @@
   // A row that changed: a Markdown message keeps its body and applies the
   // diff to it; anything else is drawn again.
   function replace(row) {
-    rows.set(row.id, row);
-    const old = main().querySelector('[data-id="' + row.id + '"]');
+    rows.set(key(row), row);
+    const old = main().querySelector('[data-id="' + key(row) + '"]');
+    if (old && row.kind === "group" && old.classList.contains("k-group")) {
+      // A run that grew or changed: its head, and only the members that did.
+      old.querySelector(":scope > .tool-head").replaceWith(groupHead(row));
+      const box = old.querySelector(":scope > .group-members");
+      const th = box.querySelector(":scope > .thinking");
+      if (row.thinking && row.thinking.length) {
+        if (th) th.textContent = row.thinking.join("\n\n"); else box.prepend(thinkingBlock(row));
+      } else if (th) th.remove();
+      for (const m of row.members) {
+        m.key = "m" + m.id;
+        const before = rows.get(m.key);
+        rows.set(m.key, m);
+        const e = box.querySelector(':scope > [data-id="' + m.key + '"]');
+        if (!e) box.appendChild(render(m));
+        else if (JSON.stringify(before) !== JSON.stringify(m)) e.replaceWith(render(m));
+      }
+      return;
+    }
     const doc = row.md ? docs.get(row.md.key) : null;
     if (old && doc && old.contains(doc.el)) {
       if (row.kind === "assistant") old.querySelector(":scope > .thinking-area").replaceWith(thinkingArea(row));
@@ -397,14 +452,14 @@
         forgetDocs();
         clearFind();
         for (const r of Array.from(main().querySelectorAll(".row"))) r.remove();
-        for (const row of op.rows) { rows.set(row.id, row); main().appendChild(render(row)); }
+        for (const row of op.rows) { rows.set(key(row), row); main().appendChild(render(row)); }
         break;
       case "upsert":
         for (const row of op.rows) replace(row);
         break;
       case "prepend": {
         const first = main().querySelector(".row");
-        for (const row of op.rows) { rows.set(row.id, row); main().insertBefore(render(row), first); }
+        for (const row of op.rows) { rows.set(key(row), row); main().insertBefore(render(row), first); }
         for (const row of op.changed || []) replace(row);
         askedOlder = false;
         break;
@@ -425,17 +480,26 @@
     if (op.type === "prepend") nearTop();
   }
 
-  function toggle(id) {
+  function toggle(k) {
     const anchor = firstVisible();
-    if (open.has(id)) open.delete(id); else open.add(id);
-    const row = rows.get(id);
-    const old = main().querySelector('[data-id="' + id + '"]');
+    if (open.has(k)) open.delete(k); else open.add(k);
+    const row = rows.get(k);
+    const old = main().querySelector('[data-id="' + k + '"]');
     if (row && old) {
-      if (row.kind === "assistant") old.querySelector(":scope > .thinking-area").replaceWith(thinkingArea(row));
-      else old.replaceWith(render(row));
+      if (row.kind === "group") {
+        old.querySelector(":scope > .tool-head").replaceWith(groupHead(row));
+        old.querySelector(":scope > .group-members").hidden = !open.has(k);
+      } else if (row.kind === "assistant") {
+        old.querySelector(":scope > .thinking-area").replaceWith(thinkingArea(row));
+      } else {
+        old.replaceWith(render(row));
+      }
+      // A command opened from outside (a link, a search) inside a closed group.
+      const box = main().querySelector('[data-id="' + k + '"]')?.closest(".group-members");
+      if (box && box.hidden && open.has(k)) toggle(box.parentElement.dataset.id);
     }
     keep(anchor);
-    post({ action: "expand", id, open: open.has(id) });
+    post({ action: "expand", id: Number(String(k).replace(/^m/, "")), open: open.has(k) });
   }
 
   document.addEventListener("click", (e) => {
@@ -444,7 +508,7 @@
     const copy = e.target.closest("button.copy");
     if (copy) { post({ action: "copy", text: copy.closest(".code").querySelector("pre > code").textContent }); return; }
     const t = e.target.closest("[data-toggle]");
-    if (t && !window.getSelection().toString()) { toggle(Number(t.dataset.toggle)); return; }
+    if (t && !window.getSelection().toString()) { toggle(t.dataset.toggle); return; }
     const s = e.target.closest(".senate[data-thread]");
     if (s && !window.getSelection().toString()) {
       post({ action: "thread", committee: s.dataset.committee, thread: Number(s.dataset.thread) });
@@ -601,6 +665,10 @@
     } else if (found.length) {
       foundAt = (foundAt + (forward ? 1 : -1) + found.length) % found.length;
     }
+    if (foundAt >= 0) {
+      const box = found[foundAt].startContainer.parentElement?.closest(".group-members");
+      if (box && box.hidden) toggle(box.parentElement.dataset.id);
+    }
     paint();
     post({ action: "found", count: found.length, index: found.length ? foundAt + 1 : 0 });
   }
@@ -667,7 +735,9 @@
     labels(l) { labels = Object.assign(labels, l); },
     debug(on) { document.querySelector(".debug").hidden = !on; debug.note("debug overlay on (⌥D)"); },
     scrollToRow(id, at) {
-      const r = main().querySelector('[data-id="' + id + '"]');
+      let r = main().querySelector('[data-id="' + id + '"]') || main().querySelector('[data-id="m' + id + '"]');
+      const group = r && r.closest(".group-members");
+      if (group && group.hidden) { toggle(group.parentElement.dataset.id); r = main().querySelector('[data-id="m' + id + '"]'); }
       if (!r) return;
       const box = r.getBoundingClientRect();
       const y = at === "top" ? box.top - 8 : at === "bottom" ? box.bottom - window.innerHeight + 16 :
@@ -675,8 +745,15 @@
       scroller().scrollTop += y;
       stuck = measureBottom();
     },
+    scrollToTop() { scroller().scrollTop = 0; stuck = measureBottom(); nearTop(); },
+    // Every group of commands and every command open.
+    expandAll() {
+      for (const [k, row] of Array.from(rows)) {
+        if ((row.kind === "group" || row.kind === "tool") && !open.has(k)) toggle(k);
+      }
+    },
     openCall(callId) {
-      for (const [id, row] of rows) if (row.kind === "tool" && row.tool.callId === callId && !open.has(id)) toggle(id);
+      for (const [k, row] of rows) if (row.kind === "tool" && row.tool.callId === callId && !open.has(k)) toggle(k);
     },
     // A frame with rows in it, and (when it has Markdown) some rendered.
     shown: () => new Promise((r) => requestAnimationFrame(() => r(!!document.querySelector(".row") &&

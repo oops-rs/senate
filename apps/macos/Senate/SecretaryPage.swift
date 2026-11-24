@@ -88,6 +88,7 @@ private struct SecretaryIntro: View {
                 .padding(.horizontal, Theme.Space.xs)
                 .accessibilityAddTraits(.isHeader)
         }
+        .sharedBackgroundVisibility(.hidden)
     }
 
     static func explanation(_ state: SecretaryState) -> String {

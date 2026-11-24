@@ -370,6 +370,8 @@ struct SessionToolbar: ToolbarContent {
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
         }
+        // A title, on the window's ground: no glass behind it.
+        .sharedBackgroundVisibility(.hidden)
         ToolbarSpacer(.flexible)
         if let h = s.hosted {
             ToolbarItemGroup(placement: .primaryAction) {

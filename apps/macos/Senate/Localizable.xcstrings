@@ -2866,6 +2866,23 @@
         }
       }
     },
+    "session.commands": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld commands"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 个命令"
+          }
+        }
+      }
+    },
     "session.earlier": {
       "extractionState": "manual",
       "localizations": {
