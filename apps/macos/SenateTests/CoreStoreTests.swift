@@ -747,3 +747,37 @@ import SenateCore
         #expect(store.reveal == Reveal(sessionId: "past-3", seq: 2, query: "x"))
     }
 }
+
+extension CoreStoreTests {
+    /// "Show archived" lists the archived committees, remembers itself,
+    /// and Unarchive asks the core and takes the committee off the list.
+    @Test func showArchivedListsAndUnarchives() async throws {
+        core.archived = ["api-test", "old-docs"]
+        let store = store()
+        #expect(store.archived.isEmpty, "off by default: nothing read")
+        store.showArchived = true
+        await store.loadArchived()
+        #expect(store.archived == ["api-test", "old-docs"])
+        #expect(defaults.bool(forKey: "showArchived"))
+
+        #expect(await store.unarchive("api-test"))
+        #expect(core.calls.contains("unarchive:api-test"))
+        #expect(store.archived == ["old-docs"])
+
+        store.showArchived = false
+        #expect(store.archived.isEmpty)
+    }
+
+    /// A refusal (not the Speaker in person) is shown as the daemon said,
+    /// and the committee stays archived.
+    @Test func aRefusedUnarchiveShowsItsMessage() async throws {
+        core.archived = ["api-test"]
+        let store = store()
+        store.showArchived = true
+        await store.loadArchived()
+        core.failNext = .Failed(message: "Only the Speaker in person can unarchive a committee.")
+        #expect(await store.unarchive("api-test") == false)
+        #expect(store.actionError?.contains("Only the Speaker in person") == true)
+        #expect(store.archived == ["api-test"])
+    }
+}

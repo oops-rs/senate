@@ -212,11 +212,23 @@ private struct Sidebar: View {
                         SidebarFilter(store: store)
                     }
                 }
+                // Archived committees, when asked for: under their own
+                // heading, dimmed, not opened, each with Unarchive.
+                if store.showArchived && !store.archived.isEmpty {
+                    Section(L("sidebar.archived_heading")) {
+                        ForEach(store.archived, id: \.self) { name in
+                            ArchivedRow(store: store, committee: name)
+                                .selectionDisabled()
+                        }
+                    }
+                }
             }
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
         .environment(\.defaultMinListRowHeight, Theme.rowHeight)
+        // The archived committees: read when asked for, and on reconnecting.
+        .task(id: store.showArchived && store.state.online) { await store.loadArchived() }
     }
 
     private var searchField: some View {
@@ -395,11 +407,13 @@ private struct SidebarFilter: View {
     var body: some View {
         Menu {
             Toggle(L("roster.show_inactive"), isOn: $store.showInactive)
+            Toggle(L("roster.show_archived"), isOn: $store.showArchived)
         } label: {
-            Image(systemName: store.showInactive
+            let on = store.showInactive || store.showArchived
+            Image(systemName: on
                 ? "line.3.horizontal.decrease.circle.fill"
                 : "line.3.horizontal.decrease.circle")
-                .foregroundStyle(store.showInactive ? Theme.primary : Theme.onSurfaceVariant)
+                .foregroundStyle(on ? Theme.primary : Theme.onSurfaceVariant)
                 .frame(width: 22, height: 18)
                 .contentShape(Rectangle())
         }
@@ -409,7 +423,10 @@ private struct SidebarFilter: View {
         .fixedSize()
         .help(L("sidebar.filter"))
         .accessibilityLabel(L("sidebar.filter"))
-        .accessibilityValue(store.showInactive ? L("roster.show_inactive") : "")
+        .accessibilityValue([
+            store.showInactive ? L("roster.show_inactive") : nil,
+            store.showArchived ? L("roster.show_archived") : nil,
+        ].compactMap { $0 }.joined(separator: ", "))
     }
 }
 
@@ -765,5 +782,48 @@ struct FixedSymbol: View {
             .imageScale(.medium)
             .foregroundStyle(Theme.onSurfaceVariant)
             .accessibilityHidden(true)
+    }
+}
+
+/// An archived committee in the sidebar (with "Show archived" on): its
+/// name, dimmed, and Unarchive. It has no page to open.
+private struct ArchivedRow: View {
+    let store: CoreStore
+    let committee: String
+
+    var body: some View {
+        let busy = store.isBusy("unarchive:\(committee)")
+        HStack(spacing: 6) {
+            Image(systemName: "archivebox")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.onSurfaceVariant)
+                .accessibilityHidden(true)
+            Text(verbatim: committee)
+                .font(Theme.Fonts.row.weight(.semibold))
+                .foregroundStyle(Theme.onSurfaceVariant)
+                .lineLimit(1)
+            Spacer(minLength: Theme.Space.xs)
+            if busy {
+                ProgressView().controlSize(.mini)
+            } else {
+                Button { Task { await store.unarchive(committee) } } label: {
+                    Image(systemName: "arrow.uturn.backward.circle")
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                }
+                .buttonStyle(.plain)
+                .help(L("committees.unarchive_help", committee))
+                .accessibilityLabel(L("committees.unarchive"))
+                .disabled(!store.state.online)
+            }
+        }
+        .opacity(0.6)
+        .contextMenu {
+            Button(L("committees.unarchive")) { Task { await store.unarchive(committee) } }
+                .disabled(busy || !store.state.online)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(committee)
+        .accessibilityValue(L("sidebar.archived"))
+        .accessibilityIdentifier("archived-\(committee)")
     }
 }

@@ -563,6 +563,40 @@
         }
       }
     },
+    "committees.unarchive": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unarchive"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消归档"
+          }
+        }
+      }
+    },
+    "committees.unarchive_help": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unarchive %@: it returns to the committees (the Speaker in person only)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消归档 %@：它会回到委员会列表（仅限议长本人）"
+          }
+        }
+      }
+    },
     "desk.back": {
       "extractionState": "manual",
       "localizations": {
@@ -3068,6 +3102,23 @@
         }
       }
     },
+    "roster.show_archived": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show archived"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示已归档"
+          }
+        }
+      }
+    },
     "roster.show_inactive": {
       "extractionState": "manual",
       "localizations": {
@@ -4579,6 +4630,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "更多"
+          }
+        }
+      }
+    },
+    "sidebar.archived": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "archived"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已归档"
+          }
+        }
+      }
+    },
+    "sidebar.archived_heading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archived"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已归档"
           }
         }
       }

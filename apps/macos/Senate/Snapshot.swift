@@ -107,6 +107,15 @@ enum Snapshot {
             store.showInactive = true
             await shot("sidebar-states")
             store.showInactive = false
+            // The archived committees, dimmed, with Unarchive.
+            // (The committees folded, so the section is in view.)
+            let wasFolded = store.folded
+            store.folded = Set(store.state.groups.map(\.id))
+            store.showArchived = true
+            await store.loadArchived()
+            await shot("sidebar-archived")
+            store.showArchived = false
+            store.folded = wasFolded
             if let thread = store.inboxThreads.first {
                 store.place = .thread(thread.key)
                 await shot("thread")
