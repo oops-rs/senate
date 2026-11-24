@@ -20,6 +20,11 @@ enum TownSnapshot {
             print("snapshot: holding the quiet town \(hold) s")
             try? await Task.sleep(for: .seconds(hold))
         }
+        if TownScript.requested == nil {
+            // The live feed: the fake daemon's trickle (an event every
+            // 1.2 s after the watch opens), pictured as it plays.
+            for i in 1...4 { await shot("town-live-\(i)") }
+        }
         if TownScript.requested != nil {
             NotificationCenter.default.post(name: TownModel.playScript, object: large ? "large" : nil)
             // `shot` waits 1.5 s: in-house visits are talking, the others

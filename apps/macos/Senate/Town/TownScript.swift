@@ -8,7 +8,7 @@ enum TownScript {
     /// the store's.
     static let env = "SENATE_APP_TOWN_DEMO"
 
-    static var requested: TownInput? {
+    static var requested: TownState? {
         switch ProcessInfo.processInfo.environment[env] {
         case "1", "small": quiet
         case "large": large
@@ -24,7 +24,7 @@ enum TownScript {
 
     /// Five committees and a hall: someone at work, someone idle, a
     /// senator asleep, one waiting on a person, two threads waiting on you.
-    static let quiet = TownInput(state: TownState(
+    static let quiet = TownState(
         committees: [
             TownCommittee(name: "senate", senators: [
                 s("claude-chair", "chair", .claude, .working, chair: true),
@@ -52,7 +52,7 @@ enum TownScript {
         ],
         hall: TownHall(secretary: s("claude-secretary", "secretary", .claude, .working), docket: 1),
         person: "wendell"
-    ))
+    )
 
     /// What happens in the busy town: visits within a house, across the
     /// street, and to the hall.
@@ -77,7 +77,7 @@ enum TownScript {
 
     /// The quiet town after the busy events' mood changes.
     static var busyState: TownState {
-        var state = quiet.state
+        var state = quiet
         for (i, committee) in state.committees.enumerated() {
             for (j, senator) in committee.senators.enumerated() {
                 if senator.id == "codex-flaky" { state.committees[i].senators[j].mood = .working }
@@ -91,7 +91,7 @@ enum TownScript {
     }
 
     /// Thirty committees and sixty senators: the stress test.
-    static let large: TownInput = {
+    static let large: TownState = {
         let moods: [TownMood] = [.working, .idle, .idle, .working, .paused, .waiting, .idle, .stopped]
         let runtimes: [TownRuntime] = [.claude, .codex, .agy, .claude]
         var committees: [TownCommittee] = []
@@ -107,7 +107,7 @@ enum TownScript {
                 waiting: c % 7 == 0 ? [TownThreadRef(committee: "committee-\(c)", root: UInt64(c + 1), title: "Question")] : []
             ))
         }
-        return TownInput(state: TownState(committees: committees, hall: TownHall()))
+        return TownState(committees: committees, hall: TownHall())
     }()
 
     /// Visits for the large town: a dozen at once, more than are let out.

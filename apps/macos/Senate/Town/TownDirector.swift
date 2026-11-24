@@ -32,14 +32,15 @@ struct TownDirector {
     /// Moods to show when their senator is back.
     private(set) var heldMoods: [String: TownMood] = [:]
 
-    /// Take events. `present` is who is in town (a message from anyone else
-    /// is not acted out); `reduceMotion` makes every visit a fade.
+    /// Take events. `present` is who lives in town (a message to anyone
+    /// else goes to the thread's house; one from anyone else is a guest's
+    /// visit); `reduceMotion` makes every visit a fade.
     mutating func accept(_ events: [TownEvent], present: Set<String>, reduceMotion: Bool) -> [TownAction] {
         var actions: [TownAction] = []
         for event in events {
             switch event {
             case let .message(from, to, thread, line):
-                guard present.contains(from) else { continue }
+                // Someone not living in town comes as a guest, from the edge.
                 let target = to.flatMap { present.contains($0) ? $0 : nil }
                 let visit = TownAction.visit(
                     from: from, to: target, thread: thread, line: TownText.firstWords(line), walk: !reduceMotion

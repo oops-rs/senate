@@ -20,7 +20,8 @@ final class TownModel {
     @ObservationIgnored let scene = TownScene(size: CGSize(width: 800, height: 600))
     /// The made-up town (`SENATE_APP_TOWN_DEMO`), instead of the store's.
     @ObservationIgnored let script = TownScript.requested
-    private(set) var input: TownInput?
+    /// The town as last read.
+    private(set) var input: TownState?
     private(set) var log: [Entry] = []
     /// `nil`: the list while VoiceOver runs, else the map.
     var showList: Bool?
@@ -31,9 +32,9 @@ final class TownModel {
     }
 
     /// A new reading: the scene shows it and acts out what changed.
-    func update(_ new: TownInput) {
+    func update(_ new: TownState) {
         let events = TownDiff.events(from: input, to: new)
-        let names = new.state.senators
+        let names = new.senators
         for event in events {
             switch event {
             case let .mood(id, mood):
@@ -41,7 +42,7 @@ final class TownModel {
             case let .arrived(id):
                 add(L("town.arrived", names[id]?.name ?? id), thread: nil)
             case let .left(id):
-                add(L("town.left", input?.state.senators[id]?.name ?? id), thread: nil)
+                add(L("town.left", input?.senators[id]?.name ?? id), thread: nil)
             case .message:
                 break // logged when the scene acts it out, or below when it does not
             case let .answered(thread, _, _):
@@ -49,18 +50,40 @@ final class TownModel {
             }
         }
         input = new
-        scene.apply(new.state, events: events)
+        scene.apply(new, events: events)
+    }
+
+    /// What the committees' activity says happened (`TownActivityFeed`).
+    func activity(_ events: [TownEvent]) {
+        guard let input else { return }
+        for case let .answered(thread, _, _) in events {
+            add(L("town.settled", thread.title), thread: thread)
+        }
+        scene.apply(input, events: events)
+    }
+
+    /// The live feed, while the page is shown (not for the scripted town).
+    @ObservationIgnored private var feed: TownActivityFeed?
+
+    func startFeed(_ store: CoreStore) {
+        guard script == nil else { return }
+        if feed == nil { feed = TownActivityFeed(store: store) { [weak self] in self?.activity($0) } }
+        feed?.start()
+    }
+
+    func stopFeed() {
+        feed?.stop()
     }
 
     /// The scripted busy events (snapshots and trying the scene).
     func play(_ events: [TownEvent], state: TownState) {
-        input = TownInput(state: state, threads: input?.threads ?? [])
+        input = state
         scene.apply(state, events: events)
     }
 
     /// What the pointer is over, in words.
     func tooltip(_ hit: TownScene.Hit) -> String? {
-        guard let state = input?.state else { return nil }
+        guard let state = input else { return nil }
         switch hit {
         case let .senator(id, _):
             guard let s = state.senators[id] else { return nil }
@@ -83,7 +106,7 @@ final class TownModel {
 
     private func record(_ action: TownAction) {
         guard case let .visit(from, to, thread, line, _) = action else { return }
-        let names = input?.state.senators ?? [:]
+        let names = input?.senators ?? [:]
         let target = to.flatMap { names[$0]?.name } ?? thread.committee
         add(L("town.said", names[from]?.name ?? from, target, line), thread: thread)
     }
@@ -119,11 +142,11 @@ struct TownPage: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     var body: some View {
-        let input = model.script ?? TownInput(store: store)
+        let input = model.script ?? TownState(store: store)
         let list = model.showList ?? voiceOver
         ZStack(alignment: .topTrailing) {
             if list {
-                TownActivityList(store: store, model: model, state: model.input?.state ?? input.state, open: open)
+                TownActivityList(store: store, model: model, state: model.input ?? input, open: open)
             } else {
                 map
             }
@@ -133,11 +156,17 @@ struct TownPage: View {
         .onChange(of: input, initial: true) { model.update(input) }
         .onChange(of: scheme, initial: true) { model.scene.setPalette(scheme == .dark ? .dark : .light) }
         .onChange(of: reduceMotion, initial: true) { model.scene.reduceMotion = reduceMotion }
-        .onAppear { model.scene.visible = true }
-        .onDisappear { model.scene.visible = false }
+        .onAppear {
+            model.scene.visible = true
+            model.startFeed(store)
+        }
+        .onDisappear {
+            model.scene.visible = false
+            model.stopFeed()
+        }
         .onReceive(NotificationCenter.default.publisher(for: TownModel.playScript)) { note in
             if note.object as? String == "large" {
-                model.play(TownScript.largeEvents, state: TownScript.large.state)
+                model.play(TownScript.largeEvents, state: TownScript.large)
             } else {
                 model.play(TownScript.busy, state: TownScript.busyState)
             }
@@ -184,7 +213,7 @@ struct TownPage: View {
         case let .senator(id, sessionId):
             if let sessionId {
                 store.place = store.secretarySession?.sessionId == sessionId ? .secretary : .session(sessionId)
-            } else if let home = model.input?.state.home(of: id) {
+            } else if let home = model.input?.home(of: id) {
                 store.place = .committee(home)
             }
         case let .thread(ref): store.openThread(committee: ref.committee, root: ref.root)

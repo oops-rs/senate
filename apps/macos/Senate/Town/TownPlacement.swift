@@ -14,11 +14,15 @@ enum TownPlacement {
 
     /// Place a bubble of `size` for a speaker whose head is at `head`.
     /// Candidates, in order: straight above, above to the right, above to
-    /// the left, higher up in the same three places. The first that stays
+    /// the left, beside the head on either side, then higher up in the
+    /// first three places. The first that stays
     /// inside `viewport` and covers none of `obstacles` (other people's
     /// faces and names, other bubbles) wins; failing that, the one that
     /// covers least. It is then kept inside the viewport.
-    static func bubble(size: CGSize, head: CGPoint, obstacles: [CGRect], viewport: CGRect) -> Bubble {
+    ///
+    /// `soft` obstacles (signs, flags) are avoided too, but covering one
+    /// counts for less than covering a face.
+    static func bubble(size: CGSize, head: CGPoint, obstacles: [CGRect], soft: [CGRect] = [], viewport: CGRect) -> Bubble {
         let gap: CGFloat = 10
         let rise = size.height / 2 + gap
         var candidates: [CGPoint] = []
@@ -27,16 +31,22 @@ enum TownPlacement {
             candidates.append(CGPoint(x: head.x, y: y))
             candidates.append(CGPoint(x: head.x + size.width / 2 - 14, y: y))
             candidates.append(CGPoint(x: head.x - size.width / 2 + 14, y: y))
+            if lift == 0 {
+                // Beside the head, before climbing higher.
+                candidates.append(CGPoint(x: head.x + size.width / 2 + 16, y: head.y + 6))
+                candidates.append(CGPoint(x: head.x - size.width / 2 - 16, y: head.y + 6))
+            }
         }
         func rect(_ c: CGPoint) -> CGRect {
             CGRect(x: c.x - size.width / 2, y: c.y - size.height / 2, width: size.width, height: size.height)
         }
-        func covered(_ r: CGRect) -> CGFloat {
-            obstacles.reduce(0) { sum, o in
+        func area(_ r: CGRect, _ list: [CGRect]) -> CGFloat {
+            list.reduce(0) { sum, o in
                 let i = r.intersection(o)
                 return i.isNull ? sum : sum + i.width * i.height
             }
         }
+        func covered(_ r: CGRect) -> CGFloat { area(r, obstacles) + 0.3 * area(r, soft) }
         let inset = viewport.insetBy(dx: 4, dy: 4)
         let best = candidates.first { inset.contains(rect($0)) && covered(rect($0)) == 0 }
             ?? candidates.min { a, b in

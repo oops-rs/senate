@@ -53,6 +53,10 @@ final class TownScene: SKScene {
     }
     private var fitted = false
     private var interacting = false
+    /// Names are shown at this zoom (they hide when it is too far to read).
+    private var labelsShown = true
+    /// Senators from elsewhere on a visit, by id: drawn, not clickable.
+    private var guests: [String: PersonNode] = [:]
     /// Senators walking out of town: kept until they reach the edge.
     private var departing: Set<String> = []
     /// Bubbles showing now, and where (so the next one avoids them).
@@ -249,6 +253,7 @@ final class TownScene: SKScene {
         for id in walkers {
             if let p = people[id] { p.zPosition = Self.depth(p.position.y) }
         }
+        for g in guests.values { g.zPosition = Self.depth(g.position.y) }
         pace()
     }
 
@@ -312,6 +317,7 @@ final class TownScene: SKScene {
         movers = 0
         strollers = 0
         departing = []
+        guests = [:]
         bubbles = []
         checks = 0
         world.removeAllChildren()
@@ -757,9 +763,41 @@ final class TownScene: SKScene {
         return (CGPoint(x: room.midX, y: room.minY + 26), room)
     }
 
+    /// A senator who does not live in town: in from the nearer edge to whom
+    /// it speaks, a bubble, and out again.
+    private func guestVisit(from: String, to: String?, thread: TownThreadRef, line: String) {
+        let (spot, room) = destination(to: to, thread: thread)
+        let guest = PersonNode(senator: TownSenator(id: from, name: from, runtime: TownRuntime(guessing: from), mood: .idle))
+        guest.body.texture = art.person(guest.senator.runtime, .stand)
+        guest.setLabel(from, palette: art.palette, seated: false)
+        guest.nameLabel?.isHidden = true
+        let path = TownLayout.pathFromEdge(layout.edgeX(for: room), to: spot, in: room)
+        guest.position = path[0]
+        guest.room = room
+        world.addChild(guest)
+        guests[from] = guest
+        movers += 1
+        walk(guest, along: path, speed: max(150, TownLayout.length(path) / 6)) { [weak self, weak guest] in
+            guard let self, let guest else { return }
+            guest.zPosition = Self.depth(guest.position.y)
+            guest.body.texture = self.art.person(guest.senator.runtime, .stand)
+            self.showBubble(line, thread: thread, over: guest, hold: 2.6)
+            guest.run(.sequence([.wait(forDuration: 3.0), .run { [weak self, weak guest] in
+                guard let self, let guest else { return }
+                self.walk(guest, along: path.reversed(), speed: max(150, TownLayout.length(path) / 6)) { [weak self, weak guest] in
+                    guard let self else { return }
+                    guest?.removeFromParent()
+                    self.guests[from] = nil
+                    self.movers -= 1
+                    self.perform(self.director.cameHome(from))
+                }
+            }]))
+        }
+    }
+
     private func startWalk(from: String, to: String?, thread: TownThreadRef, line: String) {
         guard let node = people[from] else {
-            perform(director.cameHome(from))
+            guestVisit(from: from, to: to, thread: thread, line: line)
             return
         }
         node.removeAction(forKey: "wander")
@@ -804,8 +842,7 @@ final class TownScene: SKScene {
     /// Reduce Motion: a bubble over the sender fades into one over whom it
     /// is for. Nobody moves.
     private func fade(from: String, to: String?, thread: TownThreadRef, line: String) {
-        guard let sender = people[from] else { return }
-        showBubble(line, thread: thread, over: sender, hold: 1.4)
+        if let sender = people[from] { showBubble(line, thread: thread, over: sender, hold: 1.4) }
         let target = to.flatMap { people[$0] }
         movers += 1
         run(.sequence([.wait(forDuration: 1.7), .run { [weak self] in
@@ -844,9 +881,9 @@ final class TownScene: SKScene {
         for (id, p) in people where id != exclude && !p.isHidden {
             obstacles.append(p.calculateAccumulatedFrame())
         }
-        // Houses' signs and flags, and the visitors at their doors.
-        obstacles += signs
-        let placed = TownPlacement.bubble(size: size, head: head, obstacles: obstacles, viewport: viewport)
+        // Houses' signs and flags, and the visitors at their doors: kept
+        // clear when there is room, but faces first.
+        let placed = TownPlacement.bubble(size: size, head: head, obstacles: obstacles, soft: signs, viewport: viewport)
         let node = bubble(words, size: local, tip: CGPoint(x: (placed.tail.x - placed.centre.x) / scale,
                                                           y: (placed.tail.y - placed.centre.y) / scale),
                           thread: thread)
@@ -935,6 +972,15 @@ final class TownScene: SKScene {
     /// Walkers' names hide while they walk.
     private func arrangeLabels() {
         let show = cam.xScale < 1.5
+        guard show else {
+            // Too far to read: hidden, nothing to arrange.
+            if labelsShown {
+                for node in people.values { node.nameLabel?.isHidden = true }
+                labelsShown = false
+            }
+            return
+        }
+        labelsShown = true
         var labels: [TownPlacement.Label] = []
         for (id, node) in people {
             guard let label = node.nameLabel else { continue }
@@ -943,7 +989,7 @@ final class TownScene: SKScene {
                 label.isHidden = true
                 continue
             }
-            let f = label.frame
+            let f = node.labelFrame
             let s = node.xScale
             let rect = CGRect(x: node.position.x + f.minX * s, y: node.position.y + f.minY * s,
                               width: f.width * s, height: f.height * s)
@@ -1067,7 +1113,19 @@ final class PersonNode: SKNode {
         label.fontColor = TownPalette.color(palette.inkSoft)
         labelBaseY = seated ? -12 : -2
         label.position = CGPoint(x: 0, y: labelBaseY)
+        if label.text != measuredText {
+            measuredText = label.text
+            measuredSize = label.frame.size
+        }
     }
+
+    /// The name's frame at its unmoved place, measured once per text.
+    var labelFrame: CGRect {
+        CGRect(x: -measuredSize.width / 2, y: labelBaseY - measuredSize.height, width: measuredSize.width, height: measuredSize.height)
+    }
+
+    private var measuredText: String?
+    private var measuredSize: CGSize = .zero
 
     /// Where the name sits before any collision moves it.
     private(set) var labelBaseY: CGFloat = -2
