@@ -136,9 +136,9 @@ The canonical form is `senate://open/v1/<target>[?senate=<selector>]`. The autho
 | Target after `/v1/` | App destination |
 |---|---|
 | `committee/<name>` | Committee detail, including an authorized archived committee with its existing archived presentation. |
-| `session/<selector>` | Existing session detail. A selector is a local session ID, `<committee>::<alias>`, or an opaque Observe selector. Resolve Observe seat selectors through the person-guarded `observe_admin` SeatIdentity request with the committee. Observe-generated URLs use no raw runtime ID. Never attaches a terminal, launches or resumes a session. |
+| `session/<selector>` | Existing session detail. A selector is a local session ID, `<committee>::<alias>`, or `<committee>::<opaque Observe selector>`. Resolve Observe seat selectors through the person-guarded `observe_admin` SeatIdentity request with the committee. Observe-generated URLs use no raw runtime ID. Never attaches a terminal, launches or resumes a session. |
 | `thread/<committee>/<root-seq>` | The root thread in committee detail. |
-| `senator/<name>` | An authorized local session detail if one is active, otherwise the senator profile or thread list. Accept `<committee>::<alias>` to disambiguate a seat. Use the app's deterministic live-session ordering, and fall back to the seat's committee if the profile lacks a dedicated view. |
+| `senator/<name>` | An authorized local session detail if one is active, otherwise the senator profile or thread list. Accept `<committee>::<alias>` to disambiguate a seat. Opaque Observe seat selectors require a committee qualifier on both session and senator links. Use the app's deterministic live-session ordering, and fall back to the seat's committee if the profile lacks a dedicated view. |
 | `desk` or `desk/<committee>/<seq>` | Desk list or an existing item in its read view. |
 | `approvals` | Approvals list. Opening the list does not present a confirmation dialog. |
 | `inbox` | Inbox list. |

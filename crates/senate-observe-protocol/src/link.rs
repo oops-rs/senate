@@ -109,7 +109,7 @@ impl FromStr for AppLink {
             ["thread", committee, seq] => Target::Thread(read_slug(committee)?, read_seq(seq)?),
             ["senator", name] => {
                 let name = decode(name, false)?;
-                if !qualified(&name) && !selector_slug(&name) {
+                if !qualified(&name) && (name.starts_with("obs-") || !slug(&name)) {
                     return Err(InvalidLink);
                 }
                 Target::Senator(name)
@@ -121,7 +121,7 @@ impl FromStr for AppLink {
             ["history"] => Target::History,
             ["history", id] => {
                 let id = decode(id, false)?;
-                if !session_id(&id) {
+                if !session_id(&id) && !observer_selector(&id) {
                     return Err(InvalidLink);
                 }
                 Target::HistoryEntry(id)
@@ -216,7 +216,7 @@ fn observer_selector(value: &str) -> bool {
 
 fn session_id(value: &str) -> bool {
     if value.starts_with("obs-") {
-        return observer_selector(value);
+        return false;
     }
     let id = value
         .strip_prefix("agy:")
