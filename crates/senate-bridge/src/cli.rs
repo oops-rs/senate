@@ -7,6 +7,8 @@
 // These two stay beside this file under their own names.
 #[path = "cli_chat.rs"]
 mod cli_chat;
+#[path = "cli_desk.rs"]
+mod cli_desk;
 #[path = "cli_help.rs"]
 mod cli_help;
 #[path = "cli_history.rs"]
@@ -234,6 +236,12 @@ enum Cmd {
     },
     /// Appoint session secretaries and manage their shared work.
     Secretary(cli_secretary::Secretary),
+    /// List and decide what awaits the Speaker.
+    ///
+    /// Read an item, and answer, close, forward or refuse it: the Speaker
+    /// in person (or the owner of the agent serving as Speaker), from your
+    /// own terminal.
+    Desk(cli_desk::Desk),
     /// Simulate chat in a bound group and read the replies
     #[command(after_help = "Examples:
   senate chat send --committee refund-v2 \"ask bob's agent how long refunds take\"
@@ -3356,6 +3364,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         Cmd::Session { command } => run_session(command, output),
         Cmd::Senator { command } => run_senator(command, output),
         Cmd::Secretary(args) => cli_secretary::run(args),
+        Cmd::Desk(args) => cli_desk::run(args),
         Cmd::Chat(args) => cli_chat::run(args),
         Cmd::Setup { command } => run_setup(command, output),
         Cmd::Join {

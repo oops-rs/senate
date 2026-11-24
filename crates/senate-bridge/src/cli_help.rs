@@ -19,7 +19,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Speak as yourself",
-        &["ask", "tell", "request", "reply", "take", "chat"],
+        &["ask", "tell", "request", "reply", "take", "desk", "chat"],
     ),
     ("This worktree", &["join", "leave", "where"]),
     (
