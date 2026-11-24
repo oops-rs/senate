@@ -1393,7 +1393,15 @@ impl Shared {
                     to = vec![address];
                 }
                 api::Resolved::Here { locator, .. } => intended = Some(locator),
-                api::Resolved::Elsewhere => intended = Some(at),
+                api::Resolved::Elsewhere => {
+                    // No Senate this machine reaches has it: refused here,
+                    // unless it can be below the topmost one, in a child
+                    // Senate it cannot see into.
+                    if let Some(reason) = self.nowhere(&at).await? {
+                        return Err(self.unresolved(&at, api::Resolved::Unknown { reason }));
+                    }
+                    intended = Some(at);
+                }
                 other => return Err(self.unresolved(&at, other)),
             }
         }
@@ -1434,6 +1442,24 @@ impl Shared {
             posted,
             intended,
         })
+    }
+
+    /// A name every Senate this machine reaches said is elsewhere: when the
+    /// topmost of them has no Senate above, the reason it is nowhere, else
+    /// `None` (it may be above that one, or in a child Senate below it:
+    /// a crossing, as before).
+    async fn nowhere(&self, at: &Locator) -> Result<Option<String>, IpcError> {
+        let levels = self.levels();
+        let Some(top) = levels.last() else {
+            return Ok(None);
+        };
+        let (own, top) = if levels.len() == 1 {
+            let me = self.api.me().await.map_err(server_error)?;
+            (me.clone(), me)
+        } else {
+            tokio::try_join!(self.api.me(), top.me()).map_err(server_error)?
+        };
+        Ok(nowhere(at, &own, &top))
     }
 
     /// A qualified name that resolved to no one, or to several.
@@ -1993,5 +2019,159 @@ mod tests {
         assert!(en.contains("chair_docket"), "{en}");
         let zh = roles_text::not_chairing(&me, &c, None, Locale::Zh);
         assert!(zh.starts_with("[senator::codex] 不是委员会 `ledger` 的主席"));
+    }
+}
+
+/// Why `at` can be in no Senate reachable from `own` (this machine's
+/// Senate) when every Senate up to `top` said it is elsewhere: `None` when
+/// `top` has a Senate above (ask there), or `at` names a Senate below `top`
+/// through one of its registered children (a crossing it cannot see into).
+pub(crate) fn nowhere(at: &Locator, own: &api::Me, top: &api::Me) -> Option<String> {
+    if top.parent.is_some() {
+        return None;
+    }
+    let top_path = top.senate_path();
+    let own_path = own.senate_path();
+    let Some(senate) = at.senate() else {
+        // A committee with no Senate named: here, or above. Neither has it.
+        let committee = at.committee()?;
+        let mut known: Vec<CommitteeId> = own.committees.clone();
+        for c in &top.committees {
+            if !known.contains(c) {
+                known.push(c.clone());
+            }
+        }
+        let above = if own_path.same_names(&top_path) {
+            String::new()
+        } else {
+            format!(" nor in {top_path}")
+        };
+        let reason = senate_core::ids::no_committee(&own_path, committee, &known);
+        return Some(format!("{reason}{above}"));
+    };
+    let children: Vec<&Name> = top.children.iter().map(|c| &c.name).collect();
+    // The first Senate below `top` the name goes through, if it goes below.
+    let below = if senate.is_absolute() {
+        let (names, top_names) = (senate.names(), top_path.names());
+        (names.len() > top_names.len() && names.starts_with(top_names))
+            .then(|| &names[top_names.len()])
+    } else {
+        senate.names().first()
+    };
+    if below.is_some_and(|first| children.contains(&first)) {
+        return None;
+    }
+    // A Senate nobody here knows: the paths that are known, closest first.
+    let mut paths: Vec<String> = vec![own_path.to_string(), top_path.to_string()];
+    for child in &children {
+        if let Ok(path) = top_path.clone().child((*child).clone()) {
+            paths.push(path.to_string());
+        }
+    }
+    paths.dedup();
+    let last = senate.name().to_string();
+    let close: Vec<String> = paths
+        .iter()
+        .filter(|p| p.rsplit('/').next() == Some(last.as_str()))
+        .cloned()
+        .chain(senate_core::ids::closest_names(
+            &senate.to_string(),
+            paths.iter().map(String::as_str),
+            3,
+        ))
+        .fold(Vec::new(), |mut out, p| {
+            if !out.contains(&p) && out.len() < 3 {
+                out.push(p);
+            }
+            out
+        });
+    let reason = format!("no Senate `{senate}` is reachable from {own_path}");
+    Some(if close.is_empty() {
+        reason
+    } else {
+        let list = close
+            .iter()
+            .map(|p| format!("`{p}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{reason}; did you mean {list}?")
+    })
+}
+
+#[cfg(test)]
+mod nowhere_tests {
+    use super::nowhere;
+    use senate_core::{Locator, api::Me};
+
+    fn me(value: serde_json::Value) -> Me {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// Wendell's machine: `/senate/dark-conclave`, under the root `/senate`,
+    /// which has it and `other-desk` as registered children.
+    fn tree() -> (Me, Me) {
+        let own = me(serde_json::json!({
+            "person": "wendell", "senate": "dark-conclave", "parent": "/senate",
+            "committees": ["yoki-ios-wendell-feat-iphone-duo-modal", "lama-ludo-ios-feat-iphone-duo-main"],
+            "epoch": "e"
+        }));
+        let top = me(serde_json::json!({
+            "person": "wendell", "senate": "senate",
+            "committees": ["senate"],
+            "children": [
+                {"name": "dark-conclave", "speaker": "wendell"},
+                {"name": "other-desk", "speaker": "bob"}
+            ],
+            "epoch": "e"
+        }));
+        (own, top)
+    }
+
+    fn at(s: &str) -> Locator {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_committee_no_reachable_senate_has_is_refused_with_its_closest_names() {
+        let (own, top) = tree();
+        let why = nowhere(&at("yoki-ios-feat-iphone-duo-modal::chair"), &own, &top).unwrap();
+        assert!(
+            why.starts_with(
+                "no committee `yoki-ios-feat-iphone-duo-modal` in /senate/dark-conclave; did you mean `yoki-ios-wendell-feat-iphone-duo-modal`"
+            ) && why.ends_with(" nor in /senate"),
+            "{why}"
+        );
+        // A Senate path written from the root that names no Senate there:
+        // the one it probably meant.
+        let why = nowhere(
+            &at("/dark-conclave::yoki-ios-feat-iphone-duo-modal::chair"),
+            &own,
+            &top,
+        )
+        .unwrap();
+        assert!(
+            why.starts_with("no Senate `/dark-conclave` is reachable from /senate/dark-conclave")
+                && why.contains("`/senate/dark-conclave`"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn what_may_be_in_a_child_or_above_still_crosses() {
+        let (own, top) = tree();
+        // Below the root, through a registered child it cannot see into.
+        for name in [
+            "/senate/other-desk::ledger::chair",
+            "other-desk::ledger::senator::claude",
+            "/senate/other-desk/deeper::ledger::speaker",
+        ] {
+            assert_eq!(nowhere(&at(name), &own, &top), None, "{name}");
+        }
+        // The topmost Senate reached has one above: ask there, as before.
+        let mut child_top = top.clone();
+        child_top.parent = Some("/acme".parse().unwrap());
+        assert_eq!(nowhere(&at("no-such::chair"), &own, &child_top), None);
+        // An unregistered Senate below the root is nowhere.
+        assert!(nowhere(&at("/senate/gone::ledger::chair"), &own, &top).is_some());
     }
 }

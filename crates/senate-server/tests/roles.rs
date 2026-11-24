@@ -1964,3 +1964,76 @@ async fn a_team_principal_runs_agents_but_only_a_person_decides() {
     stored(&server, ALICE, &decision("senator::alice")).await;
     server.running.shutdown().await.unwrap();
 }
+
+/// A qualified name for a committee that does not take it: one named in
+/// this Senate that is not here (with the closest names), an archived one,
+/// and one with no chair to receive a discussion. Nothing reaches the desk.
+#[tokio::test]
+async fn a_committee_that_cannot_take_it_is_refused_with_why() {
+    let server = start(None, boundary).await;
+    open_ledger(&server).await;
+    let hub = &server.running.hub;
+    let quiet = CommitteeId::new("quiet").unwrap();
+    hub.append(from_speaker(
+        quiet.clone(),
+        Kind::Note,
+        "nobody chairs this",
+    ))
+    .await
+    .unwrap();
+    let before = hub.read(&committee(), Seq::ZERO, 100).await.unwrap().len();
+    let refused = |locator: &'static str| {
+        let server = &server;
+        async move {
+            let response = server
+                .post_event(ALICE, &meant_for("claude", locator))
+                .await;
+            let status = response.status();
+            (status, response.text().await.unwrap())
+        }
+    };
+
+    // Named in this Senate, not here: the closest names.
+    let (status, text) = refused("/senate::ledgr::chair").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+    assert!(
+        text.contains("no committee `ledgr` in /senate; did you mean `ledger`?"),
+        "{text}"
+    );
+    // A committee here with no chair to receive a discussion: said so.
+    let (status, text) = refused("quiet::chair").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{text}");
+    assert!(
+        text.contains("quiet has no chair to receive this"),
+        "{text}"
+    );
+    // Archived: refused, saying so.
+    let archived = server
+        .request(
+            Method::PUT,
+            &senate_core::api::committee_archive_path(&ledger()),
+            ALICE,
+        )
+        .json(&senate_core::api::SetCommitteeArchive {
+            archived: true,
+            id: senate_core::EventId::new(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(archived.status(), StatusCode::OK);
+    let (status, text) = refused("ledger::chair").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+    assert!(
+        text.contains("the committee ledger in /senate is archived")
+            && text.contains("senate committees unarchive ledger"),
+        "{text}"
+    );
+    // None of it was written anywhere.
+    assert_eq!(
+        hub.read(&committee(), Seq::ZERO, 100).await.unwrap().len(),
+        before
+    );
+    assert_eq!(hub.read(&quiet, Seq::ZERO, 100).await.unwrap().len(), 1);
+    server.running.shutdown().await.unwrap();
+}

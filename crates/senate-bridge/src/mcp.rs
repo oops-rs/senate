@@ -200,7 +200,9 @@ desk); a bracketed id copied from a message works too. One qualified name reache
 committee or Senate: `ledger::codex` (the agent codex on the committee ledger), \
 `/acme::ledger::codex` (in the Senate /acme), `ledger::speaker`, `ledger::chair`. A question to \
 another committee's chair in this Senate goes directly to that chair. Stay on your own committee \
-and use its thread number to continue the discussion. Requests and other crossings go to the Speaker's desk. If several \
+and use its thread number to continue the discussion. Requests and other crossings go to the Speaker's desk. \
+A committee that no Senate you can reach has, or one that is archived, is refused with the \
+names closest to it: check the name and ask again. If several \
 agents could get `senator::*`, the result lists them: pick one and ask again. A person is not \
 reached through `ask`, so for a person ask their agent or tell your user. `body`: the whole question, self-contained; the reader has none of \
 your context. `request`: set it when you ask them to change something (code, an interface, \

@@ -610,12 +610,27 @@ async fn a_person_speaker_with_no_secretary_finds_the_desk_waiting_for_her() {
     let claude = desk.inbox("s-claude");
     desk.session_start("s-claude", &claude).await.unwrap();
     desk.wait_connected("claude", true).await;
-    // claude writes to a seat on another committee: put to the desk, where
-    // no secretary works; it waits for alice.
+    // claude writes to another committee (one that exists: a name that
+    // is nowhere is refused when it is asked): put to the desk, where no
+    // secretary works; it waits for alice.
+    let ledger = CommitteeId::new("ledger").unwrap();
+    desk.senate()
+        .daemon
+        .hub
+        .append(NewEvent::new(
+            ledger,
+            Kind::Note,
+            Address::senator(
+                &senate_core::SenatorName::new(senate_core::Name::new("alice").unwrap()).unwrap(),
+            ),
+            "ledger opens",
+        ))
+        .await
+        .unwrap();
     let asked = send(
         &desk,
         "s-claude",
-        "ledger::codex",
+        "ledger::speaker",
         "Should the refund retry be capped?",
     )
     .await;
@@ -1335,5 +1350,100 @@ async fn another_committees_chair_receives_discussion_but_requests_wait_on_the_d
         hub.committee_agents(&source).await.unwrap(),
         [path("claude-author")]
     );
+    desk.stop().await;
+}
+
+/// An agent's ask for a committee no reachable Senate has is refused when
+/// it is asked, with the names it probably meant; nothing is put on the
+/// Speaker's desk. A Senate path that names no Senate is refused the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ask_for_a_committee_that_is_nowhere_is_refused_not_put_on_the_desk() {
+    use senate_bridge::hook::{self, HookEnv, HookKind};
+    use std::fs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(dir.path(), "alice", Locale::En, "[local]\n");
+    let sender = desk.inbox("sender");
+    let other = desk.inbox("other");
+    desk.start().await;
+    for (session, committee_name, inbox) in [
+        ("author", "lama-ludo-ios-feat-iphone-duo-main", &sender),
+        ("modal", "yoki-ios-wendell-feat-iphone-duo-modal", &other),
+    ] {
+        let cwd = dir.path().join(committee_name);
+        fs::create_dir_all(cwd.join(".senate")).unwrap();
+        fs::write(cwd.join(".senate/committee"), committee_name).unwrap();
+        let args =
+            serde_json::json!({"session_id":session,"cwd":cwd,"source":"startup"}).to_string();
+        let env = HookEnv {
+            socket: Some(inbox.path.clone()),
+            token: Some(format!("tok-{session}")),
+            claude_pid: Some(std::process::id()),
+            ..Default::default()
+        };
+        hook::run(
+            HookKind::SessionStart,
+            &desk.paths.socket(),
+            &args,
+            &env,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        desk.wait_stream_of(session).await;
+    }
+    let source = CommitteeId::new("lama-ludo-ios-feat-iphone-duo-main").unwrap();
+    let ask = |at: &str| Request::Send {
+        session: Laptop::session("author"),
+        kind: SayKind::Question,
+        to: vec![],
+        at: Some(senate_core::Locator::parse_short(at).unwrap()),
+        body: "Is the modal ready?".into(),
+        refs: None,
+        id: Some(senate_core::EventId::new()),
+    };
+    let refused = |result: Result<SendReply, senate_bridge::ipc::ClientError>| match result {
+        Err(senate_bridge::ipc::ClientError::Remote(e)) => e.message,
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+
+    for at in [
+        "yoki-ios-feat-iphone-duo-modal::chair",
+        "yoki-ios-feat-iphone-duo-modal::speaker",
+        "yoki-ios-feat-iphone-duo-modal::senator::claude-modal",
+    ] {
+        let why = refused(desk.try_ipc(ask(at)).await);
+        assert!(
+            why.contains("no committee `yoki-ios-feat-iphone-duo-modal`")
+                && why.contains("did you mean `yoki-ios-wendell-feat-iphone-duo-modal`"),
+            "{at}: {why}"
+        );
+    }
+    let why = refused(
+        desk.try_ipc(ask("/dark-conclave::yoki-ios-feat-iphone-duo-modal::chair"))
+            .await,
+    );
+    assert!(
+        why.contains("no Senate `/dark-conclave` is reachable"),
+        "{why}"
+    );
+
+    // Nothing was written: not on the asker's committee, not on the desk.
+    assert!(
+        desk.events_of(&source)
+            .await
+            .iter()
+            .all(|e| e.body != "Is the modal ready?"),
+        "nothing posted"
+    );
+    let docket = desk.senate().daemon.hub.docket(&source).await.unwrap();
+    assert!(docket.items.is_empty(), "{docket:?}");
+
+    // The committee it meant: a question to its chair goes there directly.
+    let sent: SendReply = desk
+        .ipc(ask("yoki-ios-wendell-feat-iphone-duo-modal::chair"))
+        .await;
+    assert!(!sent.on_the_desk());
+    other.wait_for("Is the modal ready?").await;
     desk.stop().await;
 }
