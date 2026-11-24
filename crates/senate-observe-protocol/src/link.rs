@@ -52,6 +52,15 @@ impl AppLink {
         self.senate.as_deref()
     }
 
+    /// The canonical link for a route written as its decoded values, such
+    /// as `committee/senate`, `session/senate::agent` or `inbox`: each
+    /// slash-separated part is encoded, then the whole is parsed by the one
+    /// grammar. A value cannot hold a slash, and nothing here adds a Senate.
+    pub fn from_route(route: &str) -> Result<Self, InvalidLink> {
+        let encoded = route.split('/').map(encoded).collect::<Vec<_>>().join("/");
+        format!("{PREFIX}{encoded}").parse()
+    }
+
     pub fn with_target(self, target: Target) -> Result<Self, InvalidLink> {
         Self {
             target,

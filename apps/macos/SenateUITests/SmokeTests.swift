@@ -121,6 +121,53 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(message.contains("#75"), receipt.debugDescription)
     }
 
+    /// A link delivered by the system to the running app changes the page
+    /// in the window that is open (no second process, no second window);
+    /// one for what is not here shows the quiet page. A Debug build
+    /// registers `senate-debug` (read as `senate`), so the installed app
+    /// keeps `senate://`. Delivered with NSWorkspace to this build's app,
+    /// as `senate open` or a browser would.
+    func testLinksNavigateTheOpenWindow() throws {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        // Beside the runner: Products/Debug/Senate.app.
+        let bundle = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("Senate.app")
+        func running() -> [NSRunningApplication] {
+            NSWorkspace.shared.runningApplications.filter { $0.bundleURL?.standardizedFileURL == bundle.standardizedFileURL }
+        }
+        XCTAssertEqual(running().count, 1)
+        let pid = running().first?.processIdentifier
+        func deliver(_ route: String) {
+            let url = URL(string: "senate-debug://\(route)")!
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = false
+            let done = expectation(description: route)
+            NSWorkspace.shared.open([url], withApplicationAt: bundle, configuration: configuration) { _, error in
+                XCTAssertNil(error)
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 10)
+        }
+        func shows(_ title: String) -> Bool {
+            let shown = XCTNSPredicateExpectation(predicate: NSPredicate(format: "title == %@", title), object: window)
+            return XCTWaiter.wait(for: [shown], timeout: 10) == .completed
+        }
+        deliver("open/v1/committee/payments")
+        XCTAssertTrue(shows("payments"), window.title)
+        deliver("open/v1/committee/gone")
+        XCTAssertTrue(shows("Not available here"), window.title)
+        // A burst: only its last link is shown.
+        deliver("open/v1/committee/docs")
+        deliver("open/v1/approvals")
+        XCTAssertTrue(shows("Approvals"), window.title)
+        // Rejected: nothing changes.
+        deliver("intent/v1/reply/payments/1")
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertEqual(window.title, "Approvals")
+        XCTAssertEqual(running().map(\.processIdentifier), [pid].compactMap { $0 }, "the same process")
+        XCTAssertEqual(app.windows.count, 1, "no second window")
+    }
+
     /// In the Dock (the default), Senate has a main menu: the View menu's
     /// sections, and Edit's standard items. Its structure is checked rather
     /// than clicked: the menu bar is shown only while Senate is frontmost,

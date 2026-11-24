@@ -72,7 +72,7 @@ struct MenuBarLabel: View {
             // the window opener, for notifications and `SENATE_APP_SHOW`,
             // and to the delegate, for a click on the Dock icon.
             store.attach(openWindow: openWindow, openSettings: openSettings)
-            (NSApplication.shared.delegate as? AppDelegate)?.store = store
+            AppDelegate.shared?.store = store
         }
     }
 }

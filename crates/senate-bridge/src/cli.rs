@@ -17,6 +17,8 @@ mod cli_history;
 mod cli_legacy;
 #[path = "cli_observe.rs"]
 mod cli_observe;
+#[path = "cli_open.rs"]
+mod cli_open;
 #[path = "cli_secretary.rs"]
 mod cli_secretary;
 #[path = "cli_remote.rs"]
@@ -158,6 +160,21 @@ enum Cmd {
     Observe(cli_observe::Observe),
     /// Replace or clear a profile card.
     Card(cli_observe::CardCommand),
+    /// Show a committee, thread, session or list in the Senate app.
+    ///
+    /// Takes a `senate://open/v1/…` link, or its route: the part after
+    /// `/v1/`, with values written plainly. The link is checked and written
+    /// canonically, then handed to the system (macOS `open`), never to a
+    /// shell. Opening only navigates: it never sends, approves, attaches,
+    /// stops, closes or edits anything.
+    #[command(after_help = "Examples:
+  senate open committee/senate          A committee's page
+  senate open thread/senate/42          A thread
+  senate open session/senate::claude    A session's page (never attaches)
+  senate open inbox                     Inbox, approvals, desk, history, profile
+  senate open 'senate://open/v1/desk'   A full link, as Observe gives it
+  senate open --print thread/senate/42  Print the canonical link")]
+    Open(cli_open::Open),
     /// Show your recorded local Senate activity by day.
     Stats {
         /// Number of local calendar days ending today (1d to 366d).
@@ -3381,6 +3398,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         Cmd::Chat(args) => cli_chat::run(args),
         Cmd::Observe(args) => cli_observe::run(args),
         Cmd::Card(args) => cli_observe::run_card(args),
+        Cmd::Open(args) => cli_open::run(args),
         Cmd::Setup { command } => run_setup(command, output),
         Cmd::Join {
             committee,

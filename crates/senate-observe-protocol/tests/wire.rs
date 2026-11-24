@@ -130,6 +130,28 @@ fn deep_links_match_the_public_fixtures() -> TestResult {
     for input in cases.invalid {
         assert!(input.parse::<AppLink>().is_err(), "{input}");
     }
+    for (route, canonical) in [
+        ("committee/senate", "committee/senate"),
+        ("session/senate::agent", "session/senate%3A%3Aagent"),
+        ("thread/senate/42", "thread/senate/42"),
+        ("history/agy:abc", "history/agy%3Aabc"),
+        ("inbox", "inbox"),
+    ] {
+        let link = AppLink::from_route(route)?;
+        assert_eq!(link.to_string(), format!("senate://open/v1/{canonical}"));
+        assert_eq!(link.senate(), None);
+    }
+    for route in [
+        "",
+        "approve/42",
+        "session/senate%3A%3Aagent",
+        "thread/senate/0",
+        "committee/a/b",
+        "inbox?senate=id%3Ademo",
+        "committee/../desk",
+    ] {
+        assert!(AppLink::from_route(route).is_err(), "{route}");
+    }
     let link = AppLink::for_senate(Target::Senator("senate::agent".into()), "demo")?;
     assert_eq!(link.senate(), Some("id:demo"));
     assert_eq!(

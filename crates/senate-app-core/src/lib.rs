@@ -4,6 +4,8 @@
 //!
 //! - [`model`]: what the app knows, folded from the daemon's `watch` stream;
 //!   the window's actions mapped to IPC requests.
+//! - [`app_link`]: `senate://open/v1/…` links, parsed by the protocol
+//!   crate's one grammar, for the app's router.
 //! - [`link`]: the socket, and the [`link::Driver`] that keeps the model
 //!   current and runs actions.
 //! - [`state`]: the flat snapshot the app renders, with its sentences
@@ -37,6 +39,7 @@
 #![allow(unsafe_code)]
 
 pub mod activity;
+pub mod app_link;
 pub mod ffi;
 pub mod history;
 pub mod link;
@@ -52,6 +55,7 @@ pub mod text;
 pub mod timeline;
 pub mod tree;
 
+pub use app_link::{AppLinkRoute, AppRoute, parse_app_link};
 pub use ffi::{
     AppCore, ApprovalDecision, CoreError, CoreListener, MentionKind, TerminalCommand, TextPart,
     TimelineListener, split_mentions,

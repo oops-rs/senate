@@ -27,6 +27,7 @@ senate-bridge = { workspace = true }
 senate-core = { workspace = true }
 senate-markdown = { workspace = true }
 senate-observe = { workspace = true }
+senate-observe-protocol = { workspace = true }
 uniffi = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
