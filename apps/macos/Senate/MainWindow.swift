@@ -62,7 +62,7 @@ struct MainWindow: View {
         case let .past(id):
             return store.history.row(id)?.name ?? L("tab.history")
         case let .desk(item):
-            return L("desk.item_heading", item.committee, String(item.seq))
+            return DeskEntryDetail.title(item)
         case .item:
             break
         }

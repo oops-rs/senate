@@ -920,23 +920,6 @@
         }
       }
     },
-    "desk.item_heading": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Desk request · %@ #%@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Speaker 待办 · %@ #%@"
-          }
-        }
-      }
-    },
     "desk.loading": {
       "extractionState": "manual",
       "localizations": {
@@ -1103,6 +1086,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "重试"
+          }
+        }
+      }
+    },
+    "desk.title_request_for": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request for %1$@ · %2$@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求转给 %1$@ · %2$@"
+          }
+        }
+      }
+    },
+    "desk.title_to_speaker": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ to the Speaker · %2$@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "给议长的%1$@ · %2$@"
           }
         }
       }
