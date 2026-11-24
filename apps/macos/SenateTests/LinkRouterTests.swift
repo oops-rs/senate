@@ -157,10 +157,10 @@ import SenateCore
             "desk/payments/41",
             "history/\(Self.obs("9"))",
             // A selector the daemon does not know, one for another
-            // committee, one with no committee, and a seat with no session.
+            // committee, and a seat with no session. (A selector with no
+            // committee is not a link at all: the grammar rejects it.)
             "senator/refund-v2%3A%3A\(Self.obs("9"))",
             "senator/payments%3A%3A\(Self.obs("2"))",
-            "session/\(Self.obs("2"))",
             "session/payments%3A%3A\(Self.obs("3"))",
             "history/never-was",
             // Another machine's Senate, or one not configured here.
