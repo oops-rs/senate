@@ -1,8 +1,8 @@
 //! Terminal colour queries and reporting modes for hosted TUIs.
 //!
-//! The host answers colour queries itself, using the attached viewer's
-//! palette where available and the system palette otherwise. It replays
-//! reporting modes to a newly attached terminal.
+//! The host provides a virtual palette when headless or when the viewer
+//! lacks a reply. The attached terminal can answer its supported probes.
+//! Active reporting modes are replayed on attachment.
 
 use std::collections::BTreeSet;
 
@@ -51,6 +51,13 @@ pub(crate) enum Scheme {
 }
 
 impl Scheme {
+    fn palette(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Dark => ("rgb:eeee/eeee/eeee", "rgb:1e1e/1e1e/1e1e"),
+            Self::Light => ("rgb:4c4c/4f4f/6969", "rgb:efef/f1f1/f5f5"),
+        }
+    }
+
     fn report(self) -> &'static [u8] {
         match self {
             Self::Dark => b"\x1b[?997;1n",
@@ -71,19 +78,24 @@ pub(crate) struct Colors {
     pub scheme: Option<Scheme>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keyboard_flags: Option<u16>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub device_attributes: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub scheme_reporting: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Colors {
     fn system_palette(scheme: Scheme) -> Self {
-        let (foreground, background) = match scheme {
-            Scheme::Dark => ("rgb:eeee/eeee/eeee", "rgb:1e1e/1e1e/1e1e"),
-            Scheme::Light => ("rgb:4c4c/4f4f/6969", "rgb:efef/f1f1/f5f5"),
-        };
+        let (foreground, background) = scheme.palette();
         Self {
             foreground: Some(foreground.into()),
             background: Some(background.into()),
             scheme: Some(scheme),
-            keyboard_flags: None,
+            ..Self::default()
         }
     }
 
@@ -241,8 +253,13 @@ impl Emulation {
                     _ => return Some((2, false)),
                 };
                 if let Some(len) = request {
-                    answers.attributes = true;
-                    return Some((len, true));
+                    // The real terminal closes an attached probe in the
+                    // same stream after answering its colour questions.
+                    let forward = self.forward_viewer_queries();
+                    if !forward {
+                        answers.attributes = true;
+                    }
+                    return Some((len, !forward));
                 }
                 let params = data[3..]
                     .iter()
@@ -305,6 +322,9 @@ impl Emulation {
                         return Some((end + 2, !self.viewer_ready));
                     }
                     b'n' if numbers().eq([996]) => {
+                        if self.forward_viewer_queries() && self.viewer.scheme_reporting {
+                            return Some((end + 1, false));
+                        }
                         if let Some(scheme) = self.scheme() {
                             answers.colors.extend_from_slice(scheme.report());
                         }
@@ -327,28 +347,29 @@ impl Emulation {
                     (None, None) if body.len() < 8 => return None,
                     (None, None) => return Some((2, false)),
                 };
-                let color = match &body[..len] {
-                    b"10;?" => self
-                        .viewer
-                        .foreground
-                        .as_deref()
-                        .or(self.system.foreground.as_deref())
-                        .map(|spec| ("10", spec)),
-                    b"11;?" => self
-                        .viewer
-                        .background
-                        .as_deref()
-                        .or(self.system.background.as_deref())
-                        .map(|spec| ("11", spec)),
-                    _ => None,
+                let length = 2 + len + terminator.len();
+                let (code, foreground, observed) = match &body[..len] {
+                    b"10;?" => ("10", true, self.viewer.foreground.as_deref()),
+                    b"11;?" => ("11", false, self.viewer.background.as_deref()),
+                    _ => return Some((length, false)),
                 };
-                if let Some((code, spec)) = color {
+                // The probe established which replies this viewer can send.
+                // It is the only source of its current palette once attached.
+                if self.forward_viewer_queries() && observed.is_some() {
+                    return Some((length, false));
+                }
+                if let Some(spec) = observed.or_else(|| {
+                    self.scheme().map(|scheme| {
+                        let (fg, bg) = scheme.palette();
+                        if foreground { fg } else { bg }
+                    })
+                }) {
                     answers
                         .colors
                         .extend_from_slice(format!("\x1b]{code};{spec}").as_bytes());
                     answers.colors.extend_from_slice(terminator);
                 }
-                Some((2 + len + terminator.len(), color.is_some()))
+                Some((length, true))
             }
             b'c' => {
                 self.modes.clear();
@@ -390,6 +411,10 @@ impl Emulation {
         }
     }
 
+    fn forward_viewer_queries(&self) -> bool {
+        self.viewer_ready && self.viewer.device_attributes
+    }
+
     fn scheme(&self) -> Option<Scheme> {
         self.viewer.scheme.or(self.system.scheme)
     }
@@ -404,6 +429,17 @@ impl Emulation {
     pub(crate) fn viewer(&mut self, colors: Colors) -> &'static [u8] {
         self.viewer = colors.checked();
         self.theme_report()
+    }
+
+    /// The viewer's live report itself is already going to the TUI. Record
+    /// it for any virtual fallback queries that follow that report.
+    pub(super) fn viewer_scheme(&mut self, scheme: Scheme) {
+        if self.viewer.scheme != Some(scheme) && !self.forward_viewer_queries() {
+            self.viewer.foreground = None;
+            self.viewer.background = None;
+        }
+        self.viewer.scheme = Some(scheme);
+        self.viewer.scheme_reporting = true;
     }
 
     pub(crate) fn detach(&mut self) -> &'static [u8] {
@@ -509,6 +545,61 @@ mod tests {
         assert_eq!(tui.attach_preamble(), b"\x1b[?1006h");
         tui.output(b"\x1bc");
         assert!(tui.attach_preamble().is_empty());
+    }
+
+    #[test]
+    fn attached_colour_probes_use_fresh_viewer_replies_in_terminal_order() {
+        let mut tui = Emulation::new(Scheme::Dark);
+        tui.route(b"\x1b[?2031h");
+        tui.attach();
+        assert_eq!(
+            tui.viewer(Colors {
+                background: Some("rgb:f/f/f".into()),
+                scheme: Some(Scheme::Light),
+                scheme_reporting: true,
+                device_attributes: true,
+                ..Colors::default()
+            }),
+            b"\x1b[?997;2n"
+        );
+        let probe = b"\x1b]11;?\x07\x1b[?996n\x1b[c";
+        assert_eq!(tui.route(probe), (vec![], probe.to_vec()));
+        tui.viewer_scheme(Scheme::Dark);
+        assert_eq!(tui.route(probe), (vec![], probe.to_vec()));
+
+        // If only the background was supported, the virtual foreground
+        // is sent before the forwarded background and final DA.
+        let (answer, display) = tui.route(b"\x1b]10;?\x07\x1b]11;?\x07\x1b[c");
+        assert_eq!(answer, b"\x1b]10;rgb:eeee/eeee/eeee\x07");
+        assert_eq!(display, b"\x1b]11;?\x07\x1b[c");
+        assert_eq!(tui.detach(), b"\x1b[?997;1n");
+        assert_eq!(
+            tui.route(probe),
+            (
+                b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07\x1b[?997;1n\x1b[?62;22c".to_vec(),
+                vec![],
+            )
+        );
+        assert_eq!(tui.system(Scheme::Light), b"\x1b[?997;2n");
+    }
+
+    #[test]
+    fn legacy_viewer_without_colour_query_support_uses_its_effective_scheme() {
+        let mut tui = Emulation::new(Scheme::Dark);
+        tui.attach();
+        tui.viewer(Colors {
+            scheme: Some(Scheme::Light),
+            ..Colors::default()
+        });
+        assert_eq!(
+            tui.output(b"\x1b]11;?\x07"),
+            b"\x1b]11;rgb:efef/f1f1/f5f5\x07"
+        );
+        tui.viewer_scheme(Scheme::Dark);
+        assert_eq!(
+            tui.output(b"\x1b]11;?\x07"),
+            b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07"
+        );
     }
 
     #[test]

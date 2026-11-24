@@ -102,12 +102,19 @@ fn report(bytes: &[u8], colors: &mut Colors) -> Option<usize> {
                 .take_while(|b| b.is_ascii_digit() || **b == b';')
                 .count();
             match (&bytes[3..3 + params], *bytes.get(3 + params)?) {
-                (b"997;1", b'n') => colors.scheme = Some(Scheme::Dark),
-                (b"997;2", b'n') => colors.scheme = Some(Scheme::Light),
+                (b"997;1", b'n') => {
+                    colors.scheme = Some(Scheme::Dark);
+                    colors.scheme_reporting = true;
+                }
+                (b"997;2", b'n') => {
+                    colors.scheme = Some(Scheme::Light);
+                    colors.scheme_reporting = true;
+                }
                 (flags, b'u') if !flags.is_empty() && flags.iter().all(u8::is_ascii_digit) => {
                     colors.keyboard_flags = Some(std::str::from_utf8(flags).ok()?.parse().ok()?);
                 }
-                (_, b'c' | b'n') => {}
+                (attributes, b'c') if !attributes.is_empty() => colors.device_attributes = true,
+                (_, b'n') => {}
                 _ => return None,
             }
             Some(3 + params + 1)
@@ -462,11 +469,17 @@ mod tests {
         assert_eq!(colors.background.as_deref(), Some("rgb:efef/f1f1/f5f5"));
         assert_eq!(colors.scheme, Some(Scheme::Light));
         assert_eq!(typed, b"q\x1b[A");
-        assert!(complete);
+        assert!(complete && colors.device_attributes && colors.scheme_reporting);
 
         // A terminal that knows none of the colour questions still ends the wait.
         let (colors, typed, complete) = read_colors(b"\x1b[?1;2c");
-        assert_eq!(colors, Colors::default());
+        assert_eq!(
+            colors,
+            Colors {
+                device_attributes: true,
+                ..Colors::default()
+            }
+        );
         assert!(typed.is_empty() && complete);
 
         // Alt+] is a key, even with an answer right behind it.

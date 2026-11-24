@@ -63,6 +63,7 @@ pub(crate) const COLORS: u8 = 3;
 struct Tty {
     write: tokio::sync::Mutex<OwnedWritePty>,
     emulation: Mutex<Emulation>,
+    output_gate: tokio::sync::Mutex<()>,
     attached: AtomicBool,
     /// The screen as watchers are shown it, at the PTY's size.
     screen: Arc<watch::Screen>,
@@ -73,18 +74,29 @@ impl Tty {
         Self {
             write: tokio::sync::Mutex::new(write),
             emulation: Mutex::new(Emulation::new(scheme)),
+            output_gate: tokio::sync::Mutex::new(()),
             attached: AtomicBool::new(false),
             screen: Arc::new(watch::Screen::new(rows, cols)),
         }
     }
 
-    fn output(&self, bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
-        let mut emulation = self.emulation();
-        let (answer, display) = emulation.route(bytes);
+    async fn output(&self, bytes: &[u8]) -> Vec<u8> {
+        let _gate = self.output_gate.lock().await;
+        let (answer, display) = self.emulation().route(bytes);
+        if !answer.is_empty() {
+            // A native terminal may answer DA as soon as the viewer sees
+            // it. Send virtual replies first so DA still closes the probe.
+            let write = async { self.write.lock().await.write_all(&answer).await };
+            match tokio::time::timeout(Duration::from_millis(250), write).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::debug!(%error, "answering a coding TUI terminal query"),
+                Err(_) => tracing::debug!("the coding TUI did not take its terminal's answer"),
+            }
+        }
         if !display.is_empty() {
             self.screen.output(&display);
         }
-        (answer, display)
+        display
     }
 
     /// Set the PTY's size, the viewer's doing or a watcher's fit; watchers
@@ -567,21 +579,7 @@ pub async fn run(
             while let Ok(n @ 1..) = pty_read.read(&mut buf).await {
                 // A TUI asks its terminal for its colours as it starts,
                 // before anyone can have attached to answer.
-                let (answer, display) = tty.output(&buf[..n]);
-                if !answer.is_empty() {
-                    // An answer the TUI does not read must not stop its
-                    // output being drained.
-                    let write = async { tty.write.lock().await.write_all(&answer).await };
-                    match tokio::time::timeout(Duration::from_millis(250), write).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            tracing::debug!(%error, "answering a coding TUI terminal query")
-                        }
-                        Err(_) => {
-                            tracing::debug!("the coding TUI did not take its terminal's answer")
-                        }
-                    }
-                }
+                let display = tty.output(&buf[..n]).await;
                 if !display.is_empty() {
                     let _ = feed.send(display);
                 }
@@ -1224,9 +1222,10 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
     })
     .await??;
     tty.resize(rows, cols).await?;
-    // Subscribe alongside the snapshot and the modes. The output pump holds
-    // the same emulation lock while it updates both.
+    // Subscribe alongside the snapshot and the modes, between complete
+    // output batches and their virtual replies.
     let (mirror, mut output, modes, keyboard) = {
+        let _gate = tty.output_gate.lock().await;
         let mut emulation = tty.emulation();
         let (mirror, output) = tty.screen.join();
         let modes = emulation.attach();
@@ -1355,7 +1354,11 @@ async fn forward_keys(
         // Terminal reports are escape sequences, which the draft passes over.
         viewer.draft.observe(keys);
     }
-    tty.write.lock().await.write_all(keys).await?;
+    let mut write = tty.write.lock().await;
+    if let Some(scheme) = classify.take_viewer_scheme() {
+        tty.emulation().viewer_scheme(scheme);
+    }
+    write.write_all(keys).await?;
     Ok(())
 }
 
@@ -1365,6 +1368,36 @@ mod tests {
 
     fn choice(model: Option<&str>, effort: Option<&str>) -> HostedModel {
         HostedModel::new(model.map(str::to_owned), effort.map(str::to_owned))
+    }
+
+    #[tokio::test]
+    async fn virtual_answers_precede_displayed_device_attributes() -> anyhow::Result<()> {
+        let (pty, _pts) = pty_process::open()?;
+        let (_, write) = pty.into_split();
+        let tty = Arc::new(Tty::new(write, Scheme::Light, 24, 80));
+        tty.emulation().attach();
+        tty.emulation().viewer(Colors {
+            device_attributes: true,
+            ..Colors::default()
+        });
+        let (_, mut viewer) = tty.screen.join();
+        let blocked = tty.write.lock().await;
+        let output = tokio::spawn({
+            let tty = tty.clone();
+            async move { tty.output(b"\x1b]11;?\x07\x1b[c").await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), viewer.recv())
+                .await
+                .is_err()
+        );
+        drop(blocked);
+        assert_eq!(output.await?, b"\x1b[c");
+        assert!(
+            matches!(viewer.recv().await?, watch::Change::Output(bytes) if bytes.as_ref() == b"\x1b[c")
+        );
+        Ok(())
     }
 
     #[test]
@@ -1470,7 +1503,8 @@ mod tests {
         let (pty, _pts) = pty_process::open().unwrap();
         let (_read, write) = pty.into_split();
         let tty = Tty::new(write, Scheme::Light, 3, 40);
-        tty.output(b"historic-0\r\nhistoric-1\r\nhistoric-2\r\nlive-0\r\nlive-1\r\nlive-2");
+        tty.output(b"historic-0\r\nhistoric-1\r\nhistoric-2\r\nlive-0\r\nlive-1\r\nlive-2")
+            .await;
         let (_, mut changes) = tty.screen.join();
         let dir = tempfile::tempdir().unwrap();
         let activity = Mutex::new(Viewer {
@@ -1487,7 +1521,7 @@ mod tests {
             assert!(!attach.windows(5).any(|part| part == b"?1000"));
             assert!(!attach.windows(6).any(|part| part == b"?1049h"));
             let live = b"\x1b[?1002;1006h\x1b[?1049hALT\x1b[?1049l\x1b[?1002;1006lMAIN";
-            tty.output(live);
+            tty.output(live).await;
             let updates = viewer_output(&mut viewer, b"MAIN").await;
             assert!(updates.ends_with(live), "{updates:?}");
 
@@ -1509,7 +1543,7 @@ mod tests {
                 (4, 50),
                 "the attach must not resize to a temporary geometry"
             );
-            tty.output(b"post-resize");
+            tty.output(b"post-resize").await;
             assert_eq!(
                 viewer_output(&mut viewer, b"post-resize").await,
                 b"post-resize"
@@ -1525,7 +1559,7 @@ mod tests {
         let (pty, _pts) = pty_process::open().unwrap();
         let (_read, write) = pty.into_split();
         let tty = Tty::new(write, Scheme::Light, 3, 40);
-        tty.output(b"opening");
+        tty.output(b"opening").await;
         let dir = tempfile::tempdir().unwrap();
         let activity = Mutex::new(Viewer {
             path: dir.path().join("viewer.json"),
@@ -1539,7 +1573,7 @@ mod tests {
             viewer_output(&mut viewer, b"opening").await;
             // The attachment cannot drain these until this task yields.
             for row in 0..600 {
-                tty.output(format!("\r\nrow-{row:03}").as_bytes());
+                tty.output(format!("\r\nrow-{row:03}").as_bytes()).await;
             }
         };
         let (result, ()) = tokio::join!(relay(host, &tty, &activity), lag);
@@ -1557,7 +1591,7 @@ mod tests {
                 output.windows(7).filter(|row| *row == b"row-123").count(),
                 1
             );
-            tty.output(b"\r\ncontinued");
+            tty.output(b"\r\ncontinued").await;
             assert!(
                 viewer_output(&mut viewer, b"continued")
                     .await
