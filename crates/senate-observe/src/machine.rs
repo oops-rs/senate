@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use senate_core::{CommitteeId, SenatorName};
 use senate_observe_protocol::{
     Hosting, LinkKind, LinkState, Person, Project, SenateLink, SenatorState, Snapshot,
@@ -51,7 +52,7 @@ pub struct LocalHistory {
     pub alias: Option<String>,
 }
 
-pub(crate) fn merge(
+pub(crate) async fn merge(
     registry: &Registry,
     grant: &GrantInfo,
     public: &mut Snapshot,
@@ -126,6 +127,7 @@ pub(crate) fn merge(
     public.approvals.sort_by(|a, b| a.id.cmp(&b.id));
     public.approvals.dedup_by(|a, b| a.id == b.id);
     let mut projects = BTreeMap::new();
+    let mut roots = BTreeMap::new();
     for committee in &mut public.committees {
         let key = committee
             .id
@@ -146,15 +148,39 @@ pub(crate) fn merge(
             .filter(|name| {
                 !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
             })
-            .unwrap_or("Project");
+            .unwrap_or("Project")
+            .to_owned();
+        roots.entry(project_id.clone()).or_insert(path);
         committee.project_id = Some(project_id.clone());
         projects
             .entry(project_id.clone())
             .or_insert_with(|| Project {
                 id: project_id,
-                name: name.to_owned(),
+                name,
                 link: committee.link.clone(),
+                releases: None,
             });
+    }
+    // Large views keep their ordinary project rows while individual
+    // release requests time out. A cached result remains usable.
+    let results = futures::stream::iter(roots)
+        .map(|(id, root)| async move { (id, registry.releases.get(&root).await) })
+        .buffer_unordered(4);
+    tokio::pin!(results);
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(7));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            result = results.next() => match result {
+                Some((id, releases)) => {
+                    if let Some(project) = projects.get_mut(&id) {
+                        project.releases = releases;
+                    }
+                }
+                None => break,
+            },
+        }
     }
     public.projects = projects.into_values().collect();
     if grant.topology {

@@ -90,6 +90,16 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub link: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub releases: Option<Vec<ProjectRelease>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct ProjectRelease {
+    pub tag: String,
+    pub at: DateTime<Utc>,
+    pub merges: u32,
+    pub fixes: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]

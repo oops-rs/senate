@@ -101,6 +101,8 @@ pub enum Event {
     ViewerDetached(SenatorRef),
     #[serde(rename = "link.changed")]
     LinkChanged(LinkChanged),
+    #[serde(rename = "project.release_seen")]
+    ProjectReleaseSeen(ProjectReleaseSeen),
     #[serde(rename = "tool.started")]
     ToolStarted(crate::ToolActivity),
     #[serde(rename = "tool.ended")]
@@ -185,6 +187,12 @@ pub struct ApprovalDecided {
     pub id: String,
     pub tool_kind: ApprovalTool,
     pub decision: ApprovalDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct ProjectReleaseSeen {
+    pub project_id: String,
+    pub release: crate::ProjectRelease,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]

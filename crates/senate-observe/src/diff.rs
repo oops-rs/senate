@@ -215,5 +215,32 @@ pub(crate) fn change_hints(before: &Snapshot, after: &Snapshot) -> Vec<crate::Hi
             });
         }
     }
+    let previous_projects: BTreeMap<_, _> = before
+        .projects
+        .iter()
+        .map(|project| (&project.id, project))
+        .collect();
+    for project in &after.projects {
+        if let Some(previous) = previous_projects
+            .get(&project.id)
+            .and_then(|project| project.releases.as_ref())
+            && let Some(releases) = &project.releases
+        {
+            for release in releases {
+                if !previous.iter().any(|old| old.tag == release.tag) {
+                    hints.push(crate::Hint {
+                        committee_id: None,
+                        link: None,
+                        event: Event::ProjectReleaseSeen(
+                            senate_observe_protocol::ProjectReleaseSeen {
+                                project_id: project.id.clone(),
+                                release: release.clone(),
+                            },
+                        ),
+                    });
+                }
+            }
+        }
+    }
     hints
 }

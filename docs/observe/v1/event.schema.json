@@ -351,6 +351,22 @@
       "type": "object",
       "properties": {
         "data": {
+          "$ref": "#/$defs/ProjectReleaseSeen"
+        },
+        "kind": {
+          "type": "string",
+          "const": "project.release_seen"
+        }
+      },
+      "required": [
+        "kind",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "data": {
           "$ref": "#/$defs/ToolActivity"
         },
         "kind": {
@@ -1043,11 +1059,63 @@
         },
         "name": {
           "type": "string"
+        },
+        "releases": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProjectRelease"
+          }
         }
       },
       "required": [
         "id",
         "name"
+      ]
+    },
+    "ProjectRelease": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "fixes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "merges": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tag": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tag",
+        "at",
+        "merges",
+        "fixes"
+      ]
+    },
+    "ProjectReleaseSeen": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string"
+        },
+        "release": {
+          "$ref": "#/$defs/ProjectRelease"
+        }
+      },
+      "required": [
+        "project_id",
+        "release"
       ]
     },
     "Removals": {

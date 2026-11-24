@@ -11,6 +11,7 @@ mod machine;
 mod notices;
 mod previews;
 mod projection;
+mod releases;
 
 pub use cards::CardKey;
 pub use grants::{

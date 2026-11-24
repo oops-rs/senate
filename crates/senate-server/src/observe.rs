@@ -216,6 +216,7 @@ impl SenateSource for Source {
             "tool_lifecycle".into(),
             "tool_lifecycle:claude".into(),
             "tool_lifecycle:codex".into(),
+            "project_releases".into(),
             "approval_metadata".into(),
             "message_routing".into(),
             "hosted_viewers".into(),
@@ -229,7 +230,7 @@ impl SenateSource for Source {
                 .into(),
             );
         }
-        registry.merge_machine_facts(grant, &mut snapshot)?;
+        registry.merge_machine_facts(grant, &mut snapshot).await?;
         for committee in &mut snapshot.committees {
             committee.card = registry.card(&CardKey::Committee {
                 committee_id: committee

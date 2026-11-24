@@ -196,6 +196,7 @@ pub struct Registry {
     machine: Mutex<Option<Arc<dyn MachineSource>>>,
     previews: Previews,
     cards: Cards,
+    pub(crate) releases: crate::releases::Releases,
 }
 
 impl Registry {
@@ -231,6 +232,7 @@ impl Registry {
             machine: Mutex::new(None),
             previews: Previews::open(directory)?,
             cards: Cards::open(directory)?,
+            releases: crate::releases::Releases::default(),
         }))
     }
 
@@ -277,12 +279,12 @@ impl Registry {
         source.read()
     }
 
-    pub fn merge_machine_facts(
+    pub async fn merge_machine_facts(
         &self,
         grant: &GrantInfo,
         snapshot: &mut senate_observe_protocol::Snapshot,
     ) -> Result<(), ProjectionError> {
-        crate::machine::merge(self, grant, snapshot)
+        crate::machine::merge(self, grant, snapshot).await
     }
 
     pub fn tool_demand(&self) -> Option<crate::ToolDemand> {
