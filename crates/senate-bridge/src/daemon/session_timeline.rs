@@ -4,7 +4,7 @@ use super::*;
 use crate::ipc::{TimelineDirection, TimelineReply, TimelineUpdate};
 use crate::timeline::{self, SidebarTranscript, Transcript};
 use chrono::{DateTime, Utc};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 impl Shared {
@@ -137,14 +137,6 @@ pub(super) async fn serve(
     }
 }
 
-pub(super) async fn send<T: Serialize>(write: &mut OwnedWriteHalf, value: &T) -> bool {
-    let Ok(mut line) = serde_json::to_vec(value) else {
-        return false;
-    };
-    line.push(b'\n');
-    write.write_all(&line).await.is_ok()
-}
-
 enum Source {
     Jsonl(Box<Transcript>),
     Agy(Box<timeline::agy::Watch>),
@@ -195,7 +187,7 @@ async fn stream(shared: &Shared, id: &str, after: u64, write: &mut OwnedWriteHal
     let mut transcript = match start.await {
         Ok(transcript) => transcript,
         Err(error) => {
-            send(write, &Reply::err(error)).await;
+            send_ipc_line(write, &Reply::err(error)).await;
             return;
         }
     };
@@ -215,7 +207,7 @@ async fn stream(shared: &Shared, id: &str, after: u64, write: &mut OwnedWriteHal
         .ok()
         .flatten();
         let Some((next, items)) = read else {
-            send(
+            send_ipc_line(
                 write,
                 &TimelineUpdate {
                     items: Vec::new(),
@@ -228,7 +220,7 @@ async fn stream(shared: &Shared, id: &str, after: u64, write: &mut OwnedWriteHal
         };
         transcript = next;
         if (!items.is_empty() || previous_working != Some(working))
-            && !send(
+            && !send_ipc_line(
                 write,
                 &TimelineUpdate {
                     items,

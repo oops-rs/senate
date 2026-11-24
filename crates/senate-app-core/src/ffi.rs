@@ -543,12 +543,13 @@ impl AppCore {
         before: Option<String>,
         limit: u32,
     ) -> Result<crate::history::HistoryPage, CoreError> {
-        let committee = committee
-            .map(|c| CommitteeId::new(c))
-            .transpose()
-            .map_err(|e| CoreError::Invalid {
-                message: e.to_string(),
-            })?;
+        let committee =
+            committee
+                .map(CommitteeId::new)
+                .transpose()
+                .map_err(|e| CoreError::Invalid {
+                    message: e.to_string(),
+                })?;
         let request = Request::SessionHistory {
             committee,
             before,
@@ -571,12 +572,13 @@ impl AppCore {
         cursor: Option<String>,
         limit: u32,
     ) -> Result<crate::history::SearchPage, CoreError> {
-        let committee = committee
-            .map(|c| CommitteeId::new(c))
-            .transpose()
-            .map_err(|e| CoreError::Invalid {
-                message: e.to_string(),
-            })?;
+        let committee =
+            committee
+                .map(CommitteeId::new)
+                .transpose()
+                .map_err(|e| CoreError::Invalid {
+                    message: e.to_string(),
+                })?;
         let request = Request::SessionSearch {
             query,
             committee,
@@ -716,6 +718,24 @@ impl AppCore {
             committee,
             to,
             body,
+        })
+        .await
+    }
+
+    /// Stage one attachment for a running hosted session, returning the
+    /// path that can be included in a note. This does not post the note.
+    pub async fn session_drop(
+        &self,
+        session_id: String,
+        name: String,
+        bytes: Vec<u8>,
+    ) -> Result<String, CoreError> {
+        self.on_runtime(move |driver| async move {
+            driver
+                .link()
+                .session_drop(session_id, name, &bytes)
+                .await
+                .map_err(|error| Failure::Daemon(model::message(&error)))
         })
         .await
     }

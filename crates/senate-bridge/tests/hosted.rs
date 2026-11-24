@@ -2306,6 +2306,93 @@ async fn one_hosted_session() -> (Harness, PathBuf) {
     (h, root)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_drop_uploads_binary_data_only_to_a_running_host() {
+    let (h, _) = one_hosted_session().await;
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let row = &rows.rows[0];
+    let session_id = &row.session_id;
+    // Larger than a normal JSON line, and not UTF-8.
+    let bytes = vec![0xff; ipc::MAX_LINE + 1];
+    let saved = ipc::IpcClient::connect(&h.socket(), TIMEOUT)
+        .await
+        .unwrap()
+        .session_drop(session_id.clone(), "a file.png".into(), &bytes)
+        .await
+        .unwrap();
+    let saved = PathBuf::from(saved);
+    let drops = row
+        .tty
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap()
+        .join("drops");
+    assert!(saved.starts_with(&drops));
+    assert_eq!(saved.file_name().unwrap(), "a file.png");
+    assert_eq!(std::fs::read(&saved).unwrap(), bytes);
+    assert_eq!(
+        std::fs::metadata(&saved).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    async fn reject(h: &Harness, session_id: &str, name: &str, size: u32, message: &str) {
+        // Sending only the header proves that the server refuses without
+        // asking for file bytes.
+        let result = ipc::request::<()>(
+            &h.socket(),
+            &Request::SessionDrop {
+                session_id: session_id.into(),
+                name: name.into(),
+                size,
+            },
+            TIMEOUT,
+            TIMEOUT,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ipc::ClientError::Remote(error)) if error.message.contains(message))
+        );
+    }
+    for name in [
+        "../escape.png",
+        "folder/escape.png",
+        "folder\\escape.png",
+        ".",
+        "/escape.png",
+    ] {
+        reject(&h, session_id, name, 0, "file name").await;
+    }
+    reject(
+        &h,
+        session_id,
+        "large.png",
+        ipc::MAX_SESSION_DROP_BYTES + 1,
+        "20 MiB",
+    )
+    .await;
+    reject(&h, "unknown", "image.png", 0, "no registered session").await;
+
+    let _: ipc::StopReply = call(
+        &h,
+        &Request::Stop {
+            session: Default::default(),
+            senator: row.primary.clone().into(),
+            force: false,
+        },
+    )
+    .await;
+    reject(
+        &h,
+        session_id,
+        "image.png",
+        0,
+        "terminal host is not running",
+    )
+    .await;
+    assert!(!saved.exists(), "the host owns the attachment lifetime");
+}
+
 /// Waits until no process names `root`, failing after `within`.
 async fn none_left_under(root: &std::path::Path, within: Duration) {
     let deadline = std::time::Instant::now() + within;

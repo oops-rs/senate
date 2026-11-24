@@ -183,6 +183,7 @@ mod replace;
 mod roles;
 mod roster;
 mod secretary_work;
+mod session_drop;
 mod session_history;
 mod session_timeline;
 mod spawn_attempt;
@@ -3473,6 +3474,9 @@ impl Shared {
                 wrap(self.on_approve_session(&senator, decision).await)
             }
             // Served by the connection itself (`serve_connection`).
+            Request::SessionDrop { .. } => Reply::err(IpcError::bad_request(
+                "attachments require an upload connection on the local person socket",
+            )),
             Request::Watch { .. } | Request::TimelineWatch { .. } => Reply::err(IpcError::bad_request(
                 "watch turns a connection into a stream; send it as the connection's request",
             )),
@@ -6250,6 +6254,19 @@ async fn serve_ipc(
     }
 }
 
+async fn send_ipc_line<T: Serialize>(
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+    value: &T,
+) -> bool {
+    use tokio::io::AsyncWriteExt;
+
+    let Ok(mut line) = serde_json::to_vec(value) else {
+        return false;
+    };
+    line.push(b'\n');
+    write.write_all(&line).await.is_ok()
+}
+
 async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watch::Receiver<bool>) {
     use tokio::io::AsyncWriteExt;
 
@@ -6304,6 +6321,14 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         serve_watch(&shared, reader, write, shutdown).await;
                         return;
                     }
+                    Ok(request @ Request::SessionDrop { .. }) => {
+                        let mut shutdown = shutdown.clone();
+                        tokio::select! {
+                            () = Box::pin(session_drop::serve(&shared, peer, request, reader, write)) => {}
+                            _ = shutdown.changed() => {}
+                        }
+                        return;
+                    }
                     Ok(Request::TimelineWatch { session_id, after }) => {
                         match shared
                         .refuse_agent_caller(peer, "Stream session transcripts from your own terminal or the Senate app")
@@ -6321,7 +6346,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                             .await
                         }
                         Err(refused) => {
-                            session_timeline::send(&mut write, &Reply::err(refused)).await;
+                            send_ipc_line(&mut write, &Reply::err(refused)).await;
                         }
                     }
                         return;
