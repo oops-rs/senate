@@ -8,8 +8,8 @@ import SenateCore
 /// bundle as `town/`), hosted under the scene host contract
 /// (docs/observe.md, "Scene host contract"): one ordered channel of JSON
 /// messages `{host_version: 1, type, request_id?, data}`, here bound to the
-/// `scene` script handler (in) and `__senateScene(message)` (out). Shown
-/// instead of the SpriteKit map while `SENATE_APP_TOWN_WEB=1`.
+/// `scene` script handler (in) and `__senateScene(message)` (out). The
+/// Town tab (`TownPage`) shows it.
 ///
 /// This is the shell; the page is content and knows nothing of the app:
 /// - Data comes only from the Senate's public Observe API, through a native
@@ -40,10 +40,8 @@ import SenateCore
 /// - Navigation away and new windows are refused.
 @MainActor
 final class TownWebPage: NSObject {
-    static let enabled = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_WEB"] == "1"
-    /// `SENATE_APP_TOWN_DEMO=1` (or `large`): this shell replays the scene's demo recording
-    /// (`recordings/demo*.ndjson`, the observe recording format) through the same contract.
-    static let demo: String? = ProcessInfo.processInfo.environment[TownScript.env].map { $0 == "large" ? "large" : "small" }
+    /// `SENATE_APP_TOWN_DEMO=1` (or `large`): start on the demo (snapshots, trying the scene).
+    static let demoEnv: String? = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_DEMO"].map { $0 == "large" ? "large" : "small" }
     /// For the demo: `SENATE_APP_TOWN_TIME` (dawn, day, dusk, night), `SENATE_APP_TOWN_WEATHER`
     /// (clear, cloudy, rain, windy, fog) and `SENATE_APP_TOWN_SEASON` (spring, summer, autumn, winter)
     /// fix the time of day, the weather and the season instead of the clock's and the date's.
@@ -77,6 +75,11 @@ final class TownWebPage: NSObject {
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     /// The live Observe subscription (not in the demo).
     private var client: ObserveClient?
+    /// Playing the demo recording (`small` or `large`) instead of this Senate.
+    private(set) var demo: String?
+    /// Everything the scene is sent, also for the accessible list.
+    var onSnapshot: ([String: Any]) -> Void = { _ in }
+    var onFrame: ([String: Any]) -> Void = { _ in }
     /// Town has no grant for this Senate yet (or it was revoked): the view offers to create one.
     var onAccessNeeded: (Bool) -> Void = { _ in }
     private(set) var accessNeeded = false {
@@ -85,7 +88,8 @@ final class TownWebPage: NSObject {
 
     init(store: CoreStore) {
         self.store = store
-        page = Self.demo != nil && !Self.demoLook.isEmpty ? URL(string: "senate-town://town/index.html?\(Self.demoLook)")! : TownScheme.page
+        demo = Self.demoEnv
+        page = Self.demoEnv != nil && !Self.demoLook.isEmpty ? URL(string: "senate-town://town/index.html?\(Self.demoLook)")! : TownScheme.page
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         config.setURLSchemeHandler(TownScheme(), forURLScheme: TownScheme.scheme)
@@ -125,7 +129,7 @@ final class TownWebPage: NSObject {
     private func onScreenChanged(_ now: Bool) {
         guard now != sentOnScreen else { return }
         sentOnScreen = now
-        if let demo = Self.demo {
+        if let demo {
             demoTask?.cancel()
             demoTask = nil
             if now { startDemo(demo) }
@@ -136,7 +140,7 @@ final class TownWebPage: NSObject {
 
     /// Subscribe with the grant kept for this Senate, or say access is needed.
     private func subscribe() {
-        guard client == nil, ready, sentOnScreen, Self.demo == nil else { return }
+        guard client == nil, ready, sentOnScreen, demo == nil else { return }
         guard let grant = ObserveAccess.load(senateKey) else {
             accessNeeded = true
             send("status", ["state": "access_needed"])
@@ -144,8 +148,8 @@ final class TownWebPage: NSObject {
         }
         accessNeeded = false
         let client = ObserveClient(grant: grant)
-        client.onSnapshot = { [weak self] in self?.send("observe.snapshot", ["snapshot": $0]) }
-        client.onFrame = { [weak self] in self?.send("observe.event", ["frame": $0]) }
+        client.onSnapshot = { [weak self] in self?.deliver(snapshot: $0) }
+        client.onFrame = { [weak self] in self?.deliver(frame: $0) }
         client.onStatus = { [weak self] status in
             guard let self else { return }
             switch status {
@@ -171,7 +175,7 @@ final class TownWebPage: NSObject {
         let issued = try await core.observeGrant(name: "Town")
         ObserveAccess.save(.init(url: issued.url, token: issued.token, id: issued.id, expiresAt: issued.expiresAt), senateKey)
         accessNeeded = false
-        subscribe()
+        watchLive()
     }
 
     /// Drop the grant kept for this Senate (the snapshot hook cleans up after itself).
@@ -277,13 +281,43 @@ final class TownWebPage: NSObject {
                     if Task.isCancelled { return }
                     guard let self else { return }
                     switch row["type"] as? String {
-                    case "snapshot": if let data = row["data"] { self.send("observe.snapshot", ["snapshot": data]) }
-                    case "frame": if let data = row["data"] { self.send("observe.event", ["frame": data]) }
+                    case "snapshot": if let data = row["data"] as? [String: Any] { self.deliver(snapshot: data) }
+                    case "frame": if let data = row["data"] as? [String: Any] { self.deliver(frame: data) }
                     default: break
                     }
                 }
             }
         }
+    }
+
+    private func deliver(snapshot: [String: Any]) {
+        onSnapshot(snapshot)
+        send("observe.snapshot", ["snapshot": snapshot])
+    }
+
+    private func deliver(frame: [String: Any]) {
+        onFrame(frame)
+        send("observe.event", ["frame": frame])
+    }
+
+    /// The person chose to watch the demo (no access yet, or a Senate without Observe).
+    func watchDemo(_ kind: String = "small") {
+        client?.stop()
+        client = nil
+        demo = kind
+        accessNeeded = false
+        guard ready, sentOnScreen else { return }
+        demoTask?.cancel()
+        demoTask = nil
+        startDemo(kind)
+    }
+
+    /// Back from the demo to this Senate.
+    func watchLive() {
+        demoTask?.cancel()
+        demoTask = nil
+        demo = nil
+        subscribe()
     }
 
     func evaluate(_ js: String, _ args: [String: Any] = [:]) async -> Any? {
