@@ -77,9 +77,10 @@ struct ThreadPage: View {
         ToolbarItemGroup(placement: .primaryAction) {
             Button { Task { await store.take(row) } } label: {
                 Label(L("inbox.take"), systemImage: "hand.raised")
-                    .labelStyle(.titleAndIcon)
             }
-                .help(L("inbox.take_help"))
+                // The page's one decisive action: tinted.
+                .buttonStyle(.borderedProminent)
+                .help(L("inbox.take"))
                 .disabled(row.takeover != nil || busy || !store.state.online)
             Menu {
                 Button(role: .destructive) { confirmClose = true } label: {
