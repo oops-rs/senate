@@ -519,12 +519,16 @@ impl Mirror {
         }
         // Reporting modes are replayed separately by Emulation. The keypad
         // and cursor modes come from the screen emulator.
-        if screen.application_keypad() {
-            output.extend_from_slice(b"\x1b=");
-        }
-        if screen.application_cursor() {
-            output.extend_from_slice(b"\x1b[?1h");
-        }
+        output.extend_from_slice(if screen.application_keypad() {
+            b"\x1b="
+        } else {
+            b"\x1b>"
+        });
+        output.extend_from_slice(if screen.application_cursor() {
+            b"\x1b[?1h"
+        } else {
+            b"\x1b[?1l"
+        });
         let style = match screen.cursor_style() {
             vt100::CursorStyle::Default => 0,
             vt100::CursorStyle::BlinkBlock => 1,
@@ -844,6 +848,29 @@ mod tests {
         );
         screen.set_scrollback(1);
         assert!(screen.contents().starts_with("history-2\nprimary-1"));
+    }
+
+    #[test]
+    fn attach_snapshot_overrides_both_cursor_and_keypad_modes() {
+        for alternate in [false, true] {
+            let screen = Screen::new(3, 20);
+            if alternate {
+                screen.output(b"\x1b[?1049h");
+            }
+            let mut viewer = vt100::Parser::new(dimension(3), dimension(20), 0);
+            viewer.process(b"\x1b[?1h\x1b=");
+            let (mirror, _) = screen.join();
+            viewer.process(&mirror.attach_snapshot());
+            assert_eq!(viewer.screen().alternate_screen(), alternate);
+            assert!(!viewer.screen().application_cursor());
+            assert!(!viewer.screen().application_keypad());
+
+            screen.output(b"\x1b[?1h\x1b=");
+            let (mirror, _) = screen.join();
+            viewer.process(&mirror.attach_snapshot());
+            assert!(viewer.screen().application_cursor());
+            assert!(viewer.screen().application_keypad());
+        }
     }
 
     #[test]

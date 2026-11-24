@@ -1602,7 +1602,10 @@ mod tests {
             let live = b"\x1b[?1002;1006h\x1b[?1049hALT\x1b[?1049l\x1b[?1002;1006lMAIN";
             tty.output(live).await;
             let updates = viewer_output(&mut viewer, b"MAIN").await;
-            assert!(updates.ends_with(live), "{updates:?}");
+            assert_eq!(
+                updates,
+                b"\x1b[?1002;1006h\x1b[?1049h\x1b[=0uALT\x1b[=0u\x1b[?1049l\x1b[=0u\x1b[?1002;1006lMAIN"
+            );
 
             viewer.write_all(&[RESIZE, 0, 4, 0, 50]).await.unwrap();
             tokio::time::timeout(Duration::from_secs(3), async {
