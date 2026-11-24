@@ -19,7 +19,8 @@ struct SenatesView: View {
                 VStack(alignment: .leading, spacing: Theme.Space.xxl) {
                     header(state)
                     ForEach(state.senates) { senate in
-                        SenateSections(store: store, senate: senate, titled: state.senates.count > 1)
+                        SenateSections(store: store, senate: senate, titled: state.senates.count > 1,
+                                       stats: senate.key == state.senates.first?.key)
                     }
                 }
                 .frame(maxWidth: Theme.readingWidth, alignment: .leading)
@@ -92,6 +93,8 @@ private struct SenateSections: View {
     let senate: SenateInfo
     /// More than one Senate: each section heads with its name.
     let titled: Bool
+    /// The person's activity on this Mac, under the first Senate.
+    var stats = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.xxl) {
@@ -124,6 +127,7 @@ private struct SenateSections: View {
                     }
                 }
             }
+            if stats { ProfileStats(store: store) }
             let agents = store.state.agents.filter { $0.senate == senate.key && (store.showInactive || $0.active) }
             if !agents.isEmpty {
                 Section_(L("profile.agents")) { agentsTable(agents) }
