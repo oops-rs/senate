@@ -6029,6 +6029,23 @@
         }
       }
     },
+    "town.access_demo": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Watch a demo"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "观看演示"
+          }
+        }
+      }
+    },
     "town.access_title": {
       "extractionState": "manual",
       "localizations": {
@@ -6042,6 +6059,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "让小镇看到这个 Senate"
+          }
+        }
+      }
+    },
+    "town.access_unavailable": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This Senate can't share with Town yet (its daemon has no Observe). Watch the demo meanwhile."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这个 Senate 暂时无法与小镇共享（其守护进程没有 Observe）。可以先观看演示。"
           }
         }
       }
@@ -6178,6 +6212,91 @@
           "stringUnit": {
             "state": "translated",
             "value": "列表"
+          }
+        }
+      }
+    },
+    "town.list.asks": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ asks for approval"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 请求审批"
+          }
+        }
+      }
+    },
+    "town.list.settled": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A thread settled in %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 中的一个线程已了结"
+          }
+        }
+      }
+    },
+    "town.list.someone": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Someone"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有人"
+          }
+        }
+      }
+    },
+    "town.list.waiting": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting on you"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等你处理"
+          }
+        }
+      }
+    },
+    "town.list.wrote": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ → %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ → %@"
           }
         }
       }
@@ -6352,125 +6471,6 @@
         }
       }
     },
-    "town.said": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@ to %2$@: %3$@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@ 对 %2$@ 说：%3$@"
-          }
-        }
-      }
-    },
-    "town.secretary": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Secretary"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "秘书"
-          }
-        }
-      }
-    },
-    "town.settled": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Settled: %@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已了结：%@"
-          }
-        }
-      }
-    },
-    "town.tip.asked_by": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "asked by %@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@ 提出"
-          }
-        }
-      }
-    },
-    "town.tip.hall": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The Speaker's desk, where the Secretary works"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Speaker 的办公桌，秘书在这里工作"
-          }
-        }
-      }
-    },
-    "town.tip.senators": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Senators: %lld"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Senator：%lld"
-          }
-        }
-      }
-    },
-    "town.tip.waiting": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Waiting on %1$@: %2$@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "等 %1$@：%2$@"
-          }
-        }
-      }
-    },
     "town.title": {
       "extractionState": "manual",
       "localizations": {
@@ -6501,40 +6501,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "显示"
-          }
-        }
-      }
-    },
-    "town.waits_on": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "for %@"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "等 %@"
-          }
-        }
-      }
-    },
-    "town.you": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "you"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "你"
           }
         }
       }

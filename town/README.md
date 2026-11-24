@@ -78,8 +78,12 @@ Budget, by what the person can see:
 
 Movement is by elapsed time, so any rate looks right. All the art is packed
 into a few atlas pages (a handful of textures, so the renderer batches the
-town into few draw calls); the plaza, its roads, the tubes and the lots are
-drawn once into a texture (again only when the state changes); what is out
+town into few draw calls), with mipmaps, so art drawn at 2–4× and seen from
+afar is sampled from small copies (this alone took the GPU process from ~22% to
+~3% for 30 committees); gardens, sills and reels are art, not shapes; the
+grass is one repeated patch, not a tile layer; the plaza, its roads, the tubes
+and the lots are drawn once into a texture (again only when the state
+changes); what is out
 of view isn't drawn; people off screen are moved but not animated; the
 population is capped by what the view can hold and by the hour. **Calm** (the
 leaf button; kept in the shell's storage) halves the townspeople and turns
@@ -90,8 +94,9 @@ place), no weather moves, and the loop sleeps when still.
 
 `apps/macos/scripts/sync-town.sh` builds this package and copies `dist/`
 into `apps/macos/Senate/Web/town/`, which is committed so Xcode never needs
-Node. `SENATE_APP_TOWN_WEB=1` shows the page in the Town tab, the app being
-its shell (`Senate/Town/TownWebPage.swift`):
+Node. The Town tab shows the page, the app being its shell
+(`Senate/Town/TownWebPage.swift`), with a List view of the same Observe data
+for VoiceOver (`TownList.swift`):
 
 - Live data comes only from the Senate's Observe API, through a native
   client (`ObserveClient.swift`). The first time, the Town tab offers one
@@ -102,8 +107,9 @@ its shell (`Senate/Town/TownWebPage.swift`):
   from a fresh snapshot.
 - Clicks: `open {url}` and clicked `senate:` links go to the app's one
   router (`store.links`), unchanged.
-- `SENATE_APP_TOWN_DEMO=1` (or `large`): the app replays this package's demo
-  recording through the same contract. `SENATE_APP_TOWN_TIME`,
+- "Watch a demo" on the access card (and `SENATE_APP_TOWN_DEMO=1` or `large`
+  at launch): the app replays this package's demo recording through the same
+  contract; it is also what a Senate without Observe (an older daemon) can show. `SENATE_APP_TOWN_TIME`,
   `SENATE_APP_TOWN_WEATHER` and `SENATE_APP_TOWN_SEASON` fix its time of day,
   weather and season.
 

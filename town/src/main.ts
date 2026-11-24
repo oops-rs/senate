@@ -113,6 +113,10 @@ const game = new Phaser.Game({
   audio: { noAudio: true },
   disableContextMenu: true,
   antialias: true,
+  // Art is drawn at 2–4× its shown size; seen from afar it is sampled from
+  // smaller copies (mipmaps), which is sharper and far cheaper for the GPU
+  // than reading the whole large texture for every few pixels.
+  render: { mipmapFilter: "LINEAR_MIPMAP_LINEAR", mipmapRegeneration: true } as Phaser.Types.Core.RenderConfig,
   loader: { imageLoadType: "HTMLImageElement" },
   scale: { mode: Phaser.Scale.NONE, width: innerWidth * dpr, height: innerHeight * dpr, zoom: 1 / dpr },
   fps: { limit: 30 },
@@ -265,6 +269,10 @@ const api = {
   },
   /** Hide every object of a kind (measurement: what it costs to draw). */
   hide(type: string) { for (const o of scene.children.list) if (o.type === type) (o as unknown as { setVisible(v: boolean): void }).setVisible(false); },
+  /** Stop drawing one kind of thing (measurement). */
+  ablate(kind: string) { scene.ablate(kind); },
+  /** Draw at another backing resolution (measurement: what full resolution costs). */
+  resolution(d: number) { const cam = scene.cameras.main, c = cam.midPoint.clone(), z = cam.zoom * d / (game.scale.width / innerWidth); game.scale.resize(innerWidth * d, innerHeight * d); game.scale.setZoom(1 / d); cam.setZoom(z); cam.centerOn(c.x, c.y); },
   textures() { return scene.textures.getTextureKeys().filter((k) => k.startsWith("walk-")); },
 };
 (window as unknown as { town: typeof api }).town = api;
