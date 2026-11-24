@@ -52,6 +52,7 @@ struct CommitteeView {
     threads: Vec<public::Thread>,
     docket: Vec<public::DeskItem>,
     windows: public::Truncation,
+    waiting_on_person: BTreeSet<String>,
     head: Seq,
 }
 
@@ -147,6 +148,7 @@ impl SenateSource for Source {
             },
         };
         let mut heads = BTreeMap::new();
+        let mut waiting = BTreeMap::new();
         for row in rows {
             heads.insert(
                 row.committee
@@ -155,6 +157,7 @@ impl SenateSource for Source {
                     .map_err(|_| ProjectionError::NotReady)?,
                 row.head,
             );
+            waiting.insert(row.committee.id.clone(), row.waiting_on_person);
             snapshot.committees.push(row.committee);
             snapshot.senators.extend(row.senators);
             snapshot.retired.extend(row.retired);
@@ -231,6 +234,17 @@ impl SenateSource for Source {
             );
         }
         registry.merge_machine_facts(grant, &mut snapshot).await?;
+        for seat in &mut snapshot.senators {
+            if matches!(
+                seat.state,
+                public::SenatorState::Idle | public::SenatorState::Unknown
+            ) && waiting
+                .get(&seat.committee_id)
+                .is_some_and(|owners| owners.contains(&seat.id))
+            {
+                seat.state = public::SenatorState::WaitingOnPerson;
+            }
+        }
         for committee in &mut snapshot.committees {
             committee.card = registry.card(&CardKey::Committee {
                 committee_id: committee
@@ -675,6 +689,7 @@ async fn committee_view(
         desk_items: false,
     };
     let mut threads = Vec::new();
+    let mut waiting_on_person = BTreeSet::new();
     let mut before = None;
     let mut counts = [0usize; 2];
     for _ in 0..THREAD_SCAN_PAGES {
@@ -712,6 +727,12 @@ async fn committee_view(
                 continue;
             }
             let seq = wire_seq(thread.root)?;
+            if matches!(thread.waits(), Some(senate_core::task::WaitsOn::Person))
+                && let Some(owner) = &thread.owner
+                && seated.contains(&owner.agent)
+            {
+                waiting_on_person.insert(owner.agent.to_string());
+            }
             threads.push(public::Thread {
                 committee_id: committee.to_string(),
                 root_seq: seq,
@@ -802,6 +823,7 @@ async fn committee_view(
         threads,
         docket,
         windows,
+        waiting_on_person,
         head,
     })
 }
