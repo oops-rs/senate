@@ -585,3 +585,82 @@ async fn a_child_presided_over_by_an_agent_above_has_no_desk_here() {
     assert!(rows.rows.is_empty(), "nothing started");
     h.stop().await;
 }
+
+/// `senate senator chair`: the person names a chair (the server's own check
+/// decides who may); from inside a coding session it is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_person_names_a_chair_and_an_agent_cannot_in_their_name() {
+    let mut h = machine().await;
+    let project = h.dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let worker: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            attempt_id: None,
+            session: Default::default(),
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
+            committee: common::committee(),
+            alias: Some(path("main")),
+            cwd: project.clone(),
+            chair: false,
+            secretary: false,
+            prompt: None,
+            model: Default::default(),
+        },
+    )
+    .await;
+    let info: senate_core::api::ChairInfo = call(
+        &h,
+        &Request::SetChair {
+            session: Default::default(),
+            committee: Some(common::committee()),
+            senator: worker.senator.clone(),
+        },
+    )
+    .await;
+    assert_eq!(info.chair.as_ref(), Some(&worker.senator));
+
+    // The same, typed by an agent in its terminal.
+    std::fs::write(
+        h.dir.path().join("fixture-claude"),
+        format!(
+            "#!/bin/sh\n{RECORD_HOSTED_ARGV}\n\
+             while [ ! -e .go ]; do sleep 0.05; done\n\
+             {BIN:?} senator chair {} --committee refund-v2 > .guard.tmp 2>&1; echo \"exit $?\" >> .guard.tmp; mv .guard.tmp .guard\n\
+             while IFS= read -r line; do :; done\n",
+            worker.senator
+        ),
+    )
+    .unwrap();
+    let agent_dir = h.dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let _: SpawnReply = call(
+        &h,
+        &Request::Spawn {
+            attempt_id: None,
+            session: Default::default(),
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
+            committee: common::committee(),
+            alias: Some(path("other")),
+            cwd: agent_dir.clone(),
+            chair: false,
+            secretary: false,
+            prompt: None,
+            model: Default::default(),
+        },
+    )
+    .await;
+    std::fs::write(agent_dir.join(".go"), "").unwrap();
+    let out = common::eventually("the TUI's chair command came back", TIMEOUT, || {
+        std::fs::read_to_string(agent_dir.join(".guard")).ok()
+    })
+    .await;
+    assert!(out.contains("exit 1"), "{out}");
+    assert!(
+        out.contains("inside the process tree of") && out.contains("senate senator chair"),
+        "{out}"
+    );
+    h.stop().await;
+}

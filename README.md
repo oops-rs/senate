@@ -583,6 +583,7 @@ senate session restore reviewer        # ...and reopen it later (add --attach to
 senate session pause --all             # checkpoint, then stop each one...
 senate session resume --all            # ...and bring them back where they were
 senate session replace reviewer        # a fresh session takes the seat
+senate senator chair main --committee ibot # make an existing senator the chair
 ```
 
 `senate spawn` seats the session on `--committee` when given, else on the
@@ -678,7 +679,7 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 | Group | Commands |
 | :--- | :--- |
 | `senate session` | `list` · `watch` · `approve` · `stop` · `restore` · `pause` · `resume` · `replace` · `prune` |
-| `senate senator` | `list` · `alias` · `unalias` · `seat` · `unseat` · `duty` |
+| `senate senator` | `list` · `alias` · `unalias` · `chair` · `seat` · `unseat` · `duty` |
 | `senate secretary` | `ask` (your default secretary) · `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
 | `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |
 | `senate setup` | `init` · `install` · `completions <zsh\|bash\|fish>` · `service install\|uninstall\|status` · `doctor` · `clean` |
