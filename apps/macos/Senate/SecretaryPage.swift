@@ -50,11 +50,6 @@ private struct SecretaryIntro: View {
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    if state == .stopped {
-                        Button(L("secretary.restore")) { Task { await store.restoreSecretary() } }
-                            .buttonStyle(.pill(.filled))
-                            .disabled(!store.state.online || store.isBusy("session:office::secretary"))
-                    }
                 }
                 .frame(maxWidth: Theme.readingWidth, alignment: .leading)
                 .padding(.horizontal, Theme.Space.xl)
@@ -80,7 +75,7 @@ private struct SecretaryIntro: View {
         .toolbar { toolbarTitle }
     }
 
-    var toolbarTitle: some ToolbarContent {
+    @ToolbarContentBuilder var toolbarTitle: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
             Label(L("secretary.title"), systemImage: "person.crop.circle")
                 .labelStyle(.titleAndIcon)
@@ -89,6 +84,15 @@ private struct SecretaryIntro: View {
                 .accessibilityAddTraits(.isHeader)
         }
         .sharedBackgroundVisibility(.hidden)
+        if store.secretary?.state == .stopped {
+            ToolbarItem(placement: .primaryAction) {
+                Button { Task { await store.restoreSecretary() } } label: {
+                    Label(L("secretary.restore"), systemImage: "arrow.counterclockwise")
+                }
+                .help(L("secretary.restore"))
+                .disabled(!store.state.online || store.isBusy("session:office::secretary"))
+            }
+        }
     }
 
     static func explanation(_ state: SecretaryState) -> String {

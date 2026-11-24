@@ -55,7 +55,7 @@ struct CommitteePage: View {
                 HStack(alignment: .bottom) {
                     SectionHeader(L("committees.sessions"))
                     Spacer(minLength: Theme.Space.m)
-                    InactiveToggle(store: store, hidden: (group?.sessions.count ?? 0) - sessions.count)
+                    InactiveNote(store: store, hidden: (group?.sessions.count ?? 0) - sessions.count)
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(sessions) { session in
@@ -80,7 +80,7 @@ struct CommitteePage: View {
                 HStack(alignment: .bottom) {
                     SectionHeader(L("committees.members"))
                     Spacer(minLength: Theme.Space.m)
-                    InactiveToggle(store: store, hidden: roster.members.count - members.count)
+                    InactiveNote(store: store, hidden: roster.members.count - members.count)
                 }
                 VStack(alignment: .leading, spacing: Theme.Space.s) {
                     ForEach(members) { member in

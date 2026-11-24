@@ -12,6 +12,16 @@ struct ApprovalsView: View {
     let store: CoreStore
 
     var body: some View {
+        content
+            .toolbar {
+                ToolbarSpacer(.flexible)
+                if store.deskSelection == nil {
+                    ToolbarItem(placement: .primaryAction) { RefreshButton(store: store) }
+                }
+            }
+    }
+
+    @ViewBuilder private var content: some View {
         let prompts = store.prompts
         let approvals = store.state.approvals
         let desk = store.deskThreads
@@ -185,21 +195,8 @@ private struct DeskEntryDetail: View {
 
     var body: some View {
         ReadingColumn {
-            Button(L("desk.back")) { store.deskSelection = nil }
-                .buttonStyle(.pill)
-            PageHeading(text: L("desk.item_heading", item.committee, String(item.seq)))
             if let detail {
                 VStack(alignment: .leading, spacing: Theme.Space.m) {
-                    HStack {
-                        Button(L("desk.original_thread")) {
-                            store.openThread(committee: detail.thread.committee, root: detail.thread.root)
-                        }
-                        .buttonStyle(.pill)
-                        Button(L("committees.open", item.committee)) {
-                            store.place = .committee(item.committee)
-                        }
-                        .buttonStyle(.pill)
-                    }
                     if let origin = detail.origin {
                         Text(verbatim: L("desk.origin", origin)).font(Theme.Fonts.meta)
                             .foregroundStyle(Theme.onSurfaceVariant)
@@ -240,6 +237,7 @@ private struct DeskEntryDetail: View {
             }
         }
         .task { await load() }
+        .toolbar { toolbar }
         .sheet(isPresented: $refusing) { refusalSheet }
         #if DEBUG
         .onReceive(NotificationCenter.default.publisher(for: Snapshot.deskPresentation)) { note in
@@ -312,17 +310,60 @@ private struct DeskEntryDetail: View {
         } else if let blocked = detail.blocked {
             Text(verbatim: blocked).foregroundStyle(Theme.onSurfaceVariant)
                 .accessibilityIdentifier("desk-read-only")
-        } else {
-            HStack(spacing: Theme.Space.s) {
-                Button(L("desk.forward")) { Task { await submit(nil) } }
-                    .buttonStyle(.pill(.filled))
-                    .accessibilityIdentifier("desk-forward")
-                Button(L("desk.refuse")) { refusing = true }
-                    .buttonStyle(.pill)
-                if busy { ProgressView().controlSize(.small) }
-            }
-            .disabled(busy || !store.state.online)
+        } else if busy {
+            ProgressView().controlSize(.small)
+        }
+    }
 
+    /// Back to Approvals; what the request is; Forward and Refuse while it
+    /// can be decided; the original thread and the committee in its menu.
+    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Button { store.deskSelection = nil } label: {
+                Label(L("desk.back"), systemImage: "chevron.backward")
+            }
+            .help(L("desk.back"))
+        }
+        ToolbarItem(placement: .navigation) {
+            Text(verbatim: L("desk.item_heading", item.committee, String(item.seq)))
+                .font(.headline)
+                .lineLimit(1)
+                .padding(.horizontal, Theme.Space.xs)
+                .accessibilityAddTraits(.isHeader)
+        }
+        .sharedBackgroundVisibility(.hidden)
+        ToolbarSpacer(.flexible)
+        if let detail, outcome == nil, actionError == nil, detail.blocked == nil {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button { Task { await submit(nil) } } label: {
+                    Label(L("desk.forward"), systemImage: "arrowshape.turn.up.right")
+                }
+                .accessibilityIdentifier("desk-forward")
+                .help(L("desk.forward"))
+                .disabled(busy || !store.state.online)
+                Button { refusing = true } label: {
+                    Label(L("desk.refuse"), systemImage: "hand.raised.slash")
+                }
+                .help(L("desk.refuse"))
+                .disabled(busy || !store.state.online)
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                if let detail {
+                    Button {
+                        store.openThread(committee: detail.thread.committee, root: detail.thread.root)
+                    } label: {
+                        Label(L("desk.original_thread"), systemImage: "bubble.left.and.bubble.right")
+                    }
+                }
+                Button { store.place = .committee(item.committee) } label: {
+                    Label(L("committees.open", item.committee), systemImage: "person.3")
+                }
+            } label: {
+                Label(L("thread.more"), systemImage: "ellipsis")
+            }
+            .menuIndicator(.hidden)
         }
     }
 
