@@ -74,6 +74,7 @@ struct MenuBarLabel: View {
             store.attach(openWindow: openWindow, openSettings: openSettings)
             (NSApplication.shared.delegate as? AppDelegate)?.store = store
         }
+        .task { await PersonApprovalPresenter.watch(store: store) }
     }
 }
 

@@ -4802,11 +4802,7 @@ async fn repair_a_legacy_hosted_agy_split_preserves_each_seats_authority_and_que
         to: selected.clone().into(),
     };
     let denied = ipc::request::<ipc::RebindHostReply>(&h.socket(), &change, TIMEOUT, TIMEOUT).await;
-    let reason = if cfg!(target_os = "macos") {
-        "could not verify"
-    } else {
-        "requires confirmation in the signed Senate app"
-    };
+    let reason = "requires confirmation in the signed Senate app";
     assert!(
         matches!(denied, Err(ipc::ClientError::Remote(error)) if error.message.contains(reason))
     );
@@ -4838,7 +4834,8 @@ async fn repair_a_legacy_hosted_agy_split_preserves_each_seats_authority_and_que
             .then_some(())
     })
     .await;
-    if !cfg!(target_os = "macos") {
+    #[cfg(not(all(target_os = "macos", debug_assertions)))]
+    {
         let denied =
             ipc::request::<ipc::RebindHostReply>(&h.socket(), &change, TIMEOUT, TIMEOUT).await;
         assert!(
@@ -4856,68 +4853,75 @@ async fn repair_a_legacy_hosted_agy_split_preserves_each_seats_authority_and_que
         h.stop().await;
         return;
     }
-    let item = h.server.append_silently(
-        NewEvent::new(
-            committee(),
-            Kind::Question,
-            Address::senior(&h.config.person),
-            "undelivered work",
-        )
-        .to(Address::senator(&old.senator)),
-    );
-    h.store().enqueue(&old.senator, &item).unwrap();
-    h.store()
-        .hold_pending_for_hooks(
-            &[(old.senator.clone(), committee(), item.seq)],
-            &old.session_id,
-        )
-        .unwrap();
-    let repaired: ipc::RebindHostReply = call(&h, &change).await;
-    assert_eq!(repaired.session_id, native);
-    assert_eq!(repaired.current, selected);
-    assert_eq!(repaired.undelivered, 1);
-    let listed: ipc::SessionsReply = call(&h, &Request::Sessions).await;
-    let row = listed
-        .rows
-        .iter()
-        .find(|row| row.session_id == repaired.session_id)
-        .unwrap();
-    assert_eq!(row.alias, Some(path("selected-seat")));
-    assert_eq!(
-        client.chair(&committee()).await.unwrap().chair,
-        Some(selected.clone())
-    );
-    assert_eq!(repaired.threads[0].seq, item.seq);
-    assert_eq!(
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    {
+        let item = h.server.append_silently(
+            NewEvent::new(
+                committee(),
+                Kind::Question,
+                Address::senior(&h.config.person),
+                "undelivered work",
+            )
+            .to(Address::senator(&old.senator)),
+        );
+        h.store().enqueue(&old.senator, &item).unwrap();
         h.store()
-            .item(&old.senator, &committee(), item.seq)
-            .unwrap()
-            .unwrap()
-            .session_id,
-        None
-    );
-    assert!(h.store().agy_host_splits(&h.paths).unwrap().is_empty());
-    let stopped = ipc::request::<ipc::StopReply>(
-        &h.socket(),
-        &Request::Stop {
-            session: Default::default(),
-            senator: old.senator.clone().into(),
-            force: true,
-        },
-        TIMEOUT,
-        TIMEOUT,
-    )
-    .await;
-    assert!(
-        matches!(stopped,Err(ipc::ClientError::Remote(error)) if error.code == ipc::codes::NO_SESSION)
-    );
-    attach(&h, selected.as_str(), b"check-process\r\x1d").await;
-    let guarded = eventually("the repaired process-tree check", TIMEOUT, || {
-        std::fs::read_to_string(before.rows[0].dir.join(".fixture-guard")).ok()
-    })
-    .await;
-    assert!(guarded.contains(selected.as_str()));
-    h.stop().await;
+            .hold_pending_for_hooks(
+                &[(old.senator.clone(), committee(), item.seq)],
+                &old.session_id,
+            )
+            .unwrap();
+        let (confirmed, repaired) = tokio::join!(
+            h.daemon.as_ref().unwrap().confirm_next_app_fixture(),
+            call::<ipc::RebindHostReply>(&h, &change),
+        );
+        assert!(confirmed);
+        assert_eq!(repaired.session_id, native);
+        assert_eq!(repaired.current, selected);
+        assert_eq!(repaired.undelivered, 1);
+        let listed: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+        let row = listed
+            .rows
+            .iter()
+            .find(|row| row.session_id == repaired.session_id)
+            .unwrap();
+        assert_eq!(row.alias, Some(path("selected-seat")));
+        assert_eq!(
+            client.chair(&committee()).await.unwrap().chair,
+            Some(selected.clone())
+        );
+        assert_eq!(repaired.threads[0].seq, item.seq);
+        assert_eq!(
+            h.store()
+                .item(&old.senator, &committee(), item.seq)
+                .unwrap()
+                .unwrap()
+                .session_id,
+            None
+        );
+        assert!(h.store().agy_host_splits(&h.paths).unwrap().is_empty());
+        let stopped = ipc::request::<ipc::StopReply>(
+            &h.socket(),
+            &Request::Stop {
+                session: Default::default(),
+                senator: old.senator.clone().into(),
+                force: true,
+            },
+            TIMEOUT,
+            TIMEOUT,
+        )
+        .await;
+        assert!(
+            matches!(stopped,Err(ipc::ClientError::Remote(error)) if error.code == ipc::codes::NO_SESSION)
+        );
+        attach(&h, selected.as_str(), b"check-process\r\x1d").await;
+        let guarded = eventually("the repaired process-tree check", TIMEOUT, || {
+            std::fs::read_to_string(before.rows[0].dir.join(".fixture-guard")).ok()
+        })
+        .await;
+        assert!(guarded.contains(selected.as_str()));
+        h.stop().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

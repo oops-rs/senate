@@ -60,6 +60,7 @@
 //! (`~/.senate`, or `$SENATE_HOME`).
 
 pub mod agent;
+pub mod app_confirmation;
 pub mod approvals;
 pub mod binding;
 pub mod catch_up;

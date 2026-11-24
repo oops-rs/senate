@@ -156,12 +156,6 @@ pub(super) fn run(args: Observe) -> anyhow::Result<()> {
                 (GrantScope::Lines, Some(Lines::Published)) => Some(LinePolicy::Published),
                 _ => bail!("Choose --lines auto or --lines published with --scope lines"),
             };
-            let auto_confirmed = policy == Some(LinePolicy::Auto);
-            if auto_confirmed {
-                confirm(
-                    "Automatic previews expose eligible first lines, which can contain commands, paths or credentials.",
-                )?;
-            }
             let command = AdminRequest::Create {
                 grant: CreateGrant {
                     name,
@@ -172,7 +166,7 @@ pub(super) fn run(args: Observe) -> anyhow::Result<()> {
                         GrantScope::Lines => Scope::Lines,
                     },
                     lines: policy,
-                    auto_confirmed,
+                    auto_confirmed: false,
                     origins,
                     topology,
                     expires_in_days: expires_in,

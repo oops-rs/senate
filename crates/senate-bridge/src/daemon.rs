@@ -648,6 +648,24 @@ impl DaemonHandle {
         &self.front.senates()[0].store
     }
 
+    /// Drive the queue from an in-process test fixture. The production
+    /// transport can only reach this queue from the signed app.
+    #[doc(hidden)]
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    pub async fn confirm_next_app_fixture(&self) -> bool {
+        let queue = &self.front.app_confirmations;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(prompt) = queue.poll().first() {
+                    return queue.respond(&prompt.id, true);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// SIGTERM's first step, for each Senate with `pause_on_shutdown`:
     /// pause every running hosted session, within
     /// [`Timing::shutdown_pause`]. A session not paused by then is recorded
@@ -856,6 +874,16 @@ async fn start_bridge(
         tokio::spawn(serve_ipc(front.clone(), listener, rx.clone())),
         tokio::spawn(hosted_approvals::observe(shared, observed, rx.clone())),
     ];
+    #[cfg(target_os = "macos")]
+    if let Some(listener) =
+        crate::app_confirmation::macos::listen(&paths, front.app_confirmations.clone())
+    {
+        let mut shutdown = rx.clone();
+        tasks.push(tokio::spawn(async move {
+            let _ = shutdown.wait_for(|stopping| *stopping).await;
+            drop(listener);
+        }));
+    }
     if let Some(notifier) = remote_notifier {
         tasks.push(tokio::spawn(crate::remote::authority::notify_history(
             paths.clone(),
@@ -6616,6 +6644,16 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                             Ok(()) => Box::pin(shared.dispatch(request)).await,
                             Err(error) => Reply::err(error),
                         };
+                        (reply, false)
+                    }
+                    Ok(request) if crate::app_confirmation::required(&request) => {
+                        let reply = Box::pin(shared.app_confirmed_dispatch(
+                            peer,
+                            request,
+                            &mut reader,
+                            shutdown.clone(),
+                        ))
+                        .await;
                         (reply, false)
                     }
                     Ok(request) if let Some(guidance) = approval_guard::person_only(&request) => (

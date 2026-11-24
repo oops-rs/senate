@@ -1,142 +1,108 @@
 # Local IPC caller authorization
 
-A Unix peer UID identifies a local account. A process's current parent, its
-terminal, and the name it runs under can change. Senate distinguishes its hosted
-process trees, authenticates privileged session claims, and requires independent
-person confirmation for the few operations below. This assumes agents cannot
-read or change trusted state, access protected Keychain items, control the app's
-UI, attach a debugger to the trusted processes, or obtain administrator access.
+A Unix peer UID identifies an account. A coding agent running under that
+account can change its name, terminal, and process parent. Senate uses hosted
+lineage for routine commands, independent app consent for selected operations,
+and process identity for session claims. Trusted files, protected Keychain
+items, trusted UI control, debugger access, and administrator access are outside
+this threat model.
 
-## Hosted lineage and routine commands
+## Routine commands
 
-Require same-account peer credentials and refuse a caller in any hosted lineage,
-even after the original host exits. Use one check for all person-only operations,
-including desk decisions, remote administration, streams and attachments. Keep the
-existing ancestry and runtime checks as an additional rejection signal. An allowed
-routine command runs directly from a personal terminal, tmux, or SSH. The attach
-viewer sends input to the host. CLI commands run inside that terminal still have
-the hosted lineage. The paired-machine transport retains its own authentication
-and command allowlist.
+Keep the routine CLI flow for Ghostty, Terminal, iTerm, tmux, SSH, and the
+terminal attach viewer. The viewer sends input to the host. Commands executed
+inside the terminal still have the host's lineage. The paired-machine transport
+keeps its own authentication and operation allowlist.
 
-- **macOS.** Use the kernel resource coalition as the hosted lineage label. XNU
-  documents inheritance across fork, exec and ordinary spawn, including after
-  reparenting. Launch hosts from a dedicated launchd job with a verified separate
-  coalition before any runtime code can run. A shell-started daemon must use
-  that dedicated launcher for hosting. Persist coalition labels before releasing
-  the runtime, bind them to the current boot, and keep them for that boot even
-  when a host exits or the daemon restarts. Bind each guarded request to the
-  kernel audit trailer of a Mach message and look up its coalition with an
-  identity-version check. The CLI performs that exchange without a prompt for
-  routine commands. Fail closed when peer identity or the coalition query is
-  unavailable. The `proc_pidinfo` coalition flavor is an SPI and needs OS-version
-  verification. A bare PID is insufficient.
-- **Linux and WSL.** Place each hosted session in a cgroup v2 scope before
-  starting runtime code. An administrator-owned supervisor creates the scopes
-  and restricts migration into and out of the protected subtree. A regular
-  same-user systemd scope alone cannot establish that invariant. Verify the
-  peer's membership against that protected subtree using a stable peer process
-  handle. Without these primitives, Linux and WSL continue to host with the
-  existing advisory checks. The daemon logs that mode at startup and reports
-  it in `senate status` and `senate setup doctor`. `senate setup guard` is an
-  explicit, sudo-run provisioning step for the root-owned supervisor, its
-  cgroup v2 subtree and its limited launch interface. It is never automatic.
-  SSH adds no lineage exemptions.
+- **macOS.** Start hosts in a verified launchd resource coalition and record the
+  coalition before any runtime code can run. XNU retains the label across fork,
+  exec, and reparenting. Keep boot-scoped labels after host exit and daemon
+  restart. Bind a guarded request to a Mach message audit trailer and query the
+  coalition using its process generation. Missing evidence fails closed. A
+  shell-started daemon needs a dedicated launcher so the user's terminal does
+  not share the host label. The coalition query uses version-sensitive SPI.
+- **Linux and WSL.** A protected launcher places each host in a cgroup v2 scope
+  before runtime execution. An administrator-owned subtree prevents migration.
+  Read membership through a stable peer process handle. Where this facility is
+  absent, hosting continues with advisory ancestry checks. Startup, `senate
+  status`, and `senate setup doctor` surface that mode. The proposed `senate
+  setup guard` would install `/usr/local/libexec/senate-host-guard`, protect
+  `/sys/fs/cgroup/senate-hosted/<uid>`, and add a launch-only rule in
+  `/etc/sudoers.d/99-senate-host-guard`. The daemon never installs it.
 
-Scope and coalition checks identify processes born inside the hosted lineage.
-A scheduler or service that independently launches a process in another lineage
-can lose the origin of the request. The same is true of a native agent whose
-process detaches from a person's terminal. Such callers may pass the routine
-check. Separate containment of those broker interfaces is required if their
-use must be prohibited. Runtime ancestry still catches known native agents
-while the original process chain remains readable.
+Lineage covers processes born in the hosted scope. An independent scheduler can
+launch in a separate scope. A native agent can also detach from the user's
+terminal. In both cases the routine ancestry check may allow the caller. Runtime
+names and ancestry provide additional rejection while the original tree is visible.
 
-The table describes the target behavior once the proposed controls are in place.
-
-| Platform | Hosted descendants | Native agents | App confirmation | Hooks |
+| Policy target | Hosted descendants | Native agents | Lines and rebind | Hooks |
 | --- | --- | --- | --- | --- |
-| macOS, signed app available | Enforced by coalition | Advisory for routine requests | Enforced for lines and rebind | Enforced process binding and role reauthorization |
-| macOS, headless or without a trusted app | Enforced by coalition | Advisory for routine requests | Refused for lines and rebind | Enforced process binding and role reauthorization |
-| Linux or WSL, provisioned scope and stable process handles | Enforced by cgroup | Advisory for routine requests | Refused for lines and rebind | Enforced process binding and role reauthorization |
-| Linux or WSL, without a protected scope | Advisory for routine requests | Advisory for routine requests | Refused for lines and rebind | Enforced for privileged hooks with stable process proof, otherwise refused |
+| macOS with signed app | Enforced by coalition | Routine checks advisory | App consent enforced | Process binding and role reauthorization enforced |
+| macOS headless | Enforced by coalition | Routine checks advisory | Refused | Process binding and role reauthorization enforced |
+| Linux/WSL with protected scope | Enforced by cgroup | Routine checks advisory | Refused | Process binding and role reauthorization enforced |
+| Linux/WSL without protected scope | Routine checks advisory | Routine checks advisory | Refused | Privileged claims require stable proof |
 
-Hosted Codex needs a protected app-server as well as a protected TUI. Each
-host owns its backend for the lifetime of the session, including while no viewer
-is attached. Native sessions keep the configured `codex.listen`. On enforced
-platforms hosted sessions warn when they bypass that shared endpoint. Existing
-shared hosts remain running and advisory until restore, and the explicit
-`[codex] hosted_app_server = "shared"` opt-out keeps them advisory. Doctor,
-status and session list surface that mode. Restore must verify that the hosted
-backend can load the existing conversation before claiming migration support.
-Measure backend memory per hosted session and verify approvals, delivery,
-timelines and Observe against the dedicated connection.
+The current routine boundary remains advisory while protected launch and
+per-request process attestation are pending. Hook process queries and person-name
+reservation are implemented. Role continuity and reauthorization remain pending.
+The app queue and XPC transport implement consent for line grants and rebind.
 
-## Operations that need the app
+## Codex backend
 
-Creating an Observe grant with `lines` scope (either policy) and rebind require
-an explicit macOS app action. A grant can durably disclose message text, including
-future messages under automatic publication. Rebind can transfer the identity
-and delivery authority of a session. These two classes are the initial list.
-Permission answers, desk decisions, archive, metadata grants, list and revoke
-use the routine path under the accepted lineage limit.
+The app-server executes tools, so on enforced platforms every hosted Codex
+needs its own protected backend whose lifetime follows the host. Preserve native
+`codex.listen`. Report existing shared hosts as advisory in doctor, status and
+session list until restore. The explicit `[codex] hosted_app_server = "shared"`
+opt-out also stays advisory. Notify when hosted mode bypasses `codex.listen`.
+Verify approvals, turn start and steer, timelines, and Observe on the dedicated
+connection. Its connection ownership can support future context-switch handling.
 
-The CLI submits a bounded, immutable request and waits for the app. The app
-shows the exact action, target and scope. A short-lived request is atomically
-consumed before dispatch and canceled on requester disconnect. Only that
-connection receives the result. The app's existing action supplies the gesture
-for a request initiated in the app. An approval is valid for one stored request.
-Ignore all client assertions of consent, and remove `auto_confirmed` from the
-Observe contract. Fail with an app-availability error on macOS without the app,
-and on Linux, WSL, and headless installations. An independently enrolled
-hardware signer is future work.
+This Mac's three isolated, initialized app-servers used a median of 54.3 MiB
+idle RSS each. An independent server resumed the same seeded test thread and
+canonical project directory using the same private `CODEX_HOME`. Dedicated
+Senate hosting and restore still need end-to-end acceptance.
 
-Authenticate the app action on a per-message XPC endpoint and check the UID.
-For each team allowed by the installation, require
+## Signed app consent
+
+Both Observe lines policies and session rebind need one explicit app decision.
+The CLI waits while the app displays the immutable request. The queue has a
+short expiry and bounded capacity. A decision consumes the request once, and
+requester disconnect cancels it. The original connection receives the result.
+Client approval flags carry no authority. Routine permission answers, desk
+decisions, archive, metadata grants, list and revoke use the routine path.
+
+XPC checks each message against the local UID and the requirement
 `anchor apple generic and identifier "dev.senate.app" and certificate leaf[subject.OU] = "TEAM_ID"`.
-Pin the team outside request input. This accepts a local Apple Development build
-for a pinned team. Ad-hoc builds use isolated test infrastructure. The app pins
-the daemon's signed service identity as well. The daemon needs signed distribution
-and a launchd Mach service. XNU resolves `LOCAL_PEERTOKEN` from the peer socket's
-last PID when queried. That identifies a process lookup and provides no
-per-message code attestation. Keep unproved Unix actions on the request-submission
-path.
+The app pins `dev.senate.daemon` and the same team. The signed daemon's
+LaunchAgent registers the approval service using a hash of its canonical Senate
+home. Debug builds can use Apple Development with the same pinned
+`SENATE_PERSON_TEAM_ID` across the CLI, daemon and app core. An isolated signing
+fixture accepted Apple Development and refused an ad-hoc signature.
 
-## Hook and session authority
+XNU's Unix peer token resolves the socket's last PID when queried. Per-message
+Mach attestation is required for process generations and XPC sender identity.
 
-Authenticate hooks before state, paths, host bindings or session context can
-change. Take the runtime PID only from verified peer ancestry and bind it to a
-kernel process birth identity. Process names and raw PIDs are hints. Use a
-kernel-authenticated message sender where available. A transport without a
-stable peer identity needs a scoped launch credential for privileged sessions.
-Keep old stored PIDs ineligible as authority until securely verified.
+## Session claims
 
-Bind a hosted session to the daemon's launch record and owner process. Preserve
-a live registration only for the same verified tree. Reject claims to a person's
-name or another session's seat. Names from env or a worktree can be aliases for
-ordinary use. They confer no chair, secretary, or Speaker authority. A native
-privileged seat switching process identities requires explicit person
-reauthorization in the app or from a terminal that passes the routine guard.
-Resolve session selectors once, check the same binding at use, and apply it to
-role operations and lifecycle requests as well as hooks. A session ID alone
-confers no authority.
+Bind hook and role actions to the runtime's verified process identity, including
+its generation. Reserve person names and reject another live session's seat.
+Treat self-chosen names as ordinary aliases. Chair, secretary, and Speaker
+authority requires a daemon-controlled launch or a person-approved binding. A
+native privileged seat moving to a different process requires reauthorization.
+Resolve a selector once and carry that proof through dispatch. Derive Git
+context from verified process or launch state. Observe requires runtime-owned
+transcript paths and matching native record IDs.
 
-Derive Git context from a verified process working directory or daemon-owned
-launch state. Accept Observe transcripts only inside the runtime's expected
-transcript tree, with regular-file checks and native IDs matched in the records.
-A hook's delivery route and path hints carry no authority over another session.
+## Ablation
 
-## Design ablation
+- Without a protected lifetime label, reparenting removes the ancestry signal.
+  Writable migration controls or clearing labels on host exit defeat it again.
+- Without an authenticated app and exact one-time binding, routine ancestry
+  gaps also affect sensitive acts, or one click could authorize multiple acts.
+- Without process-generation ownership, session IDs and aliases become usable
+  as credentials. Path and record checks protect independent transcript inputs.
 
-- Drop lineage and reparenting removes the only current rejection signal. A
-  protected fork label retains the original lineage. Dropping migration control
-  on Linux or clearing labels when a host exits loses that protection.
-- Drop the app proof and the two sensitive operations inherit the routine
-  path's native-agent and scheduler limitations. Dropping exact request binding
-  or atomic consumption lets one gesture authorize a different or repeated act.
-- Drop verified process ownership or role reauthorization and choosing another
-  session ID or seat name can transfer its authority. Transcript-directory
-  validation and matching record IDs address independent provenance checks.
-
-References include [XNU coalitions](https://github.com/apple-oss-distributions/xnu/blob/main/doc/observability/coalitions.md),
-[XNU Unix socket implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/uipc_usrreq.c),
+Platform references include [XNU coalitions](https://github.com/apple-oss-distributions/xnu/blob/main/doc/observability/coalitions.md),
+[XNU Unix socket credentials](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/uipc_usrreq.c),
 [Apple XPC per-message requirements](https://developer.apple.com/documentation/xpc/xpc_connection_set_peer_lightweight_code_requirement(_:_:)),
 and [Linux cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html).

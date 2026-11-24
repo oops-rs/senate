@@ -1,4 +1,4 @@
-//! Who may answer a permission prompt through the daemon.
+//! Caller checks for person-only IPC and app-confirmed operations.
 //!
 //! An agent must not approve its own prompts, nor another agent's: a
 //! permission prompt is a person's decision. So [`Request::ApproveSession`]
@@ -28,6 +28,12 @@
 //! that Senate has no pid for. The person's own terminal, and the desktop
 //! app, are outside every agent's tree, so they pass. Every decision, and
 //! every refusal with its reason, goes to the daemon's log.
+//!
+//! Creating an Observe grant with message lines and repairing a session
+//! binding also require a response from the signed macOS app on its XPC
+//! channel. The daemon dispatches the original queued request after that
+//! response. Linux, WSL and installations without the signed app refuse
+//! those operations. Linux and WSL advertise the routine guard as advisory.
 
 use std::collections::BTreeMap;
 
@@ -36,6 +42,7 @@ use crate::host;
 
 /// The most ancestors walked; a deeper chain is refused.
 const DEPTH: usize = 64;
+pub(super) const APP_CONFIRMATION: &str = "This operation requires confirmation in the signed Senate app on the machine hosting this Senate";
 /// Executable names of the coding runtimes.
 const RUNTIMES: [&str; 3] = ["claude", "codex", "agy"];
 
@@ -54,16 +61,6 @@ pub(super) fn answers_a_prompt(request: &Request) -> bool {
         request,
         Request::Approve { .. } | Request::ApproveSession { .. }
     )
-}
-
-fn needs_app_confirmation(request: &Request) -> bool {
-    matches!(request, Request::RebindHost { .. })
-        || matches!(
-            request,
-            Request::ObserveAdmin {
-                command: senate_observe::AdminRequest::Create { grant },
-            } if grant.scope == senate_observe::Scope::Lines
-        )
 }
 
 /// What only the person does, and what to tell an agent that asks: `None`
@@ -237,15 +234,60 @@ impl Front {
         guidance: &str,
         request: Request,
     ) -> Reply {
-        if !cfg!(target_os = "macos") && needs_app_confirmation(&request) {
-            return Reply::err(refusal(
-                "This operation requires confirmation in the signed Senate app on the machine hosting this Senate",
-            ));
-        }
         match self.refuse_agent_caller(peer, guidance).await {
             Ok(()) => self.dispatch(request).await,
             Err(refused) => Reply::err(refused),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) async fn app_confirmed_dispatch<R: tokio::io::AsyncBufRead + Unpin>(
+        self: &Arc<Self>,
+        peer: Option<u32>,
+        request: Request,
+        reader: &mut R,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> Reply {
+        use crate::app_confirmation::{EnqueueError, LIFETIME};
+        use tokio::io::AsyncBufReadExt;
+
+        if let Err(error) = self.refuse_agent_caller(peer, APP_CONFIRMATION).await {
+            return Reply::err(error);
+        }
+        let mut ticket = match self.app_confirmations.enqueue(request) {
+            Ok(ticket) => ticket,
+            Err(EnqueueError::AppUnavailable) => return Reply::err(refusal(APP_CONFIRMATION)),
+            Err(EnqueueError::Busy) => {
+                return Reply::err(refusal("The Senate app has too many pending confirmations"));
+            }
+            Err(EnqueueError::RequestTooLarge) => {
+                return Reply::err(IpcError::bad_request(
+                    "The confirmation request is too large",
+                ));
+            }
+        };
+        let approved = tokio::select! {
+            biased;
+            _ = shutdown.changed() => None,
+            _ = reader.fill_buf() => None,
+            _ = tokio::time::sleep(LIFETIME) => None,
+            result = &mut ticket.reply => result.ok().flatten(),
+        };
+        let Some(approved) = approved else {
+            return Reply::err(refusal("The Senate app did not confirm this request"));
+        };
+        self.dispatch_app_confirmation(approved).await
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(super) async fn app_confirmed_dispatch<R: tokio::io::AsyncBufRead + Unpin>(
+        self: &Arc<Self>,
+        _peer: Option<u32>,
+        _request: Request,
+        _reader: &mut R,
+        _shutdown: watch::Receiver<bool>,
+    ) -> Reply {
+        Reply::err(refusal(APP_CONFIRMATION))
     }
 
     /// Refuse a caller inside a coding session's process tree.

@@ -64,7 +64,8 @@ pub struct CreateGrant {
     pub origins: Vec<String>,
     pub topology: bool,
     pub expires_in_days: Option<u16>,
-    #[serde(default)]
+    /// Set by the daemon after receiving approval on its authenticated app channel.
+    #[serde(skip)]
     pub auto_confirmed: bool,
 }
 

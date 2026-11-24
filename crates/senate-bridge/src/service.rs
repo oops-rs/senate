@@ -172,6 +172,13 @@ pub fn launchd_plist(spec: &Spec, senated: &Path) -> String {
          <plist version=\"1.0\">\n<dict>\n",
     );
     let _ = writeln!(out, "  <key>Label</key>\n  <string>{LABEL}</string>");
+    if crate::app_confirmation::team().is_some() {
+        let service = crate::app_confirmation::service_name(&spec.senate_home);
+        let _ = writeln!(
+            out,
+            "  <key>MachServices</key>\n  <dict>\n    <key>{service}</key>\n    <true/>\n  </dict>"
+        );
+    }
     let _ = writeln!(
         out,
         "  <key>ProgramArguments</key>\n  <array>\n    <string>{}</string>\n    \

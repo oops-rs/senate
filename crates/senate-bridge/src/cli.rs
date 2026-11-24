@@ -1723,13 +1723,13 @@ async fn daemon_call<T: serde::de::DeserializeOwned>(
     paths: &Paths,
     request: &Request,
 ) -> anyhow::Result<T> {
-    Ok(ipc::request(
-        &paths.socket(),
-        request,
-        Duration::from_secs(1),
-        Duration::from_secs(20),
-    )
-    .await?)
+    let timeout = if cfg!(target_os = "macos") && crate::app_confirmation::required(request) {
+        eprintln!("Confirm this command in the signed Senate app.");
+        crate::app_confirmation::LIFETIME + Duration::from_secs(5)
+    } else {
+        Duration::from_secs(20)
+    };
+    Ok(ipc::request(&paths.socket(), request, Duration::from_secs(1), timeout).await?)
 }
 
 /// Open the joined committee on the server when it has no event there

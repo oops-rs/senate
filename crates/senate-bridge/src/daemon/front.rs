@@ -25,6 +25,8 @@ pub(crate) struct Front {
     pub(super) remote: Option<Arc<crate::remote::Service>>,
     relay: Arc<Relay>,
     pub(super) process_checks: tokio::sync::Semaphore,
+    #[cfg(target_os = "macos")]
+    pub(super) app_confirmations: Arc<crate::app_confirmation::Queue>,
     pub(super) session_drops: tokio::sync::Semaphore,
     watch: broadcast::Sender<WatchEvent>,
     /// Watch clients that show notifications themselves, connected now.
@@ -44,6 +46,8 @@ impl Front {
             senates: vec![senate],
             relay,
             process_checks: tokio::sync::Semaphore::new(4),
+            #[cfg(target_os = "macos")]
+            app_confirmations: Arc::default(),
             session_drops: tokio::sync::Semaphore::new(2),
             watch,
             app_clients,
@@ -97,6 +101,12 @@ impl Front {
     }
 
     pub(crate) async fn dispatch(self: &Arc<Self>, request: Request) -> Reply {
+        if crate::app_confirmation::required(&request) {
+            return Reply::err(IpcError::new(
+                codes::NOT_A_PERSON,
+                approval_guard::APP_CONFIRMATION,
+            ));
+        }
         match request {
             Request::ObserveAdmin { command } => self.on_observe_admin(command).await,
             Request::SetCard {
@@ -256,6 +266,23 @@ impl Front {
                     .unwrap_or_else(|| self.primary().clone());
                 target.dispatch(other).await
             }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) async fn dispatch_app_confirmation(&self, request: Request) -> Reply {
+        match request {
+            Request::RebindHost { host, to } => {
+                wrap(self.primary().repair_agy_binding(&host, &to).await)
+            }
+            Request::ObserveAdmin {
+                command: senate_observe::AdminRequest::Create { mut grant },
+            } if grant.scope == senate_observe::Scope::Lines => {
+                grant.auto_confirmed = true;
+                self.on_observe_admin(senate_observe::AdminRequest::Create { grant })
+                    .await
+            }
+            _ => Reply::err(IpcError::bad_request("Unexpected app confirmation request")),
         }
     }
 
