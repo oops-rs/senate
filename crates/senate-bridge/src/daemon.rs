@@ -3105,6 +3105,7 @@ impl Shared {
                     .map(|me| me.archived)
                     .map_err(server_error),
             ),
+            Request::FindSession { senator } => wrap(self.on_find_session(senator).await),
             Request::DefaultSecretary => wrap(self.on_default_secretary().await),
             Request::EnsureSecretary => {
                 self.sessions_changed(wrap(self.on_ensure_secretary().await))
@@ -3629,6 +3630,7 @@ impl Shared {
                 started_at: facts.started_at,
                 attached: facts.attached,
                 typed_secs_ago: facts.typed_secs_ago,
+                viewer_tty: facts.viewer_tty,
                 prompt,
                 paused: !facts.running && paused.contains(&session.agent),
             });

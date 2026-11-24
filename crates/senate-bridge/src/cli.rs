@@ -848,6 +848,20 @@ enum SessionCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Make the terminal a hosted session is attached in ring and flash its
+    /// title, to find the panel that holds it.
+    ///
+    /// Only that terminal's title and bell are touched, for a few seconds;
+    /// nothing reaches the agent's screen or input. A refused `senate
+    /// attach` does the same.
+    #[command(after_help = "Examples:
+  senate session find senate::main    Which panel holds it?")]
+    Find {
+        /// The senator's alias (`committee::alias` for one on one
+        /// committee) or primary name.
+        #[arg(add = ArgValueCandidates::new(completion::sessions))]
+        senator: AliasName,
+    },
     /// Answer the permission prompt waiting in a hosted session's terminal,
     /// without attaching.
     ///
@@ -2388,6 +2402,69 @@ fn render_chair_change(
     }
 }
 
+/// What `senate session find` did.
+fn render_found(found: &ipc::FindReply, locale: Locale) -> String {
+    let name = &found.name;
+    let device = found
+        .tty
+        .as_deref()
+        .map(|t| t.trim_start_matches("/dev/").to_owned());
+    match (found.attached, device, locale) {
+        (true, Some(d), Locale::Zh) => {
+            format!("{name} 在 {d} 打开；那个终端现在会响铃，标题闪烁「Senate: this terminal」。")
+        }
+        (true, Some(d), Locale::En) => format!(
+            "{name} is attached in {d}: that terminal now rings and shows \"Senate: this terminal\" in its title."
+        ),
+        (true, None, Locale::Zh) => {
+            format!(
+                "{name} 已在一个终端里打开；那个终端现在会响铃，标题闪烁「Senate: this terminal」。"
+            )
+        }
+        (true, None, Locale::En) => format!(
+            "{name} is attached in a terminal: it now rings and shows \"Senate: this terminal\" in its title."
+        ),
+        (false, _, Locale::Zh) => {
+            format!("{name} 没有在任何终端里打开；`senate attach {name}` 在这里打开它。")
+        }
+        (false, _, Locale::En) => {
+            format!("{name} is not attached in any terminal; `senate attach {name}` opens it here.")
+        }
+    }
+}
+
+/// `senate attach` refused: another terminal holds the session. It names
+/// that terminal (its device, and when someone last typed in it), says the
+/// terminal now rings and flashes its title, and what to do.
+fn attached_elsewhere(
+    name: &str,
+    tty: Option<&str>,
+    typed_secs_ago: Option<u64>,
+    locale: Locale,
+) -> String {
+    let device = tty.map(|t| t.trim_start_matches("/dev/").to_owned());
+    let typed = typed_secs_ago.map(crate::sessions::short);
+    let details = match (device, typed, locale) {
+        (Some(d), Some(t), Locale::Zh) => format!("（{d}，{t}前有人输入）"),
+        (Some(d), Some(t), Locale::En) => format!(" ({d}, last typed {t} ago)"),
+        (Some(d), None, Locale::Zh) => format!("（{d}）"),
+        (Some(d), None, Locale::En) => format!(" ({d})"),
+        (None, Some(t), Locale::Zh) => format!("（{t}前有人输入）"),
+        (None, Some(t), Locale::En) => format!(" (last typed {t} ago)"),
+        (None, None, _) => String::new(),
+    };
+    match locale {
+        Locale::Zh => format!(
+            "{name} 已经在另一个终端里打开{details}；那个终端现在会响铃，标题闪烁「Senate: this terminal」。在那里按 Ctrl-] 断开，或用 `senate attach {name} --read-only` 在这里旁观。"
+        ),
+        Locale::En => format!(
+            "{name} is already attached in another terminal{details}; that terminal now rings and shows \
+             \"Senate: this terminal\" in its title. Detach it there with Ctrl-], or watch it here with \
+             `senate attach {name} --read-only`."
+        ),
+    }
+}
+
 /// `senate spawn` with neither a runtime nor --profile: what to add.
 fn no_runtime(profiles: &[String], locale: Locale) -> String {
     let first = match locale {
@@ -2545,7 +2622,23 @@ async fn attach_target(
             })
             .await;
         }
-        return crate::host::attach(&tty, paths, &label).await;
+        return match crate::host::attach(&tty, paths, &label).await {
+            Err(error) if error.downcast_ref::<crate::host::Busy>().is_some() => {
+                let rows: ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
+                let row = rows.rows.iter().find(|r| r.session_id == info.session_id);
+                let name = row.map_or_else(|| label.clone(), ipc::SessionRow::label);
+                Err(anyhow::anyhow!(
+                    "{}",
+                    attached_elsewhere(
+                        &name,
+                        row.and_then(|r| r.viewer_tty.as_deref()),
+                        row.and_then(|r| r.typed_secs_ago),
+                        BridgeConfig::locale_at(&paths.config()),
+                    )
+                ))
+            }
+            other => other,
+        };
     }
     anyhow::ensure!(
         !read_only,
@@ -4170,6 +4263,15 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        SessionCmd::Find { senator } => {
+            let paths = Paths::from_env()?;
+            let locale = BridgeConfig::locale_at(&paths.config());
+            let senator = pick_alias(senator)?;
+            let found: ipc::FindReply =
+                runtime(false)?.block_on(daemon_call(&paths, &Request::FindSession { senator }))?;
+            println!("{}", render_found(&found, locale));
+            Ok(())
+        }
         SessionCmd::Approve {
             senator,
             once,
@@ -5003,5 +5105,42 @@ fn archiving_lists_what_it_hides_and_names_what_must_stop_first() {
     assert_eq!(
         render_archived(&info(false, None), Locale::En),
         "api-test was not archived"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn an_attach_held_elsewhere_says_where_and_what_to_do() {
+    assert_eq!(
+        attached_elsewhere("alpha::main", Some("/dev/ttys012"), Some(18), Locale::En),
+        "alpha::main is already attached in another terminal (ttys012, last typed 18s ago); \
+         that terminal now rings and shows \"Senate: this terminal\" in its title. Detach it there \
+         with Ctrl-], or watch it here with `senate attach alpha::main --read-only`."
+    );
+    assert!(
+        attached_elsewhere("alpha::main", None, None, Locale::En)
+            .starts_with("alpha::main is already attached in another terminal; ")
+    );
+    assert!(
+        attached_elsewhere("alpha::main", Some("/dev/ttys3"), None, Locale::Zh)
+            .contains("alpha::main 已经在另一个终端里打开（ttys3）")
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn find_says_which_terminal_rings_or_that_none_holds_it() {
+    let found = |attached, tty: Option<&str>| ipc::FindReply {
+        name: "senate::main".into(),
+        attached,
+        tty: tty.map(str::to_owned),
+    };
+    assert_eq!(
+        render_found(&found(true, Some("/dev/ttys012")), Locale::En),
+        "senate::main is attached in ttys012: that terminal now rings and shows \"Senate: this terminal\" in its title."
+    );
+    assert_eq!(
+        render_found(&found(false, None), Locale::En),
+        "senate::main is not attached in any terminal; `senate attach senate::main` opens it here."
     );
 }

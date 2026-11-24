@@ -715,7 +715,9 @@ impl Shared {
             )
         };
         let session = self.find_local_senator(&senator, None).await?;
-        let info = self.attach_info_for(session).await?.ok_or_else(hint)?;
+        let Some(info) = self.attach_info_for(session.clone()).await? else {
+            return Err(self.not_hosted(&session).await);
+        };
         info.tty.ok_or_else(hint)
     }
 
@@ -747,12 +749,120 @@ impl Shared {
                 "this session is no longer the published hosted session",
             ));
         }
-        self.attach_info_for(session).await?.ok_or_else(|| {
-            IpcError::new(
-                codes::NO_SESSION,
-                "this session has no Senate-owned terminal",
-            )
+        let Some(info) = self.attach_info_for(session.clone()).await? else {
+            return Err(self.not_hosted(&session).await);
+        };
+        Ok(info)
+    }
+
+    /// `senate session find`: ring and flash the terminal attached to the
+    /// hosted session `senator`.
+    pub(super) async fn on_find_session(
+        &self,
+        senator: AliasName,
+    ) -> Result<crate::ipc::FindReply, IpcError> {
+        let session = self.find_local_senator(&senator, None).await?;
+        let Some(id) = self
+            .store
+            .session_host(&session.session_id)
+            .map_err(internal)?
+        else {
+            return Err(self.not_hosted(&session).await);
+        };
+        let paths = Paths::new(self.home.canonicalize().map_err(IpcError::internal)?);
+        if !host::running(&paths, &id).map_err(IpcError::internal)? {
+            return Err(self.not_hosted(&session).await);
+        }
+        let attached = host::control::find(&paths, &id).await?;
+        let tty = host::viewer_activity(&paths, &id)
+            .filter(|v| v.attached)
+            .and_then(|v| v.tty);
+        let name = self.shown_session_name(&session.session_id);
+        let name = match session.committee() {
+            Some(c) if !name.contains("::") => format!("{c}::{name}"),
+            _ => name,
+        };
+        Ok(crate::ipc::FindReply {
+            name,
+            attached,
+            tty,
         })
+    }
+
+    /// Why `session` cannot be attached: it is not one of Senate's hosted
+    /// terminals. Says which session the name resolved to and on which
+    /// committee; that it runs in its own terminal (or ended: how to
+    /// reopen it here); and the hosted sessions with the same alias on other
+    /// committees, by `committee::alias`.
+    async fn not_hosted(&self, session: &Session) -> IpcError {
+        let aliases = self.api.aliases().await.ok();
+        let committee = session.committee();
+        let alias = match (&aliases, committee) {
+            (Some(aliases), Some(c)) => aliases.alias_of(c, &session.agent).cloned(),
+            _ => None,
+        };
+        let name = match (committee, &alias) {
+            (Some(c), Some(a)) => format!("{c}::{a}"),
+            _ => senate_core::alias::short_name(&session.agent),
+        };
+        let who = Address::senator(&session.agent).in_text();
+        let place = committee.map_or_else(String::new, |c| {
+            self.locale
+                .pick(format!("（委员会 {c}）"), format!(" on {c}"))
+        });
+        let state = if session.is_live() {
+            self.locale.pick(
+                "它在自己的终端里运行，不是 Senate 托管的终端：请切换到那个终端。".to_owned(),
+                "It runs in its own terminal, not one Senate hosts: switch to that terminal."
+                    .to_owned(),
+            )
+        } else {
+            self.locale.pick(
+                format!("它已结束；`senate session restore {name}` 会在 Senate 托管的终端里重新打开它。"),
+                format!(
+                    "It has ended; `senate session restore {name}` reopens it in a terminal Senate hosts."
+                ),
+            )
+        };
+        let mut others: Vec<String> = Vec::new();
+        if let (Some(aliases), Some(alias)) = (&aliases, &alias)
+            && let Ok(sessions) = self.store.current_sessions()
+        {
+            for other in sessions {
+                let Some(c) = other.committee() else { continue };
+                if Some(c) == committee
+                    || aliases.alias_of(c, &other.agent) != Some(alias)
+                    || !matches!(self.store.session_host(&other.session_id), Ok(Some(_)))
+                {
+                    continue;
+                }
+                let label = format!("{c}::{alias}");
+                if !others.contains(&label) {
+                    others.push(label);
+                }
+            }
+        }
+        others.sort();
+        let also = if others.is_empty() {
+            String::new()
+        } else {
+            let list = others
+                .iter()
+                .map(|o| format!("`{o}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.locale.pick(
+                format!(" 同名的 Senate 托管会话：{list}。"),
+                format!(" Hosted sessions with the same alias: {list}."),
+            )
+        };
+        IpcError::new(
+            codes::NO_SESSION,
+            self.locale.pick(
+                format!("{name} 是 {who}{place}。{state}{also}"),
+                format!("{name} is {who}{place}. {state}{also}"),
+            ),
+        )
     }
 
     async fn attach_info_for(

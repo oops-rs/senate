@@ -572,6 +572,7 @@ fn session(label: &str, running: bool, prompt: bool) -> SessionRow {
         started_at: None,
         attached: false,
         typed_secs_ago: None,
+        viewer_tty: None,
         tty: PathBuf::from("/t"),
         prompt: prompt.then(|| HostedPrompt {
             tool: Some("Bash".into()),

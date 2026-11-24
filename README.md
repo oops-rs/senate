@@ -572,6 +572,7 @@ senate spawn codex --chair --alias lead --attach # appoint the chair and open it
 senate spawn claude --dir ../ledger     # on the committee bound in ../ledger
 senate spawn claude --secretary --alias desk # add a Speaker’s desk secretary
 senate attach reviewer                 # restore or resume as needed (Ctrl-] detaches)
+senate session find reviewer           # which panel holds it? its terminal rings and flashes
 senate session list                    # active hosted sessions (a waiting command: its first line)
 senate session list --all               # include stopped and paused sessions
 senate session history --committee project    # past sessions
@@ -599,6 +600,18 @@ running. `senate committees` shows every committee, even without active
 members. The pending column counts the open threads in your inbox for that
 committee. Only the Speaker’s office can appoint a chair or desk secretary
 through `senate spawn`.
+
+While a terminal is attached, its title is the session's name (the
+agent's own title changes are kept from it), and it is restored when you
+detach. A second `senate attach` of the same session is refused, naming the
+terminal that holds it (its device and when someone last typed there) and
+offering `--read-only`; that terminal rings and flashes "Senate: this
+terminal" in its title for a few seconds, as `senate session find` makes it
+do. Only the viewer's own title and bell are touched, never the agent's
+screen or input. A name that resolves to a session Senate does not host
+says which session and committee it is, that it runs in its own terminal
+(or, once ended, that `senate session restore` reopens it), and the hosted
+sessions with the same alias on other committees.
 
 `senate session pause` sends each session a Senate note asking it to finish its
 current step and write a checkpoint. It waits up to 90 s for the checkpoint
@@ -711,7 +724,7 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 
 | Group | Commands |
 | :--- | :--- |
-| `senate session` | `list` · `watch` · `approve` · `stop` · `restore` · `pause` · `resume` · `replace` · `prune` |
+| `senate session` | `list` · `watch` · `find` · `approve` · `stop` · `restore` · `pause` · `resume` · `replace` · `prune` |
 | `senate senator` | `list` · `alias` · `unalias` · `chair` · `seat` · `unseat` · `duty` |
 | `senate secretary` | `ask` (your default secretary) · `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
 | `senate chat` | `send` · `thread` (simulated chat; see [Testing](#-testing--verification)) |

@@ -557,6 +557,9 @@ pub struct SessionRow {
     /// (since its host started).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typed_secs_ago: Option<u64>,
+    /// The attached viewer's terminal device (`/dev/ttys012`), when it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_tty: Option<String>,
     /// The host's attach socket.
     pub tty: PathBuf,
     /// A permission prompt waits in its terminal for a person: what it is
@@ -1186,6 +1189,11 @@ pub enum Request {
     /// The archived committees (`senate committees --archived`, the app's
     /// Show archived).
     ArchivedCommittees,
+    /// Make the terminal attached to a hosted session ring and flash its
+    /// title (`senate session find`).
+    FindSession {
+        senator: AliasName,
+    },
     /// The machine's default secretary, changing nothing (`senate setup
     /// doctor`, the app).
     DefaultSecretary,
@@ -2382,6 +2390,18 @@ pub struct DeskOpenReply {
     /// The chair an earlier call had already started: nothing new.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub existing_chair: Option<SenatorName>,
+}
+
+/// What [`Request::FindSession`] found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindReply {
+    /// The session, as a command names it (`committee::alias`).
+    pub name: String,
+    /// Whether a terminal is attached to it: it now rings and flashes.
+    pub attached: bool,
+    /// That terminal's device, when it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tty: Option<String>,
 }
 
 /// The machine's default secretary ([`Request::DefaultSecretary`],

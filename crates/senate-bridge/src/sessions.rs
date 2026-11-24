@@ -301,7 +301,7 @@ fn viewer(row: &SessionRow, locale: Locale) -> String {
     }
 }
 
-fn short(secs: u64) -> String {
+pub(crate) fn short(secs: u64) -> String {
     let now = Utc::now();
     uptime(now - chrono::Duration::seconds(secs.cast_signed()), now)
 }
@@ -363,6 +363,7 @@ pub(crate) mod tests {
             started_at: None,
             attached: false,
             typed_secs_ago: None,
+            viewer_tty: None,
             tty: "/home/hosts/x/tty".into(),
             prompt: None,
         }
