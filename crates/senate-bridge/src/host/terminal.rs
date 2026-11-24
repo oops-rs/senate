@@ -331,9 +331,10 @@ pub async fn attach(path: &Path, paths: &Paths, label: &str) -> anyhow::Result<(
         "terminal socket is outside the test directory"
     );
     let drops = super::paste::drop_directory(paths, path).ok();
-    let stream = UnixStream::connect(path)
+    let stream = tokio::time::timeout(ATTACH_STARTUP_TIMEOUT, UnixStream::connect(path))
         .await
-        .context("connect to the hosted terminal")?;
+        .with_context(|| format!("connecting to {label}'s terminal host timed out"))?
+        .with_context(|| format!("connect to {label}'s terminal host"))?;
     drive(stream, label, drops, UnixStream::into_split).await
 }
 
@@ -344,6 +345,8 @@ pub(crate) async fn attach_stream(
 ) -> anyhow::Result<()> {
     drive(stream, label, drops, tokio::io::split).await
 }
+
+const ATTACH_STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 async fn drive<S, R, W>(
     mut stream: S,
@@ -357,7 +360,11 @@ where
     W: AsyncWrite + Unpin,
 {
     let (takes_colors, native) =
-        match tokio::time::timeout(Duration::from_secs(3), stream.read_u8()).await?? {
+        match tokio::time::timeout(ATTACH_STARTUP_TIMEOUT, stream.read_u8())
+            .await
+            .with_context(|| format!("{label}'s terminal host did not answer in time"))?
+            .with_context(|| format!("read the reply from {label}'s terminal host"))?
+        {
             ATTACHED_NATIVE => (true, true),
             ATTACHED => (true, false),
             ATTACHED_PLAIN => (false, false),
@@ -426,6 +433,20 @@ where
     };
     let to_screen = async {
         let mut bytes = [0; IO_CHUNK];
+        // A native host always sends a replay after the initial resize.
+        // Legacy relays may have no screen to send until the TUI paints.
+        if native {
+            let n = tokio::time::timeout(ATTACH_STARTUP_TIMEOUT, screen.read(&mut bytes))
+                .await
+                .with_context(|| {
+                    format!("{label}'s terminal host did not send its initial screen in time")
+                })??;
+            ensure!(
+                n != 0,
+                "{label}'s terminal host closed before sending its initial screen"
+            );
+            terminal.draw(&bytes[..n]).await?;
+        }
         loop {
             let n = screen.read(&mut bytes).await?;
             if n == 0 {

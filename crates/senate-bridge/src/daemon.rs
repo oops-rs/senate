@@ -3203,6 +3203,13 @@ impl Shared {
                 model,
             } => self.sessions_changed(wrap(self.on_replace(&senator, prompt, model).await)),
             Request::AttachInfo { target } => wrap(self.on_attach_info(target).await),
+            Request::AttachChoices => {
+                self.refresh_display_aliases().await;
+                let aliases = lock(&self.display_aliases).as_ref().map(|(_, a)| a.clone());
+                wrap(self.session_rows(false, aliases).await)
+            }
+            Request::ResolveSessionRole { role } => wrap(self.resolve_session_role(role).await),
+            Request::SessionRoleNames => wrap(self.session_role_names()),
             Request::Attach { senator } => wrap(self.on_attach(senator).await),
             Request::Receipt { committee, seq } => wrap(self.receipt(&committee, seq).await),
             Request::SetCommitteeSeat { committee, request } => {
@@ -3565,14 +3572,22 @@ impl Shared {
         &self,
         include_transcript: bool,
     ) -> Result<crate::ipc::SessionsReply, IpcError> {
-        use crate::ipc::{HostState, LocalSessionRow, SessionRow, SessionsReply};
-        let paths = Paths::new(&self.home);
         // An alias is the Senate's to say; one that does not answer in time
         // leaves each session under its senator's own name.
         let aliases = tokio::time::timeout(Duration::from_secs(2), self.api.aliases())
             .await
             .ok()
             .and_then(Result::ok);
+        self.session_rows(include_transcript, aliases).await
+    }
+
+    async fn session_rows(
+        &self,
+        include_transcript: bool,
+        aliases: Option<senate_core::alias::KnownAliases>,
+    ) -> Result<crate::ipc::SessionsReply, IpcError> {
+        use crate::ipc::{HostState, LocalSessionRow, SessionRow, SessionsReply};
+        let paths = Paths::new(&self.home);
         let chairs: BTreeMap<_, _> = self.known_chairs().into_iter().collect();
         let mut rows = Vec::new();
         let mut known = BTreeSet::new();
@@ -3603,9 +3618,10 @@ impl Shared {
         } else {
             HashMap::new()
         };
+        let mut prompts = self.hosted_prompts();
         for (session, host_id) in hosted {
             let facts = crate::host::facts(&paths, &host_id).map_err(IpcError::internal)?;
-            let prompt = self.hosted_prompt(&host_id);
+            let prompt = prompts.remove(&host_id);
             let committee = session.committee().cloned();
             let alias = committee
                 .as_ref()

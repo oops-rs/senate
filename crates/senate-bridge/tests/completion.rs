@@ -53,6 +53,8 @@ async fn bash_zsh_and_fish_complete_the_same_cli_and_live_choices() {
             socket.read_line(&mut line).await.unwrap();
             let req: serde_json::Value = serde_json::from_str(&line).unwrap();
             let payload = match req["op"].as_str().unwrap() {
+                "session_role_names" => json!(["refund-v2::chair", "secretary", "speaker"]),
+                "session_history" => json!({"rows": []}),
                 "sessions" => json!({"rows": [{
                     "host_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","session_id":"test-session",
                     "primary":"claude-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -128,10 +130,14 @@ async fn bash_zsh_and_fish_complete_the_same_cli_and_live_choices() {
                 .await
                 .replace("\\:", ":");
             assert!(
-                names.contains("refund-v2::reviewer"),
+                names.contains("refund-v2::reviewer") && names.contains("refund-v2::chair"),
                 "{shell} {args:?}: {names}"
             );
         }
+        let show = complete(home.path(), shell, &["senate", "session", "show", "refund"])
+            .await
+            .replace("\\:", ":");
+        assert!(show.contains("refund-v2::chair"), "{shell}: {show}");
         assert!(
             complete(home.path(), shell, &["senate", "join", "ref"])
                 .await

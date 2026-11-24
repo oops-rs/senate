@@ -1246,21 +1246,22 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
         attachment_size(&mut stream).await
     })
     .await??;
-    tty.resize(rows, cols).await?;
-    // Subscribe alongside the snapshot and the modes, between complete
-    // output batches and their virtual replies.
-    let (mirror, mut output, modes, keyboard) = {
-        let _gate = tty.output_gate.lock().await;
-        let mut emulation = tty.emulation();
-        let (mirror, output) = tty.screen.join();
-        let modes = emulation.attach();
-        let keyboard = emulation.keyboard_preamble();
-        (mirror, output, modes, keyboard)
-    };
-    tokio::time::timeout(Duration::from_secs(3), async {
+    let mut output = tokio::time::timeout(Duration::from_secs(3), async {
+        tty.resize(rows, cols).await?;
+        // Subscribe alongside the snapshot and the modes, between complete
+        // output batches and their virtual replies.
+        let (mirror, output, modes, keyboard) = {
+            let _gate = tty.output_gate.lock().await;
+            let mut emulation = tty.emulation();
+            let (mirror, output) = tty.screen.join();
+            let modes = emulation.attach();
+            let keyboard = emulation.keyboard_preamble();
+            (mirror, output, modes, keyboard)
+        };
         stream.write_all(&modes).await?;
         stream.write_all(&mirror.attach_snapshot()).await?;
-        stream.write_all(&keyboard).await
+        stream.write_all(&keyboard).await?;
+        Ok::<_, anyhow::Error>(output)
     })
     .await??;
     let (mut input, mut screen) = stream.into_split();

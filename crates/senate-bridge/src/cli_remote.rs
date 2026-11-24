@@ -2,7 +2,7 @@ use std::io::{self, Write as _};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::{Context, ensure};
 use clap::Subcommand;
 use clap_complete::engine::CompletionCandidate;
 
@@ -10,7 +10,7 @@ use crate::host::{self, view::Session};
 use crate::ipc::Request;
 use crate::paths::Paths;
 use crate::remote::{self, CandidateDetails, Client, Control, Device, Row, Scopes};
-use senate_core::Name;
+use senate_core::{Name, SenatorName};
 
 #[derive(Subcommand)]
 pub(super) enum Command {
@@ -337,6 +337,27 @@ pub(super) async fn print_all(paths: &Paths, all: bool) {
     }
 }
 
+pub(super) async fn find_senators(paths: &Paths, senators: &[SenatorName]) -> Vec<Name> {
+    let names = remote::names(paths);
+    let mut locations = futures::future::join_all(names.into_iter().map(|machine| async move {
+        let client = Client::open(paths, &machine).ok()?;
+        let rows = client.list().await.ok()?;
+        rows.iter()
+            .any(|row| {
+                senators
+                    .iter()
+                    .any(|senator| row.primary == senator.as_str())
+            })
+            .then_some(machine)
+    }))
+    .await
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    locations.sort();
+    locations
+}
+
 fn tile(row: Row, machine: &Name) -> Session {
     let title = label(&row, machine);
     Session {
@@ -374,10 +395,15 @@ pub(super) async fn watch(paths: &Paths, machine: Name, all: bool) -> anyhow::Re
     .await
 }
 
+pub(super) enum AttachSelector {
+    Name(String),
+    Role(Vec<SenatorName>),
+}
+
 pub(super) async fn attach(
     paths: &Paths,
     machine: &Name,
-    selector: &str,
+    selector: AttachSelector,
     read_only: bool,
 ) -> anyhow::Result<()> {
     let client = Client::open(paths, machine)?;
@@ -385,18 +411,33 @@ pub(super) async fn attach(
         .list()
         .await
         .with_context(|| format!("{machine} is unreachable"))?;
-    let mut matches = rows.into_iter().filter(|row| {
-        row.session == selector
-            || row.label == selector
-            || row.primary == selector
-            || row.alias.as_deref() == Some(selector)
-    });
-    let row = matches
-        .next()
-        .context("unknown hosted session on paired machine")?;
-    if matches.next().is_some() {
-        bail!("ambiguous remote session, use its committee-qualified name");
-    }
+    let row = match selector {
+        AttachSelector::Name(selector) => {
+            let mut matches = rows.into_iter().filter(|row| {
+                row.session == selector
+                    || row.label == selector
+                    || row.primary == selector
+                    || row.alias.as_deref() == Some(selector.as_str())
+            });
+            let row = matches
+                .next()
+                .context("unknown hosted session on paired machine")?;
+            ensure!(
+                matches.next().is_none(),
+                "ambiguous remote session, use its committee-qualified name"
+            );
+            row
+        }
+        AttachSelector::Role(candidates) => candidates
+            .iter()
+            .flat_map(|senator| {
+                rows.iter()
+                    .filter(move |row| row.primary == senator.as_str())
+            })
+            .min_by_key(|row| !row.running)
+            .cloned()
+            .with_context(|| format!("no session for that role on {machine}"))?,
+    };
     ensure!(
         row.running,
         "remote session is not running; restore it on its host"

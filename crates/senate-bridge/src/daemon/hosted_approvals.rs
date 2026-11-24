@@ -278,24 +278,31 @@ impl Shared {
         })
     }
 
-    /// The prompt waiting in a host's terminal, for `sessions`: its oldest
-    /// open notice, dated on the wall clock.
-    pub(super) fn hosted_prompt(&self, host_id: &EventId) -> Option<HostedPrompt> {
-        let states = self.store.hosted_approval_states().ok()?;
-        let (_, state) = states.into_iter().find(|(id, _)| id == host_id)?;
-        let notice = state
-            .notices
-            .iter()
-            .filter(|n| !n.unseated && n.archive.is_none())
-            .min_by_key(|n| n.at)?;
-        let ago = observed_at().saturating_sub(notice.at);
-        let since = chrono::Utc::now()
-            - chrono::Duration::from_std(Duration::from_nanos(ago)).unwrap_or_default();
-        Some(HostedPrompt {
-            tool: notice.tool.as_deref().map(tool_label),
-            since,
-            screen: notice.screen,
-        })
+    /// Each host's oldest open notice, dated on the wall clock.
+    pub(super) fn hosted_prompts(&self) -> BTreeMap<EventId, HostedPrompt> {
+        let observed = observed_at();
+        let now = chrono::Utc::now();
+        self.store
+            .hosted_approval_states()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(id, state)| {
+                let notice = state
+                    .notices
+                    .iter()
+                    .filter(|n| !n.unseated && n.archive.is_none())
+                    .min_by_key(|n| n.at)?;
+                let ago = Duration::from_nanos(observed.saturating_sub(notice.at));
+                Some((
+                    id,
+                    HostedPrompt {
+                        tool: notice.tool.as_deref().map(tool_label),
+                        since: now - chrono::Duration::from_std(ago).unwrap_or_default(),
+                        screen: notice.screen,
+                    },
+                ))
+            })
+            .collect()
     }
 
     async fn reconcile_approval_hosts(&self) -> Result<(), StoreError> {

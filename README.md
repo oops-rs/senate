@@ -573,6 +573,7 @@ senate spawn claude --dir ../ledger     # on the committee bound in ../ledger
 senate spawn claude --secretary --alias desk # add a Speaker’s desk secretary
 senate attach reviewer                 # restore or resume as needed (Ctrl-] detaches)
 senate session find reviewer           # which panel holds it? its terminal rings and flashes
+senate attach ledger::chair            # open the current chair's hosted session
 senate session list                    # active hosted sessions (a waiting command: its first line)
 senate session list --all               # include stopped and paused sessions
 senate session history --committee project    # past sessions
@@ -590,6 +591,15 @@ senate session resume --all            # ...and bring them back where they were
 senate session replace reviewer        # a fresh session takes the seat
 senate senator chair main --committee ibot # make an existing senator the chair
 ```
+
+Session commands accept `<committee>::chair` for that committee's current
+chair, and `chair` for the committee shown by `senate where` in this directory.
+`secretary` selects a hosted agent working at the Speaker's desk. It can also
+be written as `<committee>::secretary` for the same Senate desk, or qualified
+with the Senate path. `speaker` selects the Speaker when an agent holds the
+office. For a role on a paired machine, use
+`senate attach --machine <machine> <committee>::chair`. On the local machine,
+interactive attach can reopen a stopped role holder's session.
 
 `senate spawn` seats the session on `--committee` when given, else on the
 committee bound in `--dir`, else on this directory's; when `--dir` binds

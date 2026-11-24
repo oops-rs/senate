@@ -719,6 +719,28 @@ pub struct AttachInfo {
     pub paused: bool,
 }
 
+/// An office whose current holder can be used as a hosted session selector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionRole {
+    Chair {
+        committee: CommitteeId,
+    },
+    Secretary {
+        senate: Option<senate_core::SenatePath>,
+    },
+    Speaker,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRoleHolder {
+    pub primary: SenatorName,
+    /// The current hosted session here, if recorded, even when stopped.
+    pub session_id: Option<String>,
+    /// All eligible holders in desk order, for locating one on a paired machine.
+    pub candidates: Vec<SenatorName>,
+}
+
 /// What [`Request::Resume`] did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeReply {
@@ -1128,6 +1150,12 @@ pub enum Request {
         #[serde(flatten)]
         target: AttachTarget,
     },
+    /// List terminal choices without reading conversation transcripts.
+    AttachChoices,
+    ResolveSessionRole {
+        role: SessionRole,
+    },
+    SessionRoleNames,
     Attach {
         senator: AliasName,
     },
