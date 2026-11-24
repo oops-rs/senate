@@ -6,10 +6,71 @@ use crate::ipc::{
 };
 use crate::timeline::{self, Index};
 use serde::{Deserialize, Serialize};
+use std::os::unix::fs::MetadataExt;
+
+#[derive(PartialEq, Eq)]
+struct FileVersion {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl FileVersion {
+    fn read(path: &Path) -> Option<Self> {
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        meta.is_file().then(|| Self {
+            device: meta.dev(),
+            inode: meta.ino(),
+            size: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct SourceVersion {
+    path: PathBuf,
+    runtime: Runtime,
+    file: FileVersion,
+    wal: Option<FileVersion>,
+}
+
+type Sources = BTreeMap<String, SourceVersion>;
+
+fn sources<'a>(sessions: impl IntoIterator<Item = &'a Session>) -> Sources {
+    sessions
+        .into_iter()
+        .filter_map(|session| {
+            let path = timeline::path(session)?;
+            let file = FileVersion::read(&path)?;
+            let wal = (session.runtime == Runtime::Agy)
+                .then(|| FileVersion::read(&path.with_extension("db-wal")))
+                .flatten();
+            Some((
+                session.session_id.clone(),
+                SourceVersion {
+                    path,
+                    runtime: session.runtime,
+                    file,
+                    wal,
+                },
+            ))
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+struct Snapshot {
+    sources: Arc<Sources>,
+    index: Option<(u64, u64)>,
+}
 
 struct Status {
     progress: Option<SessionIndexProgress>,
     error: Option<String>,
+    complete: Option<Snapshot>,
+    active: Option<Snapshot>,
 }
 
 pub(super) struct Background {
@@ -28,6 +89,8 @@ impl Default for Background {
                     total: 0,
                 }),
                 error: None,
+                complete: None,
+                active: None,
             }),
             wake: tokio::sync::Notify::new(),
             ready: watch::channel(0).0,
@@ -40,6 +103,30 @@ impl Background {
     pub(super) fn progress(&self) -> Option<SessionIndexProgress> {
         lock(&self.status).progress
     }
+}
+
+impl Status {
+    fn covers(&self, observed: &Sources, index: Option<(u64, u64)>) -> bool {
+        self.complete.as_ref().is_some_and(|complete| {
+            complete.index == index && complete.sources.as_ref() == observed
+        })
+    }
+
+    fn refreshing(&self, observed: &Sources, index: Option<(u64, u64)>) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            // Bootstrap can publish the new file before opening its schema.
+            (active.index.is_none() || active.index == index) && active.sources.as_ref() == observed
+        })
+    }
+}
+
+fn index_busy(error: &anyhow::Error) -> bool {
+    matches!(
+        error
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
 }
 
 pub(super) async fn warm(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) {
@@ -60,25 +147,35 @@ pub(super) async fn warm(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool
                 lower_index_priority();
                 let _ = done.send(refresh_index(&build, &stop));
             });
-        let error = match worker {
+        let result = match worker {
             Ok(_) => match result.await {
-                Ok(Ok(())) => None,
-                Ok(Err(error)) => Some(error.to_string()),
-                Err(error) => Some(error.to_string()),
+                Ok(result) => result,
+                Err(error) => Err(error.into()),
             },
-            Err(error) => Some(error.to_string()),
+            Err(error) => Err(error.into()),
         };
         {
             let mut status = lock(&shared.history_background.status);
-            if status.error != error
-                && let Some(error) = &error
-            {
-                tracing::warn!(%error, "refreshing the private conversation index");
+            status.progress = None;
+            status.active = None;
+            match result {
+                Ok(complete) => {
+                    status.complete = Some(complete);
+                    status.error = None;
+                }
+                Err(error) if index_busy(&error) => {
+                    // The next demand or periodic tick can complete this
+                    // pass once the SQLite writer releases its reservation.
+                    status.error = None;
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    if status.error.as_ref() != Some(&message) {
+                        tracing::warn!(%error, "refreshing the private conversation index");
+                    }
+                    status.error = Some(message);
+                }
             }
-            *status = Status {
-                progress: None,
-                error,
-            };
         }
         shared
             .history_background
@@ -111,22 +208,31 @@ fn lower_index_priority() {
     }
 }
 
-fn refresh_index(shared: &Shared, shutdown: &watch::Receiver<bool>) -> anyhow::Result<()> {
+fn refresh_index(shared: &Shared, shutdown: &watch::Receiver<bool>) -> anyhow::Result<Snapshot> {
     let mut sessions = shared.store.all_sessions()?;
     sessions.retain(|session| !shared.hosts.unpublished(&session.session_id));
-    if sessions.is_empty() && !Index::exists(&shared.home) {
-        return Ok(());
+    let mut snapshot = Snapshot {
+        sources: Arc::new(sources(&sessions)),
+        index: Index::identity(&shared.home),
+    };
+    if sessions.is_empty() && snapshot.index.is_none() {
+        return Ok(snapshot);
     }
     sessions
         .sort_unstable_by(|a, b| (b.last_seen, &b.session_id).cmp(&(a.last_seen, &a.session_id)));
     let total = sessions.len();
-    lock(&shared.history_background.status).progress =
-        Some(SessionIndexProgress { indexed: 0, total });
-    let mut index = Index::open(&shared.home)?;
     {
-        let _guard = lock(&shared.history_index);
-        index.retain(&sessions.iter().map(|s| s.session_id.as_str()).collect())?;
+        let mut status = lock(&shared.history_background.status);
+        status.progress = Some(SessionIndexProgress { indexed: 0, total });
+        status.active = Some(snapshot.clone());
     }
+    let mut index = {
+        let _guard = lock(&shared.history_index);
+        let mut index = Index::open(&shared.home)?;
+        snapshot.index = Index::identity(&shared.home);
+        index.retain(&sessions.iter().map(|s| s.session_id.as_str()).collect())?;
+        index
+    };
     for (position, old) in sessions.into_iter().enumerate() {
         if *shutdown.borrow() {
             break;
@@ -152,7 +258,9 @@ fn refresh_index(shared: &Shared, shutdown: &watch::Receiver<bool>) -> anyhow::R
             total,
         });
     }
-    Ok(())
+    // Publish the inputs observed before the walk. A request for an append
+    // that arrived during the pass may still need a later pass.
+    Ok(snapshot)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -328,42 +436,55 @@ impl Shared {
                 "invalid session search query or cursor",
             ));
         }
-        if cursor.is_none() && lock(&self.history_background.status).progress.is_none() {
-            let mut ready = self.history_background.ready.subscribe();
-            self.history_background.wake.notify_one();
-            // Complete tiny updates immediately when possible. Large builds
-            // keep running and callers get the committed partial results.
-            let _ = tokio::time::timeout(Duration::from_millis(100), ready.changed()).await;
-        }
         let reader = self.history_background.reader.clone().lock_owned().await;
+        let mut ready = self.history_background.ready.subscribe();
+        let shared = self.clone();
+        let first = cursor.is_none();
+        let (reader, sessions, observed) = tokio::task::spawn_blocking(move || {
+            let sessions = shared.history_sessions()?;
+            let observed = first.then(|| sources(sessions.iter().map(|(s, _, _)| s)));
+            Ok::<_, IpcError>((reader, sessions, observed))
+        })
+        .await
+        .map_err(IpcError::internal)??;
+        if let Some(observed) = &observed {
+            let identity = Index::identity(&self.home);
+            let (current, refreshing) = {
+                let status = lock(&self.history_background.status);
+                (
+                    status.covers(observed, identity),
+                    status.refreshing(observed, identity),
+                )
+            };
+            if !current {
+                if !refreshing {
+                    self.history_background.wake.notify_one();
+                }
+                // Let a small refresh finish without delaying partial results
+                // while a large refresh catches up.
+                let _ = tokio::time::timeout(Duration::from_millis(100), ready.changed()).await;
+            }
+        }
         let shared = self.clone();
         tokio::task::spawn_blocking(move || {
             let _reader = reader;
-            let progress_before = {
+            let identity = Index::identity(&shared.home);
+            let progress = {
                 let status = lock(&shared.history_background.status);
                 if let Some(error) = &status.error {
                     return Err(IpcError::internal(error));
                 }
-                status.progress
-            };
-            let sessions = shared.history_sessions()?;
-            if !Index::exists(&shared.home) {
-                // The index may have been removed during the preceding pass.
-                // Ask for a fresh pass against the new path, rather than
-                // declaring an empty index ready while sources remain.
-                let total = sessions
-                    .iter()
-                    .filter(|(session, _, _)| {
-                        timeline::path(session).is_some_and(|path| {
-                            std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
+                observed
+                    .as_ref()
+                    .filter(|observed| !status.covers(observed, identity))
+                    .map(|_| {
+                        status.progress.unwrap_or(SessionIndexProgress {
+                            indexed: 0,
+                            total: sessions.len(),
                         })
                     })
-                    .count();
-                if total != 0 {
-                    shared.history_background.wake.notify_one();
-                }
-                let progress = progress_before
-                    .or((total != 0).then_some(SessionIndexProgress { indexed: 0, total }));
+            };
+            if identity.is_none() {
                 return Ok(SessionSearchReply {
                     hits: Vec::new(),
                     next_cursor: None,
@@ -394,18 +515,19 @@ impl Shared {
                 // A reader can see the new database file before the initial
                 // schema transaction commits. The worker reports persistent
                 // errors once the pass ends.
-                Err(_) if progress_before.is_some() && cursor.is_none() => SessionSearchReply {
-                    hits: Vec::new(),
-                    next_cursor: None,
-                    indexing: true,
-                    progress: progress_before,
-                },
+                Err(error) if cursor.is_none() && (progress.is_some() || index_busy(&error)) => {
+                    SessionSearchReply {
+                        hits: Vec::new(),
+                        next_cursor: None,
+                        indexing: true,
+                        progress,
+                    }
+                }
                 Err(error) if cursor.is_some() => {
                     return Err(IpcError::bad_request(error.to_string()));
                 }
                 Err(error) => return Err(IpcError::internal(error)),
             };
-            let progress = progress_before.or(lock(&shared.history_background.status).progress);
             if progress.is_some() {
                 reply.indexing = true;
                 reply.progress = progress;
@@ -421,11 +543,9 @@ impl Shared {
         let _binding = self.session_bindings.write().await;
         let shared = self.clone();
         tokio::task::spawn_blocking(move || {
-            let _guard = shared.history_index.try_lock().map_err(|_| {
-                IpcError::bad_request(
-                    "the search index is updating; try forgetting the session again",
-                )
-            })?;
+            // Wait for the current bounded batch. Reads may already be
+            // current while a background pass is refreshing statistics.
+            let _guard = lock(&shared.history_index);
             let paths = Paths::new(&shared.home);
             let session = shared.timeline_session(&id)?;
             let host = shared.store.session_host(&id).map_err(internal)?;

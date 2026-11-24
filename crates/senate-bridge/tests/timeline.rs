@@ -28,7 +28,7 @@ const SESSION: &str = "local-timeline";
 async fn request<T: serde::de::DeserializeOwned>(bridge: &Harness, request: &Request) -> T {
     ipc::request(&bridge.socket(), request, TIMEOUT, TIMEOUT)
         .await
-        .unwrap()
+        .unwrap_or_else(|error| panic!("{request:?}: {error}"))
 }
 
 async fn register(bridge: &Harness, id: &str, runtime: Runtime, path: &Path, event: HookEvent) {
@@ -599,7 +599,7 @@ async fn search_ready(h: &Harness, op: &Request) -> ipc::SessionSearchReply {
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("search did not settle: {progress:?}"))
+    .unwrap_or_else(|_| panic!("search did not settle for {op:?}: {progress:?}"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -812,6 +812,30 @@ async fn history_retains_readable_conversations_searches_incrementally_and_forge
         assert!(reply.hits[0].snippet.contains(word));
     }
 
+    // A writer can be busy warming unrelated work. A completed index of
+    // the files on disk still answers immediately from its WAL snapshot.
+    let index = h.paths.home().join("history/session-search.sqlite");
+    let mut conn = rusqlite::Connection::open(index).unwrap();
+    let writer = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let warm: SessionSearchReply = request(
+        &h,
+        &Request::SessionSearch {
+            query: "Index title".into(),
+            committee: None,
+            cursor: None,
+            limit: None,
+        },
+    )
+    .await;
+    assert!(
+        !warm.indexing,
+        "an unchanged search started a refresh: {:?}",
+        warm.progress
+    );
+    assert_eq!(warm.hits.len(), 3);
+
     let result = "prefix-marker ".to_string() + &"o".repeat(700) + "hidden-after-prefix";
     append(
         &claude,
@@ -822,6 +846,23 @@ async fn history_retains_readable_conversations_searches_incrementally_and_forge
     );
     append(&claude, "\n");
     agy::planner(&db, 2, "Added after the index", "");
+    let pending: SessionSearchReply = request(
+        &h,
+        &Request::SessionSearch {
+            query: "prefix-marker".into(),
+            committee: None,
+            cursor: None,
+            limit: None,
+        },
+    )
+    .await;
+    assert!(
+        pending.indexing,
+        "a locked writer cannot incorporate the append"
+    );
+    writer.rollback().unwrap();
+    drop(conn);
+
     for query in ["prefix-marker", "Added after the index"] {
         let reply: SessionSearchReply = search_ready(
             &h,
@@ -833,7 +874,7 @@ async fn history_retains_readable_conversations_searches_incrementally_and_forge
             },
         )
         .await;
-        assert_eq!(reply.hits.len(), 1);
+        assert_eq!(reply.hits.len(), 1, "{query}");
     }
     let hidden: SessionSearchReply = search_ready(
         &h,
@@ -871,7 +912,11 @@ async fn history_retains_readable_conversations_searches_incrementally_and_forge
         .unwrap();
     assert_eq!(count, 0);
     drop(index);
+    // The rebuild starts with a missing index and no SQLite connection
+    // left holding its old WAL or shared-memory files.
+    h.stop().await;
     std::fs::remove_file(&idx).unwrap();
+    h.start().await;
     let rebuilt: SessionSearchReply = search_ready(
         &h,
         &Request::SessionSearch {
