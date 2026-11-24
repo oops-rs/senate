@@ -18,9 +18,9 @@ use chrono::Utc;
 use senate_bridge::agent::AgentSource;
 use senate_bridge::approvals::{Approval, ApprovalKind, ResolvedBy};
 use senate_bridge::ipc::{
-    ApprovalsReply, ApproveReply, CommitteeStatus, DeskDecision, DeskItemDetail, DeskOutcome,
-    DocketReply, HostState, HostedModel, HostedPrompt, InboxReply, IpcError, Posted, Reply,
-    Request, SenateDocket, SessionRow, SessionsReply, StatusReply, StreamState, ThreadReply,
+    ApprovalsReply, ApproveReply, CommitteeStatus, DeskAction, DeskDecision, DeskItemDetail,
+    DeskOutcome, DocketReply, HostState, HostedModel, HostedPrompt, InboxReply, IpcError, Posted,
+    Reply, Request, SenateDocket, SessionRow, SessionsReply, StatusReply, StreamState, ThreadReply,
     TimelineDirection, TimelineItem, TimelineKind, TimelineReply, TimelineUpdate, WatchEvent,
 };
 use senate_bridge::session::{Runtime, Session, SessionState};
@@ -634,6 +634,12 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                         62 => Some("Only the Speaker or the owner of the agent serving as Speaker can decide this request.".into()),
                         _ => Some("This card can only decide requests for another committee in this Senate.".into()),
                     },
+                    actions: match seq.0 {
+                        60 | 61 => vec![DeskAction::Forward, DeskAction::Refuse, DeskAction::Answer, DeskAction::Close],
+                        62 => vec![],
+                        _ => vec![DeskAction::Answer, DeskAction::Close],
+                    },
+                    waits_on: (seq.0 == 62).then(|| "Only the Speaker or the owner of the agent serving as Speaker can decide this request.".into()),
                 }),
                 None => Reply::err(IpcError::bad_request("desk item not found")),
             }
@@ -653,7 +659,12 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                     "The destination is temporarily unavailable.",
                 ));
             }
-            if seq != Seq(60) && seq != Seq(61) {
+            let answerable = seq == Seq(63)
+                && matches!(
+                    decision,
+                    DeskDecision::Answer { .. } | DeskDecision::Close { .. }
+                );
+            if seq != Seq(60) && seq != Seq(61) && !answerable {
                 return Reply::err(IpcError::new(
                     "not_presiding",
                     "Only the Speaker may decide this request.",
@@ -675,6 +686,18 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 DeskDecision::Refuse { .. } => {
                     return Reply::err(IpcError::bad_request("A refusal reason is required."));
                 }
+                DeskDecision::Answer { body } if !body.trim().is_empty() => DeskOutcome::Answered {
+                    committee: committee.clone(),
+                    seq: Seq(77),
+                },
+                DeskDecision::Answer { .. } => {
+                    return Reply::err(IpcError::bad_request("An answer needs a body."));
+                }
+                DeskDecision::Close { reason } => DeskOutcome::Closed {
+                    committee: committee.clone(),
+                    seq: Seq(78),
+                    reason,
+                },
             };
             for page in w.docket.senates.iter_mut().flat_map(|s| &mut s.pages) {
                 if page.committee == committee {
@@ -1178,6 +1201,7 @@ pub fn desk_fixture(w: &mut World) {
             62,
             "Please pass this request to payments. The signed-in account may inspect it here.",
         ),
+        (63, "Which quarter does the refund policy take effect?"),
     ] {
         let mut event = template.clone();
         event.id = EventId::new();
@@ -1195,7 +1219,7 @@ pub fn desk_fixture(w: &mut World) {
             intended: Some(intended),
         });
     }
-    page.head = Seq(62);
+    page.head = Seq(63);
 }
 
 pub fn busy_senate(w: &mut World) {

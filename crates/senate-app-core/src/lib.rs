@@ -55,7 +55,9 @@ pub use ffi::{
     AppCore, ApprovalDecision, CoreError, CoreListener, MentionKind, TerminalCommand, TextPart,
     TimelineListener, split_mentions,
 };
-pub use reads::{DeskItemView, DeskOutcomeView, ThreadEvent, ThreadView};
+pub use reads::{
+    DeskAction, DeskChoice, DeskItemView, DeskOutcomeKind, DeskOutcomeView, ThreadEvent, ThreadView,
+};
 pub use state::{
     AgentInfo, AppState, ApprovalRequest, ChairLine, ChildLine, ChildSeatLine, CodexThreadInfo,
     CommitteeLine, Counts, DocketCommittee, DocketEntry, DocketSenate, HostedSession, InboxThread,

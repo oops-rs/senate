@@ -693,3 +693,45 @@ async fn a_recipient_is_a_flat_name_and_an_agent_need_not_have_connected() {
         .await;
     }
 }
+
+#[tokio::test]
+async fn the_speakers_office_closes_what_waits_on_its_desk() {
+    let Built { server } = start(false, claude_presides).await;
+    let asked = stored(
+        &server,
+        BOB,
+        &NewEvent::new(
+            committee(),
+            Kind::Question,
+            person_addr("bob"),
+            "is this still needed?",
+        )
+        .to(Address::Speaker),
+    )
+    .await;
+    assert_eq!(docket(&server).await.items.len(), 1);
+    let mut status = StatusPayload::new(StatusState::Archived);
+    status.reason = Some("settled in chat".into());
+    let close = from_speaker(Kind::Status, "")
+        .in_thread(asked.seq)
+        .with_meta(meta::STATUS, status.value());
+    // Not someone who does not hold the seat.
+    api_error(
+        server.post_event(BOB, &close).await,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+    // Only an archive: no other step of a task, no takeover.
+    let mut working = close.clone();
+    working.meta.insert(
+        meta::STATUS.into(),
+        StatusPayload::new(StatusState::Active).value(),
+    );
+    assert_eq!(
+        server.post_event(ALICE, &working).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    stored(&server, ALICE, &close).await;
+    assert!(docket(&server).await.items.is_empty());
+}

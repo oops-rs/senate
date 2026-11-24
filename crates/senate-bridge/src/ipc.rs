@@ -1780,7 +1780,30 @@ impl SendReply {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeskDecision {
     Forward,
-    Refuse { reason: String },
+    Refuse {
+        reason: String,
+    },
+    /// Answer it as the Speaker, in its thread, to whoever asked
+    /// (Markdown). Takes it off the desk.
+    Answer {
+        body: String,
+    },
+    /// Close it as the Speaker with no answer: an archived status in its
+    /// thread, with why when given. Takes it off the desk.
+    Close {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+/// What a person may do with a desk item ([`DeskItemDetail::actions`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeskAction {
+    Forward,
+    Refuse,
+    Answer,
+    Close,
 }
 
 /// An outcome stored on the original request's audit event.
@@ -1798,6 +1821,15 @@ pub enum DeskOutcome {
         #[serde(default)]
         seq: Seq,
     },
+    /// Answered as the Speaker: the answer's seq.
+    Answered { committee: CommitteeId, seq: Seq },
+    /// Closed as the Speaker: the archived status's seq.
+    Closed {
+        committee: CommitteeId,
+        seq: Seq,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1806,7 +1838,15 @@ pub struct DeskItemDetail {
     pub events: Vec<Event>,
     pub origin: Option<String>,
     pub destination: Option<String>,
+    /// Why forwarding (the oldest decision) is not possible, as before;
+    /// [`DeskItemDetail::actions`] says what is.
     pub blocked: Option<String>,
+    /// Exactly what this person may do with the item now.
+    #[serde(default)]
+    pub actions: Vec<DeskAction>,
+    /// When nobody here can act: on whom or what it waits, ready to show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits_on: Option<String>,
 }
 
 /// A desk item passed on.

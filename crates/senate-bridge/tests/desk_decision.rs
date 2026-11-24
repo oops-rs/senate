@@ -164,20 +164,26 @@ async fn an_agent_peer_is_refused_even_when_its_person_is_speaker() {
         })
         .await
         .unwrap();
-        let err = call::<DeskOutcome>(
-            Path::new(&socket),
-            &Request::DeskDecide {
-                committee: CommitteeId::new("refund-v2").unwrap(),
-                seq: senate_core::Seq(1),
-                item_id: EventId::new(),
-                id: EventId::new(),
-                decision: DeskDecision::Forward,
-            },
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, ipc::ClientError::Remote(error)
-            if error.code == ipc::codes::NOT_A_PERSON && error.message.contains("senator::claude")));
+        for decision in [
+            DeskDecision::Forward,
+            DeskDecision::Answer { body: "x".into() },
+            DeskDecision::Close { reason: None },
+        ] {
+            let err = call::<DeskOutcome>(
+                Path::new(&socket),
+                &Request::DeskDecide {
+                    committee: CommitteeId::new("refund-v2").unwrap(),
+                    seq: senate_core::Seq(1),
+                    item_id: EventId::new(),
+                    id: EventId::new(),
+                    decision,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, ipc::ClientError::Remote(error)
+                if error.code == ipc::codes::NOT_A_PERSON && error.message.contains("senator::claude")));
+        }
         return;
     }
     let mut h = Harness::new().await;
@@ -226,6 +232,389 @@ async fn an_agent_peer_is_refused_even_when_its_person_is_speaker() {
             .unwrap()
             .unwrap()
             .success()
+    );
+    h.stop().await;
+}
+
+/// alice's daemon with alice in the Speaker's seat (unless `speaker` says
+/// otherwise), and roots put on her desk, each waiting as `awaiting` says.
+async fn desk(
+    speaker: Option<&str>,
+    roots: Vec<(NewEvent, Option<senate_core::Awaiting>)>,
+) -> (Harness, Vec<senate_core::Event>) {
+    let mut h = Harness::new().await;
+    h.server
+        .state
+        .inner
+        .lock()
+        .unwrap()
+        .roster
+        .name_speaker(speaker.map(|s| s.parse().unwrap()))
+        .unwrap();
+    let mut events = Vec::new();
+    for (root, awaiting) in roots {
+        let event = h.server.append(root);
+        if let Some(awaiting) = awaiting {
+            h.server
+                .state
+                .inner
+                .lock()
+                .unwrap()
+                .desk_awaiting
+                .insert((event.committee.to_string(), event.seq), awaiting);
+        }
+        events.push(event);
+    }
+    h.start().await;
+    (h, events)
+}
+
+fn question(to: Address, body: &str) -> NewEvent {
+    NewEvent::new(
+        common::committee(),
+        Kind::Question,
+        Address::senior(&common::name("bob")),
+        body,
+    )
+    .to(to)
+}
+
+fn decide(item: &senate_core::Event, id: &EventId, decision: DeskDecision) -> Request {
+    Request::DeskDecide {
+        committee: item.committee.clone(),
+        seq: item.seq,
+        item_id: item.id.clone(),
+        id: id.clone(),
+        decision,
+    }
+}
+
+async fn detail(socket: &Path, item: &senate_core::Event) -> DeskItemDetail {
+    call(
+        socket,
+        &Request::DeskItem {
+            committee: item.committee.clone(),
+            seq: item.seq,
+        },
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn the_speaker_answers_each_kind_of_waiting_item_in_its_thread_once() {
+    use ipc::DeskAction::{Answer, Close, Forward, Refuse};
+    use senate_core::Awaiting;
+    let (mut h, items) = desk(
+        Some("senator::alice"),
+        vec![
+            (
+                question(Address::Speaker, "Which quarter?"),
+                Some(Awaiting::Addressed),
+            ),
+            (
+                question(Address::senator(&path("codex")), "Is the ledger done?"),
+                Some(Awaiting::Away {
+                    agents: vec![path("codex")],
+                }),
+            ),
+            (
+                question(Address::Speaker, "Who looks at refunds?"),
+                Some(Awaiting::Pick {
+                    owner: None,
+                    candidates: vec![path("claude"), path("codex")],
+                }),
+            ),
+            (
+                NewEvent::new(
+                    common::committee(),
+                    Kind::Request,
+                    Address::senior(&common::name("bob")),
+                    "A request for elsewhere",
+                )
+                .to(Address::Speaker)
+                .with_meta(meta::INTENDED, json!("other::senator::alice")),
+                None,
+            ),
+        ],
+    )
+    .await;
+    let socket = h.socket();
+    let [addressed, away, pick, forwardable] = items.as_slice() else {
+        unreachable!()
+    };
+    for item in [addressed, away, pick] {
+        let d = detail(&socket, item).await;
+        assert_eq!(d.actions, [Answer, Close], "{}", item.body);
+        assert_eq!(d.waits_on, None);
+    }
+    assert_eq!(
+        detail(&socket, forwardable).await.actions,
+        [Forward, Refuse, Answer, Close]
+    );
+
+    // An empty answer is refused and posts nothing.
+    let empty = call::<DeskOutcome>(
+        &socket,
+        &decide(
+            addressed,
+            &EventId::new(),
+            DeskDecision::Answer { body: "  ".into() },
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(empty.to_string().contains("empty"), "{empty}");
+
+    for (item, body) in [
+        (addressed, "From Q3."),
+        (away, "Yes, merged."),
+        (pick, "Me."),
+    ] {
+        let id = EventId::new();
+        let answer = decide(item, &id, DeskDecision::Answer { body: body.into() });
+        let receipt: DeskOutcome = call(&socket, &answer).await.unwrap();
+        let DeskOutcome::Answered { seq, .. } = receipt.clone() else {
+            panic!("an answer receipt expected: {receipt:?}")
+        };
+        // A retry with the same id is the same answer, posted once.
+        assert_eq!(
+            call::<DeskOutcome>(&socket, &answer).await.unwrap(),
+            receipt
+        );
+        let thread: Vec<_> = h
+            .server
+            .events(item.committee.as_str())
+            .into_iter()
+            .filter(|e| e.thread == Some(item.seq))
+            .collect();
+        assert_eq!(thread.len(), 1);
+        let posted = &thread[0];
+        assert_eq!(posted.seq, seq);
+        assert_eq!(posted.kind, Kind::Answer);
+        assert_eq!(posted.from, Address::Speaker);
+        assert_eq!(
+            posted.to,
+            [Address::senior(&common::name("bob"))],
+            "the asker has it"
+        );
+        assert_eq!(posted.body, body);
+        assert_eq!(posted.meta[meta::DESK_OUTCOME]["kind"], "answered");
+        assert_eq!(posted.meta[meta::DESK_OUTCOME]["by"], "alice");
+        assert_eq!(posted.meta[meta::ACTED_BY], "alice");
+
+        // Settled: nothing more to do here, and a second answer (another
+        // window, or a secretary at the desk) cannot land as well.
+        let d = detail(&socket, item).await;
+        assert!(d.actions.is_empty());
+        assert!(d.waits_on.unwrap().contains("no longer on the desk"));
+        let again = call::<DeskOutcome>(
+            &socket,
+            &decide(
+                item,
+                &EventId::new(),
+                DeskDecision::Answer {
+                    body: "Twice".into(),
+                },
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert!(again.to_string().contains("settled already"), "{again}");
+    }
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn closing_takes_an_item_off_the_desk_with_its_reason() {
+    let (mut h, items) = desk(
+        Some("senator::alice"),
+        vec![
+            (question(Address::Speaker, "Still needed?"), None),
+            (question(Address::Speaker, "And this?"), None),
+        ],
+    )
+    .await;
+    for item in &items {
+        h.server.state.inner.lock().unwrap().desk_awaiting.insert(
+            (item.committee.to_string(), item.seq),
+            senate_core::Awaiting::Addressed,
+        );
+    }
+    let socket = h.socket();
+    let docket = || async {
+        let reply: ipc::DocketReply = call(
+            &socket,
+            &Request::Docket {
+                session: Default::default(),
+                committee: Some(common::committee()),
+            },
+        )
+        .await
+        .unwrap();
+        reply
+            .senates
+            .iter()
+            .flat_map(|s| &s.pages)
+            .flat_map(|p| &p.items)
+            .map(|i| i.event.seq)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(docket().await, [items[0].seq, items[1].seq]);
+
+    let id = EventId::new();
+    let close = decide(
+        &items[0],
+        &id,
+        DeskDecision::Close {
+            reason: Some(" Settled in chat. ".into()),
+        },
+    );
+    let receipt: DeskOutcome = call(&socket, &close).await.unwrap();
+    assert!(
+        matches!(&receipt, DeskOutcome::Closed { reason: Some(r), .. } if r == "Settled in chat."),
+        "{receipt:?}"
+    );
+    assert_eq!(call::<DeskOutcome>(&socket, &close).await.unwrap(), receipt);
+    let thread: Vec<_> = h
+        .server
+        .events(items[0].committee.as_str())
+        .into_iter()
+        .filter(|e| e.thread == Some(items[0].seq))
+        .collect();
+    assert_eq!(thread.len(), 1, "closed once");
+    let status = senate_core::StatusPayload::of(&thread[0]).unwrap();
+    assert_eq!(status.state, senate_core::StatusState::Archived);
+    assert_eq!(thread[0].from, Address::Speaker);
+    assert_eq!(thread[0].meta[meta::DESK_OUTCOME]["kind"], "closed");
+    assert_eq!(
+        thread[0].meta[meta::DESK_OUTCOME]["reason"],
+        "Settled in chat."
+    );
+    assert_eq!(
+        docket().await,
+        [items[1].seq],
+        "the closed one is off the desk"
+    );
+
+    // Without a reason too.
+    let receipt: DeskOutcome = call(
+        &socket,
+        &decide(
+            &items[1],
+            &EventId::new(),
+            DeskDecision::Close { reason: None },
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(receipt, DeskOutcome::Closed { reason: None, .. }));
+    assert!(docket().await.is_empty());
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn only_the_speaker_answers_and_not_what_waits_elsewhere() {
+    use senate_core::Awaiting;
+    // bob holds the seat: alice may read the item but not decide it.
+    let (mut h, items) = desk(
+        Some("senator::bob"),
+        vec![(
+            question(Address::Speaker, "Which quarter?"),
+            Some(Awaiting::Addressed),
+        )],
+    )
+    .await;
+    let socket = h.socket();
+    let d = detail(&socket, &items[0]).await;
+    assert!(d.actions.is_empty());
+    assert!(d.waits_on.unwrap().contains("Only the Speaker"));
+    for decision in [
+        DeskDecision::Answer { body: "Q3".into() },
+        DeskDecision::Close { reason: None },
+    ] {
+        let err = call::<DeskOutcome>(&socket, &decide(&items[0], &EventId::new(), decision))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ipc::ClientError::Remote(e) if e.code == ipc::codes::NOT_PRESIDING),
+            "{err}"
+        );
+    }
+    h.stop().await;
+
+    // An empty seat: nobody here decides.
+    let (mut h, items) = desk(
+        None,
+        vec![(
+            question(Address::Speaker, "Anyone?"),
+            Some(Awaiting::Addressed),
+        )],
+    )
+    .await;
+    let err = call::<DeskOutcome>(
+        &h.socket(),
+        &decide(
+            &items[0],
+            &EventId::new(),
+            DeskDecision::Answer { body: "x".into() },
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("Only the Speaker"), "{err}");
+    h.stop().await;
+
+    // A child Senate's question while it is offline, and an agent's
+    // permission prompt: neither is answered from here.
+    let prompt = NewEvent::new(
+        common::committee(),
+        Kind::Question,
+        Address::senator(&path("claude")),
+        "Allow `rm -rf target`?",
+    )
+    .to(Address::Speaker)
+    .with_meta(meta::HOSTED_APPROVAL, json!(true));
+    let (mut h, items) = desk(
+        Some("senator::alice"),
+        vec![
+            (
+                question(Address::Speaker, "For the child"),
+                Some(Awaiting::ChildOffline {
+                    child: common::name("eu"),
+                }),
+            ),
+            (prompt, Some(Awaiting::Addressed)),
+        ],
+    )
+    .await;
+    let socket = h.socket();
+    for (item, why) in [(&items[0], "offline"), (&items[1], "Approvals")] {
+        let d = detail(&socket, item).await;
+        assert!(d.actions.is_empty());
+        assert!(
+            d.waits_on.as_deref().unwrap().contains(why),
+            "{:?}",
+            d.waits_on
+        );
+        let err = call::<DeskOutcome>(
+            &socket,
+            &decide(
+                item,
+                &EventId::new(),
+                DeskDecision::Answer { body: "x".into() },
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains(why), "{err}");
+    }
+    assert!(
+        h.server
+            .events(common::committee().as_str())
+            .iter()
+            .all(|e| e.thread.is_none()),
+        "nothing posted"
     );
     h.stop().await;
 }
