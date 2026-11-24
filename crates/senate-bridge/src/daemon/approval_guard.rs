@@ -126,7 +126,40 @@ impl Front {
         if peer == std::process::id() {
             return Ok(());
         }
+        let stored = self
+            .primary()
+            .store
+            .session(&report.session_id)
+            .map_err(internal)?
+            .filter(|session| session.state != SessionState::Ended);
+        if stored
+            .as_ref()
+            .is_some_and(|session| session.runtime != report.runtime)
+        {
+            return Err(hook_owner_mismatch());
+        }
+        if report.runtime == Runtime::Agy
+            && self
+                .primary()
+                .store
+                .session_host(&report.session_id)
+                .map_err(internal)?
+                .is_some()
+        {
+            return Err(hook_owner_mismatch());
+        }
+        let recorded_owner = stored
+            .and_then(|session| session.claude_pid)
+            .and_then(|pid| kernel_process::inspect(pid).ok())
+            .map(|process| process.identity);
         if report.runtime != Runtime::Claude {
+            if let Some(owner) = recorded_owner
+                && kernel_process::inspect(peer)
+                    .ok()
+                    .is_none_or(|process| process.identity != owner)
+            {
+                return Err(hook_owner_mismatch());
+            }
             report.claude_pid = report
                 .claude_pid
                 .filter(|pid| report.runtime == Runtime::Acp && *pid == peer);
@@ -140,6 +173,9 @@ impl Front {
             .expect("process check budget is never closed");
         let ancestors = kernel_process::ancestors(peer, DEPTH)
             .map_err(|_| IpcError::bad_request("cannot verify the hook caller's ancestry"))?;
+        if recorded_owner.is_some_and(|owner| !ancestors.contains(&owner)) {
+            return Err(hook_owner_mismatch());
+        }
         report.claude_pid = report
             .claude_pid
             .filter(|pid| ancestors.iter().any(|process| process.pid == *pid));
@@ -450,6 +486,10 @@ where
 
 fn refusal(message: &str) -> IpcError {
     IpcError::new(codes::NOT_A_PERSON, message)
+}
+
+fn hook_owner_mismatch() -> IpcError {
+    IpcError::bad_request("the hook caller cannot refresh that session's process binding")
 }
 
 #[cfg(test)]
