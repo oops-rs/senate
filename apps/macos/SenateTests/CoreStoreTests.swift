@@ -1093,3 +1093,42 @@ extension CoreStoreTests {
         #expect(DeskEntryDetail.title(request, detail) == "Request for ledger in payments · refund-v2 #60")
     }
 }
+
+extension CoreStoreTests {
+    /// The sidebar catches up with the store's committees a step at a time:
+    /// at most one committee gains rows a step (new sessions, a new
+    /// committee, opening), everything else at once; it gets there.
+    @Test func theSidebarAddsRowsUnderOneCommitteeAtATime() {
+        let empty = groups([]) + ["docs", "infra", "payments"].map {
+            SessionGroup(committee: $0, title: $0, waiting: 0, status: nil, active: true, sessions: [])
+        }
+        let full = groups([sessionLine("scribe", committee: "docs"), sessionLine("deploy", committee: "infra"),
+                           sessionLine("ledger", committee: "payments"), sessionLine("loose", committee: nil)])
+        let all = Set(full.map(\.id))
+
+        // The committees arrive empty: all at once, open.
+        var (shown, opened) = SidebarStaging.step(shown: [], opened: [], target: empty, wantOpen: Set(empty.map(\.id)))
+        #expect(shown.count == 3 && opened.count == 3)
+
+        // Then their sessions: one committee gains its rows a step.
+        var steps = 0
+        while shown != full || opened != all, steps < 10 {
+            let before = shown
+            (shown, opened) = SidebarStaging.step(shown: shown, opened: opened, target: full, wantOpen: all)
+            let gained = shown.filter { g in
+                let had = before.first { $0.id == g.id }.map { Set($0.sessions.map(\.sessionId)) } ?? []
+                return !Set(g.sessions.map(\.sessionId)).isSubset(of: had)
+            }
+            #expect(gained.count <= 1, "step \(steps): \(gained.map(\.id))")
+            steps += 1
+        }
+        #expect(shown == full && opened == all)
+        #expect(steps == 4, "three committees gain sessions, one is new")
+
+        // Closing is at once; opening everything again, one a step.
+        (shown, opened) = SidebarStaging.step(shown: shown, opened: opened, target: full, wantOpen: [])
+        #expect(opened.isEmpty)
+        (shown, opened) = SidebarStaging.step(shown: shown, opened: opened, target: full, wantOpen: all)
+        #expect(opened.count == 1)
+    }
+}
