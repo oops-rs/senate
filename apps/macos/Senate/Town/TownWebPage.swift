@@ -156,14 +156,16 @@ final class TownWebPage: NSObject {
         guard ready else { return }
         let size = web.bounds.size
         defer { onScreenChanged(onScreen) }
-        send("environment", [
+        var env: [String: Any] = [
             "color_scheme": colorScheme, "reduced_motion": reduceMotion,
             "locale": Locale.current.identifier(.bcp47), "time_zone": TimeZone.current.identifier, "visible": onScreen,
             "viewport": ["width": size.width, "height": size.height],
             "safe_area": ["top": 0, "right": 0, "bottom": 0, "left": 0],
-            "focused": web.window?.isKeyWindow ?? false,
             "power": Self.power,
-        ])
+        ]
+        // Only with a window is there a reliable answer; otherwise the field is left out.
+        if let window = web.window { env["focused"] = window.isKeyWindow }
+        send("environment", env)
     }
 
     /// The page can be seen: shown, in a window that isn't hidden, occluded or
