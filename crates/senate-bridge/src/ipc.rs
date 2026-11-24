@@ -2873,8 +2873,38 @@ pub enum ClientError {
     Remote(IpcError),
 }
 
+/// Encode a request, with a one-time macOS scope proof for person operations.
+pub async fn request_line(socket: &Path, request: &Request) -> Result<Vec<u8>, ClientError> {
+    let body = serde_json::to_vec(request).map_err(|e| ClientError::Protocol(e.to_string()))?;
+    let mut frame = Vec::new();
+    #[cfg(target_os = "macos")]
+    if (crate::daemon::approval_guard::person_only(request).is_some()
+        || crate::daemon::approval_guard::mac_operator_only(request)
+        || matches!(
+            request,
+            Request::RemoteControl { .. }
+                | Request::SessionDrop { .. }
+                | Request::ActivityWatch { .. }
+                | Request::TimelineWatch { .. }
+                | Request::DeskDecide { .. }
+                | Request::Sessions
+        ))
+        && let Some(ticket) = crate::mac_scope::prove(socket, &body).await
+    {
+        frame.extend_from_slice(b"SCOPE1 ");
+        frame.extend_from_slice(ticket.as_bytes());
+        frame.push(b' ');
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = socket;
+    frame.extend(body);
+    frame.push(b'\n');
+    Ok(frame)
+}
+
 /// One connection to the daemon.
 pub struct IpcClient {
+    socket: PathBuf,
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
 }
@@ -2893,6 +2923,7 @@ impl IpcClient {
         };
         let (r, w) = stream.into_split();
         Ok(Self {
+            socket: path.to_path_buf(),
             reader: BufReader::new(r),
             writer: w,
         })
@@ -2905,10 +2936,8 @@ impl IpcClient {
         timeout: Duration,
     ) -> Result<T, ClientError> {
         let exchange = async {
-            let mut line =
-                serde_json::to_string(request).map_err(|e| ClientError::Protocol(e.to_string()))?;
-            line.push('\n');
-            self.writer.write_all(line.as_bytes()).await?;
+            let line = request_line(&self.socket, request).await?;
+            self.writer.write_all(&line).await?;
             self.read_reply().await
         };
         tokio::time::timeout(timeout, exchange)

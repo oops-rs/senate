@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <mach/message.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -6,7 +7,9 @@
 
 #define MAX_FRAME (1024 * 1024)
 
-typedef void (*senate_handle_message)(void *, const void *, size_t, void *);
+extern void xpc_dictionary_get_audit_token(xpc_object_t, audit_token_t *);
+
+typedef void (*senate_handle_message)(void *, const void *, size_t, void *, const uint32_t *);
 
 typedef struct {
     xpc_connection_t peer;
@@ -34,7 +37,7 @@ void *senate_xpc_listen(const char *name, const char *requirement, void *context
     }
     xpc_connection_set_context(listener, context);
     xpc_connection_set_finalizer_f(listener, drop_context);
-    if (xpc_connection_set_peer_code_signing_requirement(listener, requirement) != 0) {
+    if (requirement && xpc_connection_set_peer_code_signing_requirement(listener, requirement) != 0) {
         xpc_connection_cancel(listener);
         xpc_release(listener);
         return NULL;
@@ -57,7 +60,9 @@ void *senate_xpc_listen(const char *name, const char *requirement, void *context
             xpc_object_t reply_object = xpc_dictionary_create_reply(message);
             if (!reply_object) return;
             senate_reply reply = {peer, reply_object};
-            handler(context, bytes, len, &reply);
+            audit_token_t token = {0};
+            xpc_dictionary_get_audit_token(message, &token);
+            handler(context, bytes, len, &reply, token.val);
             xpc_release(reply_object);
         });
         xpc_connection_activate(peer);

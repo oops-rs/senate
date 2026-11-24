@@ -169,7 +169,7 @@ use crate::state::{ItemKey, ItemStatus, QueueItem, SessionUpsert, Store, StoreEr
 use crate::stream::{self, CommitteeWorker};
 
 mod activity;
-mod approval_guard;
+pub(crate) mod approval_guard;
 pub mod default_secretary;
 mod desk_decision;
 mod desk_open;
@@ -495,6 +495,8 @@ impl HookDrops {
 }
 
 pub(crate) struct Shared {
+    #[cfg(target_os = "macos")]
+    protected_hosting: bool,
     pub(crate) config: BridgeConfig,
     /// Everything written for people and agents is in this language.
     pub(crate) locale: Locale,
@@ -735,7 +737,7 @@ pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
 
 pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_bridge(options, host_binary, false, None).await
+    start_bridge(options, host_binary, false, None, false).await
 }
 
 /// Start the bridge against the loopback Senate listener owned by this
@@ -745,7 +747,7 @@ pub async fn start_in_process(
     observe: Option<Arc<senate_observe::Registry>>,
 ) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_bridge(options, host_binary, true, observe).await
+    start_bridge(options, host_binary, true, observe, false).await
 }
 
 /// Start the bridge with a companion Senate CLI at an explicit path.
@@ -753,7 +755,22 @@ pub async fn start_with_host_binary(
     options: DaemonOptions,
     host_binary: PathBuf,
 ) -> anyhow::Result<DaemonHandle> {
-    start_bridge(options, host_binary, false, None).await
+    start_bridge(options, host_binary, false, None, true).await
+}
+
+#[cfg(target_os = "macos")]
+fn debug_scope_fixture(home: &Path, fixture_bootstrap: bool) -> bool {
+    cfg!(debug_assertions)
+        && crate::app_confirmation::team().is_none()
+        && (fixture_bootstrap || std::env::var_os(crate::testenv::CONFINE_ENV).is_some())
+        && home.canonicalize().ok().is_some_and(|home| {
+            std::env::temp_dir()
+                .canonicalize()
+                .ok()
+                .is_some_and(|temp| home.starts_with(temp))
+                || home.starts_with("/private/tmp")
+        })
+        && crate::testenv::confined(home)
 }
 
 async fn start_bridge(
@@ -761,7 +778,10 @@ async fn start_bridge(
     host_binary: PathBuf,
     in_process: bool,
     observe: Option<Arc<senate_observe::Registry>>,
+    fixture_bootstrap: bool,
 ) -> anyhow::Result<DaemonHandle> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = fixture_bootstrap;
     let DaemonOptions {
         paths,
         config,
@@ -833,7 +853,17 @@ async fn start_bridge(
         .with_host_observer(signals),
     );
     tracing::debug!(transport = %codex.transport, "Codex sessions are pushed through the app-server");
+    #[cfg(target_os = "macos")]
+    let scope = crate::app_confirmation::team().and_then(|_| {
+        crate::mac_scope::Scope::start(paths.home()).map_err(|error| {
+            tracing::warn!(%error, "macOS person requests and protected hosting are unavailable");
+        }).ok()
+    });
+    #[cfg(target_os = "macos")]
+    let fixture = debug_scope_fixture(paths.home(), fixture_bootstrap);
     let common = Common {
+        #[cfg(target_os = "macos")]
+        protected_hosting: scope.is_some() || fixture,
         observe: observe.clone(),
         host_binary,
         timing,
@@ -860,6 +890,11 @@ async fn start_bridge(
             shared: Arc::downgrade(&shared),
             tools: observe_tools::Tools::default(),
         }));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        front.scope = scope.as_ref().map(|(scope, _)| scope.clone());
+        front.scope_fixture = fixture;
     }
     front.observe = observe;
     front.remote = remote.as_ref().map(|(service, _)| service.clone());
@@ -940,6 +975,8 @@ async fn start_bridge(
 /// What every Senate's half of the daemon shares: one Codex transport and
 /// approvals relay, one watch channel, one companion configuration.
 struct Common {
+    #[cfg(target_os = "macos")]
+    protected_hosting: bool,
     observe: Option<Arc<senate_observe::Registry>>,
     host_binary: PathBuf,
     timing: Timing,
@@ -1002,6 +1039,8 @@ impl Shared {
         let seating = Seating::new(config.person.clone());
         let (resyncs, _) = watch::channel(0);
         Ok(Arc::new(Shared {
+            #[cfg(target_os = "macos")]
+            protected_hosting: common.protected_hosting,
             ladder: Ladder::new_default(
                 common.timing.inbox_timeout,
                 common.codex.clone(),
@@ -6522,11 +6561,35 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
         let (reply, last) = match ipc::read_line(&mut reader).await {
             Ok(None) => return,
             Ok(Some(line)) => {
-                match serde_json::from_str::<Request>(&line) {
+                #[cfg(target_os = "macos")]
+                let (line, person_peer) = if let Some((ticket, body)) = line
+                    .strip_prefix("SCOPE1 ")
+                    .and_then(|line| line.split_once(' '))
+                {
+                    let authenticated = shared
+                        .scope
+                        .as_ref()
+                        .and_then(|scope| scope.consume(ticket, body.as_bytes()))
+                        .filter(|sender| Some(*sender) == peer);
+                    (body, authenticated)
+                } else {
+                    (
+                        line.as_str(),
+                        peer.filter(|pid| {
+                            shared.scope_fixture
+                                || (cfg!(debug_assertions)
+                                    && crate::app_confirmation::team().is_none()
+                                    && *pid == std::process::id())
+                        }),
+                    )
+                };
+                #[cfg(not(target_os = "macos"))]
+                let (line, person_peer) = (line.as_str(), peer);
+                match serde_json::from_str::<Request>(line) {
                     Ok(Request::RemoteControl { command }) => {
                         let reply = match shared
                             .refuse_agent_caller(
-                                peer,
+                                person_peer,
                                 "Manage remote device pairing from your own terminal",
                             )
                             .await
@@ -6564,7 +6627,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     Ok(request @ Request::SessionDrop { .. }) => {
                         let mut shutdown = shutdown.clone();
                         tokio::select! {
-                            () = Box::pin(session_drop::serve(&shared, peer, request, reader, write)) => {}
+                            () = Box::pin(session_drop::serve(&shared, person_peer, request, reader, write)) => {}
                             _ = shutdown.changed() => {}
                         }
                         return;
@@ -6572,7 +6635,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     Ok(Request::ActivityWatch { committees, after }) => {
                         match shared
                             .refuse_agent_caller(
-                                peer,
+                                person_peer,
                                 "Read committee activity from your own terminal or the Senate app",
                             )
                             .await
@@ -6596,7 +6659,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     }
                     Ok(Request::TimelineWatch { session_id, after }) => {
                         match shared
-                        .refuse_agent_caller(peer, "Stream session transcripts from your own terminal or the Senate app")
+                        .refuse_agent_caller(person_peer, "Stream session transcripts from your own terminal or the Senate app")
                         .await
                     {
                         Ok(()) => {
@@ -6637,7 +6700,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     }
                     Ok(Request::Sessions) => {
                         let person = shared
-                        .refuse_agent_caller(peer, "Read session transcript titles from your own terminal or the Senate app")
+                        .refuse_agent_caller(person_peer, "Read session transcript titles from your own terminal or the Senate app")
                         .await
                         .is_ok();
                         (wrap(shared.primary().on_sessions(person).await), false)
@@ -6651,7 +6714,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     }) => {
                         let reply = match shared
                             .refuse_agent_caller(
-                                peer,
+                                person_peer,
                                 "Decide a desk request from your own terminal or the Senate app",
                             )
                             .await
@@ -6699,7 +6762,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     }
                     Ok(request) if crate::app_confirmation::required(&request) => {
                         let reply = Box::pin(shared.app_confirmed_dispatch(
-                            peer,
+                            person_peer,
                             request,
                             &mut reader,
                             shutdown.clone(),
@@ -6708,9 +6771,23 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         (reply, false)
                     }
                     Ok(request) if let Some(guidance) = approval_guard::person_only(&request) => (
-                        Box::pin(shared.guarded_dispatch(peer, guidance, request)).await,
+                        Box::pin(shared.guarded_dispatch(person_peer, guidance, request)).await,
                         false,
                     ),
+                    #[cfg(target_os = "macos")]
+                    Ok(request)
+                        if !shared.scope_fixture && approval_guard::mac_operator_only(&request) =>
+                    {
+                        (
+                            Box::pin(shared.guarded_dispatch(
+                                person_peer,
+                                "Run this command from your own terminal or the Senate app",
+                                request,
+                            ))
+                            .await,
+                            false,
+                        )
+                    }
                     Ok(request) => (shared.dispatch(request).await, false),
                     Err(e) => (
                         Reply::err(IpcError::bad_request(format!("unreadable request: {e}"))),

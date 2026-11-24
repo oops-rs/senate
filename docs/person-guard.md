@@ -42,10 +42,25 @@ names and ancestry provide additional rejection while the original tree is visib
 | Linux/WSL with protected scope | Enforced by cgroup | Routine checks advisory | Refused | Process binding and role reauthorization enforced |
 | Linux/WSL without protected scope | Routine checks advisory | Routine checks advisory | Refused | Privileged claims require stable proof |
 
-The current routine boundary remains advisory while protected launch and
-per-request process attestation are pending. Hook process queries and person-name
-reservation are implemented. Role continuity and reauthorization remain pending.
-The app queue and XPC transport implement consent for line grants and rebind.
+The macOS bridge checks one-time proofs for operator requests. It binds each
+proof to the exact request digest and the Mach sender's process generation.
+Managed launchd hosting persists its daemon coalition before publishing the
+bridge. Scope coverage for the shared Codex backend remains advisory until
+the dedicated backend lands. Linux and WSL hosting remains advisory. Hook
+process queries and person-name reservation are in place. Persistent role
+reauthorization is pending. The app's signed XPC queue provides consent for
+rebind. Lines issuance awaits the dedicated Observe registry capability.
+
+From an operator terminal in this worktree, with the signed fixture binaries
+built from the same revision, run:
+
+```sh
+python3 deploy/check-person-terminal.py target/person-guard-scope-fixture
+```
+
+Expect `PASS: person terminal accepted; isolated grant list is empty`.
+The check uses a fresh home and loopback port, and unloads the disposable
+launchd job on exit.
 
 ## Codex backend
 

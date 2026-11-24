@@ -147,13 +147,15 @@ impl Link {
         let mut lines = WatchStream {
             reader: BufReader::new(stream),
         };
-        let mut line = serde_json::to_string(&Request::TimelineWatch {
-            session_id: session_id.to_string(),
-            after,
-        })
-        .map_err(|e| ClientError::Protocol(e.to_string()))?;
-        line.push('\n');
-        lines.reader.get_mut().write_all(line.as_bytes()).await?;
+        let line = ipc::request_line(
+            &self.socket,
+            &Request::TimelineWatch {
+                session_id: session_id.to_string(),
+                after,
+            },
+        )
+        .await?;
+        lines.reader.get_mut().write_all(&line).await?;
         let first = tokio::time::timeout(READ_TIMEOUT, lines.line())
             .await
             .map_err(|_| ClientError::Timeout)??
@@ -188,9 +190,7 @@ impl Link {
         let mut lines = WatchStream {
             reader: BufReader::new(stream),
         };
-        let mut line =
-            serde_json::to_vec(request).map_err(|e| ClientError::Protocol(e.to_string()))?;
-        line.push(b'\n');
+        let line = ipc::request_line(&self.socket, request).await?;
         lines.reader.get_mut().write_all(&line).await?;
         let first = tokio::time::timeout(READ_TIMEOUT, lines.line())
             .await

@@ -1078,6 +1078,13 @@ impl Shared {
     where
         Fut: std::future::Future<Output = Result<(), IpcError>> + Send,
     {
+        #[cfg(target_os = "macos")]
+        if !self.protected_hosting {
+            return Err(IpcError::new(
+                codes::NOT_A_PERSON,
+                "Hosted sessions require a protected launchd Senate service on macOS",
+            ));
+        }
         if !cwd.is_absolute() {
             return Err(IpcError::bad_request(
                 "the project directory must be absolute",

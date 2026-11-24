@@ -222,6 +222,7 @@ enum AppReply {
 }
 
 /// The name registered by the launchd service configuration for one home.
+#[cfg(target_os = "macos")]
 pub(crate) fn service_name(home: &std::path::Path) -> String {
     use sha2::{Digest, Sha256};
     use std::os::unix::ffi::OsStrExt;
@@ -234,6 +235,7 @@ pub(crate) fn service_name(home: &std::path::Path) -> String {
     )
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn team() -> Option<&'static str> {
     option_env!("SENATE_PERSON_TEAM_ID").filter(|team| {
         team.len() == 10
@@ -292,15 +294,15 @@ pub(crate) mod macos {
     }
 
     unsafe extern "C" {
-        fn senate_xpc_listen(
+        pub(crate) fn senate_xpc_listen(
             name: *const c_char,
             requirement: *const c_char,
             context: *mut c_void,
             drop_context: extern "C" fn(*mut c_void),
-            handle: extern "C" fn(*mut c_void, *const u8, usize, *mut c_void),
+            handle: extern "C" fn(*mut c_void, *const u8, usize, *mut c_void, *const u32),
         ) -> *mut c_void;
         fn senate_xpc_stop(listener: *mut c_void);
-        fn senate_xpc_send_reply(reply: *mut c_void, bytes: *const u8, len: usize);
+        pub(crate) fn senate_xpc_send_reply(reply: *mut c_void, bytes: *const u8, len: usize);
         fn senate_xpc_call(
             name: *const c_char,
             requirement: *const c_char,
@@ -310,7 +312,7 @@ pub(crate) mod macos {
         ) -> *mut u8;
     }
 
-    pub(crate) struct Listener(NonNull<c_void>);
+    pub(crate) struct Listener(pub(crate) NonNull<c_void>);
 
     // libxpc permits cancellation and release from any queue.
     unsafe impl Send for Listener {}
@@ -355,7 +357,13 @@ pub(crate) mod macos {
         drop(unsafe { Box::from_raw(context.cast::<Context>()) });
     }
 
-    extern "C" fn handle(context: *mut c_void, bytes: *const u8, len: usize, reply: *mut c_void) {
+    extern "C" fn handle(
+        context: *mut c_void,
+        bytes: *const u8,
+        len: usize,
+        reply: *mut c_void,
+        _audit: *const u32,
+    ) {
         // libxpc owns the input and reply objects for the duration of this
         // callback. The listener's context outlives its peer connections.
         let context = unsafe { &*context.cast::<Context>() };
@@ -381,7 +389,7 @@ pub(crate) mod macos {
         }
     }
 
-    pub(super) fn call(service: &str, message: &[u8]) -> Option<AppReply> {
+    pub(crate) fn call<T: serde::de::DeserializeOwned>(service: &str, message: &[u8]) -> Option<T> {
         let name = CString::new(service).ok()?;
         let requirement = requirement("dev.senate.daemon")?;
         let mut size = 0;

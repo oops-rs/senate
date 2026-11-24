@@ -24,6 +24,10 @@ pub(crate) struct Front {
     pub(super) observe: Option<Arc<senate_observe::Registry>>,
     pub(super) remote: Option<Arc<crate::remote::Service>>,
     relay: Arc<Relay>,
+    #[cfg(target_os = "macos")]
+    pub(super) scope: Option<Arc<crate::mac_scope::Scope>>,
+    #[cfg(target_os = "macos")]
+    pub(super) scope_fixture: bool,
     pub(super) process_checks: tokio::sync::Semaphore,
     #[cfg(target_os = "macos")]
     pub(super) app_confirmations: Arc<crate::app_confirmation::Queue>,
@@ -45,6 +49,10 @@ impl Front {
             remote: None,
             senates: vec![senate],
             relay,
+            #[cfg(target_os = "macos")]
+            scope: None,
+            #[cfg(target_os = "macos")]
+            scope_fixture: false,
             process_checks: tokio::sync::Semaphore::new(4),
             #[cfg(target_os = "macos")]
             app_confirmations: Arc::default(),

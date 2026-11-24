@@ -1944,12 +1944,15 @@ impl Harness {
     }
 
     pub async fn start_with(&mut self, timing: Timing) {
-        let handle = daemon::start(DaemonOptions {
-            paths: self.paths.clone(),
-            config: self.config.clone(),
-            timing,
-            desktop: self.desktop.clone(),
-        })
+        let handle = daemon::start_with_host_binary(
+            DaemonOptions {
+                paths: self.paths.clone(),
+                config: self.config.clone(),
+                timing,
+                desktop: self.desktop.clone(),
+            },
+            std::env::current_exe().unwrap().with_file_name("senate"),
+        )
         .await
         .unwrap();
         self.daemon = Some(handle);

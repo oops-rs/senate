@@ -65,7 +65,7 @@ pub(super) fn answers_a_prompt(request: &Request) -> bool {
 
 /// What only the person does, and what to tell an agent that asks: `None`
 /// for any other request.
-pub(super) fn person_only(request: &Request) -> Option<&'static str> {
+pub(crate) fn person_only(request: &Request) -> Option<&'static str> {
     Some(match request {
         Request::SetCard { session, .. } if session == &SessionSelector::default() => {
             "Manage your profile card from your own terminal or the Senate app"
@@ -109,6 +109,26 @@ pub(super) fn person_only(request: &Request) -> Option<&'static str> {
         }
         _ => return None,
     })
+}
+
+/// Operations documented as operator-only which previously relied on their CLI
+/// entry point. Enforce these at the macOS scope boundary as well.
+#[cfg(target_os = "macos")]
+pub(crate) fn mac_operator_only(request: &Request) -> bool {
+    match request {
+        Request::Replace { .. }
+        | Request::Pause { .. }
+        | Request::Resume { .. }
+        | Request::PruneHosts
+        | Request::SetSecretarySession { .. }
+        | Request::Desk { set: Some(_) }
+        | Request::Attach { .. } => true,
+        Request::Restore { session, .. }
+        | Request::Spawn { session, .. }
+        | Request::Stop { session, .. }
+        | Request::SecretaryWork { session, .. } => session == &SessionSelector::default(),
+        _ => false,
+    }
 }
 
 impl Front {

@@ -84,6 +84,8 @@ pub mod install;
 pub mod ipc;
 pub mod joinname;
 mod kernel_process;
+#[cfg(target_os = "macos")]
+mod mac_scope;
 pub mod mcp;
 pub mod notify;
 pub mod paths;
