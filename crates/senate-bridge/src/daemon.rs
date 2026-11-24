@@ -160,6 +160,7 @@ use crate::ipc::{
     IpcError, JoinReply, Pong, Posted, Reply, Request, SayKind, SearchReply, SessionSelector,
     StatusReply, ThreadReply, ThreadSeen, WatchEvent, codes,
 };
+use crate::kernel_process;
 use crate::notify::{News, Notifications, NotifyConfig};
 use crate::paths::Paths;
 use crate::routing;
@@ -168,7 +169,7 @@ use crate::state::{ItemKey, ItemStatus, QueueItem, SessionUpsert, Store, StoreEr
 use crate::stream::{self, CommitteeWorker};
 
 mod activity;
-mod approval_guard;
+pub(crate) mod approval_guard;
 pub mod default_secretary;
 mod desk_decision;
 mod desk_open;
@@ -415,7 +416,7 @@ type Rebind = (Option<String>, Option<CommitteeId>);
 
 const AGY_HOST_PROOF_TTL: Duration = Duration::from_secs(60);
 struct AgyHostObservation {
-    pid: u32,
+    process: kernel_process::ProcessIdentity,
     session_id: String,
     at: Instant,
 }
@@ -494,6 +495,8 @@ impl HookDrops {
 }
 
 pub(crate) struct Shared {
+    #[cfg(target_os = "macos")]
+    protected_hosting: bool,
     pub(crate) config: BridgeConfig,
     /// Everything written for people and agents is in this language.
     pub(crate) locale: Locale,
@@ -509,7 +512,7 @@ pub(crate) struct Shared {
     triaged: AtomicBool,
     /// Who holds this Senate's Speaker's seat, as `/v1/me` last said.
     speaker: Mutex<Option<SpeakerSeat>>,
-    pub(crate) store: Store,
+    pub(crate) store: Arc<Store>,
     pub(crate) api: ApiClient,
     observe: Option<Arc<senate_observe::Registry>>,
     /// The Senate above, when the machine's Senate is a child of it
@@ -544,6 +547,8 @@ pub(crate) struct Shared {
     hosted_approvals: hosted_approvals::Monitor,
     hook_drops: Mutex<HookDrops>,
     codex_transport: crate::delivery::codex::Transport,
+    codex_routes: crate::delivery::codex::Routes,
+    owned_codex_backends: bool,
     host_binary: PathBuf,
     pushes: Mutex<HashMap<String, PushState>>,
     /// Automatic checkpoints, per agent and worktree root.
@@ -647,6 +652,24 @@ impl DaemonHandle {
         &self.front.senates()[0].store
     }
 
+    /// Drive the queue from an in-process test fixture. The production
+    /// transport can only reach this queue from the signed app.
+    #[doc(hidden)]
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    pub async fn confirm_next_app_fixture(&self) -> bool {
+        let queue = &self.front.app_confirmations;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(confirmed) = queue.confirm_fixture() {
+                    return confirmed;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// SIGTERM's first step, for each Senate with `pause_on_shutdown`:
     /// pause every running hosted session, within
     /// [`Timing::shutdown_pause`]. A session not paused by then is recorded
@@ -716,7 +739,7 @@ pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
 
 pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_bridge(options, host_binary, false, None).await
+    start_bridge(options, host_binary, false, None, None, false).await
 }
 
 /// Start the bridge against the loopback Senate listener owned by this
@@ -724,9 +747,10 @@ pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
 pub async fn start_in_process(
     options: DaemonOptions,
     observe: Option<Arc<senate_observe::Registry>>,
+    observe_consent: Option<Arc<senate_observe::AppConsentedGrants>>,
 ) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_bridge(options, host_binary, true, observe).await
+    start_bridge(options, host_binary, true, observe, observe_consent, false).await
 }
 
 /// Start the bridge with a companion Senate CLI at an explicit path.
@@ -734,7 +758,25 @@ pub async fn start_with_host_binary(
     options: DaemonOptions,
     host_binary: PathBuf,
 ) -> anyhow::Result<DaemonHandle> {
-    start_bridge(options, host_binary, false, None).await
+    start_bridge(options, host_binary, false, None, None, true).await
+}
+
+fn debug_scope_fixture(home: &Path, fixture_bootstrap: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    let unsigned = crate::app_confirmation::team().is_none();
+    #[cfg(not(target_os = "macos"))]
+    let unsigned = true;
+    cfg!(debug_assertions)
+        && unsigned
+        && (fixture_bootstrap || std::env::var_os(crate::testenv::CONFINE_ENV).is_some())
+        && home.canonicalize().ok().is_some_and(|home| {
+            std::env::temp_dir()
+                .canonicalize()
+                .ok()
+                .is_some_and(|temp| home.starts_with(temp))
+                || home.starts_with("/private/tmp")
+        })
+        && crate::testenv::confined(home)
 }
 
 async fn start_bridge(
@@ -742,7 +784,11 @@ async fn start_bridge(
     host_binary: PathBuf,
     in_process: bool,
     observe: Option<Arc<senate_observe::Registry>>,
+    observe_consent: Option<Arc<senate_observe::AppConsentedGrants>>,
+    fixture_bootstrap: bool,
 ) -> anyhow::Result<DaemonHandle> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = observe_consent;
     let DaemonOptions {
         paths,
         config,
@@ -750,6 +796,9 @@ async fn start_bridge(
         desktop,
     } = options;
     config.validate().map_err(anyhow::Error::msg)?;
+    if let Some(notice) = approval_guard::advisory_notice(config.locale) {
+        tracing::warn!("{notice}");
+    }
     paths.check_socket(config.locale)?;
     paths
         .ensure_home()
@@ -780,6 +829,8 @@ async fn start_bridge(
     let codex = CodexConfig::load(&paths.config()).map_err(anyhow::Error::msg)?;
     let codex = CodexAppServerAdapter {
         transport: codex.transport().map_err(anyhow::Error::msg)?,
+        routes: Default::default(),
+        lookup: None,
         timeout: CODEX_PUSH_TIMEOUT,
     };
     let (watch, _) = broadcast::channel(WATCH_CAPACITY);
@@ -808,10 +859,26 @@ async fn start_bridge(
             (timing.backoff_base, timing.backoff_max),
             watch.clone(),
         )
-        .with_host_observer(signals),
+        .with_host_observer(signals)
+        .with_routes(codex.routes.clone()),
     );
     tracing::debug!(transport = %codex.transport, "Codex sessions are pushed through the app-server");
+    #[cfg(target_os = "macos")]
+    let scope = crate::app_confirmation::team().and_then(|_| {
+        crate::mac_scope::Scope::start(paths.home()).map_err(|error| {
+            tracing::warn!(%error, "macOS person requests and protected hosting are unavailable");
+        }).ok()
+    });
+    let fixture = debug_scope_fixture(paths.home(), fixture_bootstrap);
     let common = Common {
+        #[cfg(target_os = "macos")]
+        owned_codex_backends: scope.is_some(),
+        #[cfg(target_os = "linux")]
+        owned_codex_backends: crate::linux_scope::available(),
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        owned_codex_backends: false,
+        #[cfg(target_os = "macos")]
+        protected_hosting: scope.is_some() || fixture,
         observe: observe.clone(),
         host_binary,
         timing,
@@ -839,6 +906,12 @@ async fn start_bridge(
             tools: observe_tools::Tools::default(),
         }));
     }
+    #[cfg(target_os = "macos")]
+    {
+        front.scope = scope.as_ref().map(|(scope, _)| scope.clone());
+        front.set_observe_consent(observe_consent);
+    }
+    front.scope_fixture = fixture;
     front.observe = observe;
     front.remote = remote.as_ref().map(|(service, _)| service.clone());
     let front = Arc::new(front);
@@ -852,6 +925,24 @@ async fn start_bridge(
         tokio::spawn(serve_ipc(front.clone(), listener, rx.clone())),
         tokio::spawn(hosted_approvals::observe(shared, observed, rx.clone())),
     ];
+    #[cfg(target_os = "macos")]
+    if let Some((_, scope_listener)) = scope {
+        let mut shutdown = rx.clone();
+        tasks.push(tokio::spawn(async move {
+            let _ = shutdown.wait_for(|stopping| *stopping).await;
+            drop(scope_listener);
+        }));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(listener) =
+        crate::app_confirmation::macos::listen(&paths, front.app_confirmations.clone())
+    {
+        let mut shutdown = rx.clone();
+        tasks.push(tokio::spawn(async move {
+            let _ = shutdown.wait_for(|stopping| *stopping).await;
+            drop(listener);
+        }));
+    }
     if let Some(notifier) = remote_notifier {
         tasks.push(tokio::spawn(crate::remote::authority::notify_history(
             paths.clone(),
@@ -908,6 +999,9 @@ async fn start_bridge(
 /// What every Senate's half of the daemon shares: one Codex transport and
 /// approvals relay, one watch channel, one companion configuration.
 struct Common {
+    owned_codex_backends: bool,
+    #[cfg(target_os = "macos")]
+    protected_hosting: bool,
     observe: Option<Arc<senate_observe::Registry>>,
     host_binary: PathBuf,
     timing: Timing,
@@ -949,7 +1043,7 @@ impl Shared {
         common: &Common,
         in_process: bool,
     ) -> anyhow::Result<Arc<Self>> {
-        let store = Store::open(db).with_context(|| format!("opening {}", db.display()))?;
+        let store = Arc::new(Store::open(db).with_context(|| format!("opening {}", db.display()))?);
         let reset = store.reset_inflight()?;
         if reset > 0 {
             tracing::info!(
@@ -969,10 +1063,17 @@ impl Shared {
             .transpose()?;
         let seating = Seating::new(config.person.clone());
         let (resyncs, _) = watch::channel(0);
+        let mut codex_delivery = common.codex.clone();
+        codex_delivery.lookup = Some(crate::delivery::codex::BackendLookup {
+            store: store.clone(),
+            home: common.home.clone(),
+        });
         Ok(Arc::new(Shared {
+            #[cfg(target_os = "macos")]
+            protected_hosting: common.protected_hosting,
             ladder: Ladder::new_default(
                 common.timing.inbox_timeout,
-                common.codex.clone(),
+                codex_delivery,
                 [Arc::new(crate::delivery::acp::AcpAdapter {
                     timeout: common.timing.inbox_timeout,
                 })
@@ -1007,6 +1108,8 @@ impl Shared {
             hosted_approvals: hosted_approvals::Monitor::default(),
             hook_drops: Mutex::new(HookDrops::default()),
             codex_transport: common.codex.transport.clone(),
+            codex_routes: common.codex.routes.clone(),
+            owned_codex_backends: common.owned_codex_backends,
             host_binary: common.host_binary.clone(),
             pushes: Mutex::new(HashMap::new()),
             auto: Mutex::new(HashMap::new()),
@@ -2884,6 +2987,18 @@ impl Shared {
 
     // ---- the desktop app: approvals and watch -------------------------------
 
+    fn dedicated_codex_route(
+        &self,
+        session: &str,
+    ) -> Result<Option<crate::delivery::codex::Transport>, StoreError> {
+        let paths = Paths::new(&self.home);
+        Ok(self.store.codex_backend(session)?.map(|host| {
+            crate::delivery::codex::Transport::Unix(crate::host::codex_backend::socket(
+                &paths, &host,
+            ))
+        }))
+    }
+
     /// One approvals subscriber per live Codex session.
     pub(crate) fn reconcile_approvals(&self) {
         match self.checked_live_sessions() {
@@ -2899,6 +3014,20 @@ impl Shared {
                     by_senate.insert(self.index, codex);
                     by_senate.values().flatten().cloned().collect()
                 };
+                let all: Vec<_> = all
+                    .into_iter()
+                    .filter_map(|session| match self.dedicated_codex_route(&session) {
+                        Ok(route) => {
+                            self.codex_routes.set(&session, route);
+                            Some(session)
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, session, "could not resolve Codex backend");
+                            None
+                        }
+                    })
+                    .collect();
+                self.codex_routes.retain(&all);
                 self.relay.reconcile(&all);
             }
             Err(e) => tracing::warn!("reading sessions for the approvals relay: {e}"),
@@ -3331,6 +3460,7 @@ impl Shared {
                 wrap(result.map_err(server_error))
             }
             Request::Status => wrap(self.on_status()),
+            Request::NativeAuthorityCandidate { .. } | Request::AuthorizeNativeAuthority { .. } |
             Request::RemoteControl { .. } | Request::ObserveAdmin { .. } | Request::SetCard { .. } => {
                 Reply::err(IpcError::bad_request("local person socket only"))
             }
@@ -3745,6 +3875,13 @@ impl Shared {
                 transcripts.remove(&session.session_id),
             );
             rows.push(SessionRow {
+                codex_scope_advisory: facts.running
+                    && session.runtime == Runtime::Codex
+                    && self
+                        .store
+                        .codex_backend(&session.session_id)
+                        .map_err(internal)?
+                        .is_none(),
                 tty: crate::host::socket(&paths, &host_id),
                 host_id,
                 session_id: session.session_id.clone(),
@@ -3894,8 +4031,19 @@ impl Shared {
         let host_status = crate::host::status(&Paths::new(&self.home), &self.store, &sessions)
             .map_err(internal)?;
         let dropped_hooks = self.hook_drop_status(&sessions, &host_status.hosted)?;
+        let shared_codex = sessions.iter().any(|session| {
+            session.runtime == Runtime::Codex
+                && host_status.hosted.contains_key(&session.session_id)
+                && !matches!(self.store.codex_backend(&session.session_id), Ok(Some(_)))
+        });
         Ok(StatusReply {
             descriptors: Some(crate::fd::snapshot()),
+            person_guard_advisory: approval_guard::advisory_notice(self.locale).or_else(|| {
+                shared_codex.then(|| self.locale.pick(
+                    "共享 Codex app-server 的托管会话仅受提示性守卫保护。",
+                    "Hosted Codex sessions on the shared app-server have advisory process protection.",
+                ))
+            }).map(str::to_owned),
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             person: self.config.person.clone(),
@@ -3954,6 +4102,15 @@ impl Shared {
         } else {
             (hint.clone(), source)
         };
+        let people = self.people();
+        if [&hint, &agent]
+            .into_iter()
+            .any(|name| name == &self.config.person || people.is_person(name))
+        {
+            return Err(IpcError::bad_request(
+                "a session cannot register under a person's senator name",
+            ));
+        }
         let mut upsert = SessionUpsert {
             session_id: report.session_id.clone(),
             cwd: report.cwd.clone(),
@@ -4882,6 +5039,14 @@ impl Shared {
     }
 
     fn resolve(&self, selector: &SessionSelector) -> Result<Session, IpcError> {
+        self.resolve_with_activity(selector, true)
+    }
+
+    fn resolve_with_activity(
+        &self,
+        selector: &SessionSelector,
+        touch: bool,
+    ) -> Result<Session, IpcError> {
         if let Some(companion) = self.companion_session(selector) {
             return Ok(companion);
         }
@@ -4923,9 +5088,11 @@ impl Shared {
                 ),
             ));
         };
-        self.store
-            .touch_session(&session.session_id)
-            .map_err(internal)?;
+        if touch {
+            self.store
+                .touch_session(&session.session_id)
+                .map_err(internal)?;
+        }
         Ok(session.clone())
     }
 
@@ -6462,6 +6629,15 @@ async fn send_ipc_line<T: Serialize>(
     write.write_all(&line).await.is_ok()
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn protected_operator_class(request: &Request) -> bool {
+    #[cfg(target_os = "linux")]
+    if !crate::linux_scope::available() {
+        return false;
+    }
+    approval_guard::operator_only(request)
+}
+
 async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watch::Receiver<bool>) {
     use tokio::io::AsyncWriteExt;
 
@@ -6471,19 +6647,82 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
         .as_ref()
         .is_some_and(|cred| cred.uid() == rustix::process::geteuid().as_raw());
     let peer = credentials
+        .filter(|_| same_owner)
         .and_then(|cred| cred.pid())
         .and_then(|pid| u32::try_from(pid).ok());
+    #[cfg(target_os = "linux")]
+    let linux_peer = if crate::linux_scope::available() {
+        peer.and_then(|pid| crate::linux_scope::Peer::capture(&stream, pid).ok())
+    } else {
+        None
+    };
     let (read, mut write) = stream.into_split();
     let mut reader = tokio::io::BufReader::new(read);
     loop {
         let (reply, last) = match ipc::read_line(&mut reader).await {
             Ok(None) => return,
             Ok(Some(line)) => {
-                match serde_json::from_str::<Request>(&line) {
+                let fixture = shared.scope_fixture
+                    || (cfg!(debug_assertions) && peer == Some(std::process::id()));
+                #[cfg(target_os = "macos")]
+                let (line, person_peer, session_peer) = {
+                    use crate::mac_scope::ProofKind;
+                    if let Some((ticket, body)) = line
+                        .strip_prefix("SCOPE1 ")
+                        .and_then(|line| line.split_once(' '))
+                    {
+                        let attested = shared
+                            .scope
+                            .as_ref()
+                            .and_then(|scope| scope.consume(ticket, body.as_bytes()))
+                            .filter(|(sender, _)| Some(sender.pid) == peer);
+                        (
+                            body,
+                            attested
+                                .filter(|(_, kind)| *kind == ProofKind::Operator)
+                                .map(|(sender, _)| sender.pid),
+                            attested
+                                .filter(|(_, kind)| *kind == ProofKind::Session)
+                                .map(|(sender, _)| sender.pid),
+                        )
+                    } else {
+                        let permitted = peer.filter(|_| fixture);
+                        (line.as_str(), permitted, permitted)
+                    }
+                };
+                #[cfg(target_os = "linux")]
+                let (line, person_peer, session_peer) = {
+                    let known = if crate::linux_scope::available() {
+                        linux_peer
+                            .as_ref()
+                            .and_then(crate::linux_scope::Peer::classify)
+                    } else {
+                        peer.map(|pid| (pid, false))
+                    };
+                    (
+                        line.as_str(),
+                        known.filter(|(_, hosted)| !hosted).map(|(pid, _)| pid),
+                        known.map(|(pid, _)| pid),
+                    )
+                };
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                let (line, person_peer, session_peer) = (line.as_str(), peer, peer);
+                let decoded = serde_json::from_str::<Request>(line);
+                let role_refusal = if fixture {
+                    None
+                } else {
+                    decoded
+                        .as_ref()
+                        .ok()
+                        .and_then(approval_guard::role_selector)
+                        .and_then(|selector| shared.verify_role_owner(session_peer, selector).err())
+                };
+                match decoded {
+                    Ok(_) if let Some(error) = role_refusal => (Reply::err(error), false),
                     Ok(Request::RemoteControl { command }) => {
                         let reply = match shared
                             .refuse_agent_caller(
-                                peer,
+                                person_peer,
                                 "Manage remote device pairing from your own terminal",
                             )
                             .await
@@ -6521,7 +6760,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     Ok(request @ Request::SessionDrop { .. }) => {
                         let mut shutdown = shutdown.clone();
                         tokio::select! {
-                            () = Box::pin(session_drop::serve(&shared, peer, request, reader, write)) => {}
+                            () = Box::pin(session_drop::serve(&shared, person_peer, request, reader, write)) => {}
                             _ = shutdown.changed() => {}
                         }
                         return;
@@ -6529,7 +6768,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     Ok(Request::ActivityWatch { committees, after }) => {
                         match shared
                             .refuse_agent_caller(
-                                peer,
+                                person_peer,
                                 "Read committee activity from your own terminal or the Senate app",
                             )
                             .await
@@ -6553,7 +6792,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     }
                     Ok(Request::TimelineWatch { session_id, after }) => {
                         match shared
-                        .refuse_agent_caller(peer, "Stream session transcripts from your own terminal or the Senate app")
+                        .refuse_agent_caller(person_peer, "Stream session transcripts from your own terminal or the Senate app")
                         .await
                     {
                         Ok(()) => {
@@ -6573,18 +6812,38 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     }
                         return;
                     }
-                    Ok(Request::SessionHook(mut report))
-                        if report.runtime == Runtime::Agy && report.host.is_some() =>
-                    {
-                        let reply = match shared.verify_agy_host_hook(peer, &mut report).await {
-                            Ok(()) => Box::pin(shared.dispatch(Request::SessionHook(report))).await,
+                    Ok(request @ (Request::Hook(_) | Request::SessionHook(_))) => {
+                        let (mut report, native) = match request {
+                            Request::Hook(report) => (report, false),
+                            Request::SessionHook(report) => (report, true),
+                            _ => unreachable!(),
+                        };
+                        let checked = shared
+                            .bind_hook_process_claims(session_peer, &mut report)
+                            .await
+                            .and_then(|()| {
+                                if fixture {
+                                    Ok(())
+                                } else {
+                                    shared.record_hook_owner(session_peer, &report, native)
+                                }
+                            });
+                        let reply = match checked {
+                            Ok(()) => {
+                                let verified = if native {
+                                    Request::SessionHook(report)
+                                } else {
+                                    Request::Hook(report)
+                                };
+                                Box::pin(shared.dispatch(verified)).await
+                            }
                             Err(error) => Reply::err(error),
                         };
                         (reply, false)
                     }
                     Ok(Request::Sessions) => {
                         let person = shared
-                        .refuse_agent_caller(peer, "Read session transcript titles from your own terminal or the Senate app")
+                        .refuse_agent_caller(person_peer, "Read session transcript titles from your own terminal or the Senate app")
                         .await
                         .is_ok();
                         (wrap(shared.primary().on_sessions(person).await), false)
@@ -6598,7 +6857,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     }) => {
                         let reply = match shared
                             .refuse_agent_caller(
-                                peer,
+                                person_peer,
                                 "Decide a desk request from your own terminal or the Senate app",
                             )
                             .await
@@ -6628,24 +6887,51 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         document,
                     }) if session != SessionSelector::default() => {
                         let _binding = shared.primary().session_bindings.read().await;
-                        let reply = match shared.primary().resolve(&session) {
-                            Ok(session) => match shared.verify_card_session(peer, &session).await {
-                                Ok(()) => wrap(
-                                    Box::pin(shared.set_observer_card(
-                                        Some(session),
-                                        target,
-                                        &document,
-                                    ))
-                                    .await,
-                                ),
-                                Err(error) => Reply::err(error),
-                            },
+                        let reply = match shared.primary().resolve_with_activity(&session, false) {
+                            Ok(session) => {
+                                let result = if fixture {
+                                    shared.verify_card_session(peer, &session).await
+                                } else {
+                                    shared.verify_session_instance(session_peer, &session)
+                                };
+                                match result {
+                                    Ok(()) => wrap(
+                                        Box::pin(shared.set_observer_card(
+                                            Some(session),
+                                            target,
+                                            &document,
+                                        ))
+                                        .await,
+                                    ),
+                                    Err(error) => Reply::err(error),
+                                }
+                            }
                             Err(error) => Reply::err(error),
                         };
                         (reply, false)
                     }
+                    Ok(request) if crate::app_confirmation::required(&request) => {
+                        let reply = Box::pin(shared.app_confirmed_dispatch(
+                            person_peer,
+                            request,
+                            &mut reader,
+                            shutdown.clone(),
+                        ))
+                        .await;
+                        (reply, false)
+                    }
                     Ok(request) if let Some(guidance) = approval_guard::person_only(&request) => (
-                        Box::pin(shared.guarded_dispatch(peer, guidance, request)).await,
+                        Box::pin(shared.guarded_dispatch(person_peer, guidance, request)).await,
+                        false,
+                    ),
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
+                    Ok(request) if !shared.scope_fixture && protected_operator_class(&request) => (
+                        Box::pin(shared.guarded_dispatch(
+                            person_peer,
+                            "Run this command from your own terminal or the Senate app",
+                            request,
+                        ))
+                        .await,
                         false,
                     ),
                     Ok(request) => (shared.dispatch(request).await, false),

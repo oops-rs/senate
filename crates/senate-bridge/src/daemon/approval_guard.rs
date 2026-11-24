@@ -1,33 +1,21 @@
-//! Who may answer a permission prompt through the daemon.
+//! Caller checks for person-only IPC and app-confirmed operations.
 //!
-//! An agent must not approve its own prompts, nor another agent's: a
-//! permission prompt is a person's decision. So [`Request::ApproveSession`]
-//! and [`Request::Approve`] are refused when the process that sent them
-//! runs inside a coding session's process tree. The daemon takes the
-//! caller's pid from the socket itself (`LOCAL_PEEREPID` on macOS,
-//! `SO_PEERCRED` on Linux, through tokio's `peer_cred`), not from anything
-//! the caller says, and walks its ancestors up to pid 1. It refuses when
-//! any of them is:
+//! IPC admission rejects operator requests from protected hosted processes.
+//! On macOS it requires a per-request Mach proof of process generation and
+//! coalition membership. Missing proof is a refusal. On Linux and WSL with
+//! administrator-provisioned cgroups it checks membership using a stable
+//! socket peer handle. These checks survive reparenting.
 //!
-//! - the runtime process of a session on record that has not ended (the
-//!   Claude pid its hooks reported);
-//! - a running terminal host, or the TUI it runs (every Senate-hosted
-//!   session, whatever its runtime);
-//! - this daemon (a companion session it started, or a hosted one);
-//! - a coding runtime by its executable's name (`claude`, `codex`, `agy`),
-//!   for the agents Senate has no pid for, such as a Codex session started
-//!   outside Senate.
+//! A kernel ancestry walk additionally rejects recorded runtimes, hosts,
+//! the daemon and named coding runtimes. Native detached agents, shared
+//! Codex backends outside protected scopes, and jobs started independently
+//! by system schedulers can pass routine checks. Linux and WSL advertise an
+//! advisory guard when protected scopes are unavailable.
 //!
-//! It also refuses when the chain cannot be read to its end, or the socket
-//! names no pid. Environment markers (`CLAUDECODE`, a hosted session's
-//! variables) are not consulted: a caller sets its own environment.
-//!
-//! This is defence in depth, not a boundary. A process that detached from
-//! its agent (a daemonized child, re-parented to launchd or init) escapes
-//! the ancestry check, and so does a runtime renamed past the names above
-//! that Senate has no pid for. The person's own terminal, and the desktop
-//! app, are outside every agent's tree, so they pass. Every decision, and
-//! every refusal with its reason, goes to the daemon's log.
+//! Line-bearing Observe grants and session rebind also require a signed
+//! macOS app decision. A decision applies once to the exact queued request.
+//! These operations are refused without the signed app, including on Linux
+//! and WSL. See `docs/person-guard.md` for platform and hook policy.
 
 use std::collections::BTreeMap;
 
@@ -36,9 +24,24 @@ use crate::host;
 
 /// The most ancestors walked; a deeper chain is refused.
 const DEPTH: usize = 64;
-const PS_TIMEOUT: Duration = Duration::from_secs(2);
+pub(super) const APP_CONFIRMATION: &str = "This operation requires confirmation in the signed Senate app on the machine hosting this Senate";
 /// Executable names of the coding runtimes.
 const RUNTIMES: [&str; 3] = ["claude", "codex", "agy"];
+
+pub(super) fn advisory_notice(locale: Locale) -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        (!crate::linux_scope::available()).then(|| locale.pick(
+            "此机器的人员专用守卫仅为提示。托管代理脱离进程树后可能通过检查。运行 senate setup guard 进行设置。",
+            "The person-only guard is advisory on this machine. A hosted agent that detaches can pass. Run senate setup guard to enforce it.",
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = locale;
+        None
+    }
+}
 
 /// The requests that answer a permission prompt.
 pub(super) fn answers_a_prompt(request: &Request) -> bool {
@@ -50,13 +53,16 @@ pub(super) fn answers_a_prompt(request: &Request) -> bool {
 
 /// What only the person does, and what to tell an agent that asks: `None`
 /// for any other request.
-pub(super) fn person_only(request: &Request) -> Option<&'static str> {
+pub(crate) fn person_only(request: &Request) -> Option<&'static str> {
     Some(match request {
         Request::SetCard { session, .. } if session == &SessionSelector::default() => {
             "Manage your profile card from your own terminal or the Senate app"
         }
         Request::ObserveAdmin { .. } => {
             "Manage Observe grants from your own terminal or the Senate app"
+        }
+        Request::NativeAuthorityCandidate { .. } | Request::AuthorizeNativeAuthority { .. } => {
+            "Authorize a native seat from your own terminal or the Senate app"
         }
         Request::RebindHost { .. } => "Run `senate session rebind` from your own terminal",
         Request::Timeline { .. }
@@ -96,10 +102,135 @@ pub(super) fn person_only(request: &Request) -> Option<&'static str> {
     })
 }
 
+/// Operations documented as operator-only which previously relied on their CLI
+/// entry point. Enforce these at a protected scope boundary as well.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn operator_only(request: &Request) -> bool {
+    match request {
+        Request::Replace { .. }
+        | Request::Pause { .. }
+        | Request::Resume { .. }
+        | Request::PruneHosts
+        | Request::SetSecretarySession { .. }
+        | Request::DeskItem { .. }
+        | Request::Approvals
+        | Request::Desk { set: Some(_) }
+        | Request::Attach { .. } => true,
+        Request::Restore { session, .. }
+        | Request::Spawn { session, .. }
+        | Request::Stop { session, .. }
+        | Request::SecretaryWork { session, .. }
+        | Request::Docket { session, .. } => session == &SessionSelector::default(),
+        _ => false,
+    }
+}
+
+/// Session operations whose authority depends on the session's office or seat.
+pub(crate) fn role_selector(request: &Request) -> Option<&SessionSelector> {
+    match request {
+        Request::Route { session, .. }
+        | Request::Cover { session, .. }
+        | Request::Hold { session, .. }
+        | Request::Refer { session, .. }
+        | Request::Forward { session, .. }
+        | Request::Refuse { session, .. }
+        | Request::SpeakerAlias { session, .. }
+        | Request::SpeakerUnseat { session, .. }
+        | Request::ChairDocket { session }
+        | Request::ChairRoute { session, .. }
+        | Request::ChairCover { session, .. }
+        | Request::ChairEscalate { session, .. }
+        | Request::SecretaryCover { session, .. }
+        | Request::Docket { session, .. }
+        | Request::DeskOpenCommittee { session, .. }
+        | Request::SecretaryWork { session, .. }
+        | Request::SetChair { session, .. }
+        | Request::Spawn { session, .. }
+        | Request::Restore { session, .. }
+        | Request::Stop { session, .. }
+            if session != &SessionSelector::default() =>
+        {
+            Some(session)
+        }
+        _ => None,
+    }
+}
+
 impl Front {
+    /// Accept process metadata from the kernel's view of the hook caller.
+    pub(super) async fn bind_hook_process_claims(
+        &self,
+        peer: Option<u32>,
+        report: &mut HookReport,
+    ) -> Result<(), IpcError> {
+        if report.runtime == Runtime::Agy && report.host.is_some() {
+            return self.verify_agy_host_hook(peer, report).await;
+        }
+        let peer = peer.ok_or_else(|| IpcError::bad_request("cannot identify the hook caller"))?;
+        // In-process clients already share the daemon's authority.
+        if peer == std::process::id() {
+            return Ok(());
+        }
+        let stored = self
+            .primary()
+            .store
+            .session(&report.session_id)
+            .map_err(internal)?
+            .filter(|session| session.state != SessionState::Ended);
+        if stored
+            .as_ref()
+            .is_some_and(|session| session.runtime != report.runtime)
+        {
+            return Err(hook_owner_mismatch());
+        }
+        if report.runtime == Runtime::Agy
+            && self
+                .primary()
+                .store
+                .session_host(&report.session_id)
+                .map_err(internal)?
+                .is_some()
+        {
+            return Err(hook_owner_mismatch());
+        }
+        let recorded_owner = stored
+            .and_then(|session| session.claude_pid)
+            .and_then(|pid| kernel_process::inspect(pid).ok())
+            .map(|process| process.identity);
+        if report.runtime != Runtime::Claude {
+            if let Some(owner) = recorded_owner
+                && kernel_process::inspect(peer)
+                    .ok()
+                    .is_none_or(|process| process.identity != owner)
+            {
+                return Err(hook_owner_mismatch());
+            }
+            report.claude_pid = report
+                .claude_pid
+                .filter(|pid| report.runtime == Runtime::Acp && *pid == peer);
+            report.ancestor_pids.clear();
+            return Ok(());
+        }
+        let _permit = self
+            .process_checks
+            .acquire()
+            .await
+            .expect("process check budget is never closed");
+        let ancestors = kernel_process::ancestors(peer, DEPTH)
+            .map_err(|_| IpcError::bad_request("cannot verify the hook caller's ancestry"))?;
+        if recorded_owner.is_some_and(|owner| !ancestors.contains(&owner)) {
+            return Err(hook_owner_mismatch());
+        }
+        report.claude_pid = report
+            .claude_pid
+            .filter(|pid| ancestors.iter().any(|process| process.pid == *pid));
+        report.ancestor_pids = ancestors.iter().map(|process| process.pid).collect();
+        Ok(())
+    }
+
     /// Replace the hook's claimed ancestry with the Unix peer's actual
     /// process path before letting it name or rebind a hosted agy.
-    pub(super) async fn verify_agy_host_hook(
+    async fn verify_agy_host_hook(
         &self,
         peer: Option<u32>,
         report: &mut HookReport,
@@ -120,17 +251,20 @@ impl Front {
             .acquire()
             .await
             .expect("process check budget is never closed");
-        let ancestors = session::ancestor_pids(peer, 16, Duration::from_millis(250)).await;
-        if !ancestors.contains(&child) {
-            return Err(wrong_host());
-        }
-        report.ancestor_pids = ancestors.into_iter().skip(1).collect();
+        let ancestors = kernel_process::ancestors(peer, 15).map_err(|_| wrong_host())?;
+        let process = ancestors
+            .iter()
+            .copied()
+            .find(|process| process.pid == child)
+            .ok_or_else(wrong_host)?;
+        report.claude_pid = None;
+        report.ancestor_pids = ancestors.iter().map(|process| process.pid).collect();
         let mut observed = lock(&self.primary().agy_host_observed);
         observed.retain(|_, proof| proof.at.elapsed() <= AGY_HOST_PROOF_TTL);
         observed.insert(
             host.clone(),
             AgyHostObservation {
-                pid: child,
+                process,
                 session_id: report.session_id.clone(),
                 at: Instant::now(),
             },
@@ -168,8 +302,13 @@ impl Front {
         if allowed.is_empty() {
             return Err(no_identity());
         }
-        let chain = ancestry(peer, process).await.map_err(|_| no_identity())?;
-        if !chain.into_iter().any(|(pid, _)| allowed.contains(&pid)) {
+        let caller = kernel_process::inspect(peer).map_err(|_| no_identity())?;
+        let ancestors = kernel_process::ancestors(peer, DEPTH).map_err(|_| no_identity())?;
+        if !allowed
+            .into_iter()
+            .filter_map(|pid| kernel_process::inspect(pid).ok())
+            .any(|owner| owner.identity == caller.identity || ancestors.contains(&owner.identity))
+        {
             return Err(no_identity());
         }
         Ok(())
@@ -187,6 +326,56 @@ impl Front {
             Ok(()) => self.dispatch(request).await,
             Err(refused) => Reply::err(refused),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) async fn app_confirmed_dispatch<R: tokio::io::AsyncBufRead + Unpin>(
+        self: &Arc<Self>,
+        peer: Option<u32>,
+        request: Request,
+        reader: &mut R,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> Reply {
+        use crate::app_confirmation::{EnqueueError, LIFETIME};
+        use tokio::io::AsyncBufReadExt;
+
+        if let Err(error) = self.refuse_agent_caller(peer, APP_CONFIRMATION).await {
+            return Reply::err(error);
+        }
+        let mut ticket = match self.app_confirmations.enqueue(request) {
+            Ok(ticket) => ticket,
+            Err(EnqueueError::AppUnavailable) => return Reply::err(refusal(APP_CONFIRMATION)),
+            Err(EnqueueError::Busy) => {
+                return Reply::err(refusal("The Senate app has too many pending confirmations"));
+            }
+            Err(EnqueueError::RequestTooLarge) => {
+                return Reply::err(IpcError::bad_request(
+                    "The confirmation request is too large",
+                ));
+            }
+        };
+        let approved = tokio::select! {
+            biased;
+            _ = shutdown.changed() => None,
+            _ = reader.fill_buf() => None,
+            _ = tokio::time::sleep(LIFETIME) => None,
+            result = &mut ticket.reply => result.ok().flatten(),
+        };
+        let Some(approved) = approved else {
+            return Reply::err(refusal("The Senate app did not confirm this request"));
+        };
+        self.dispatch_app_confirmation(approved).await
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(super) async fn app_confirmed_dispatch<R: tokio::io::AsyncBufRead + Unpin>(
+        self: &Arc<Self>,
+        _peer: Option<u32>,
+        _request: Request,
+        _reader: &mut R,
+        _shutdown: watch::Receiver<bool>,
+    ) -> Reply {
+        Reply::err(refusal(APP_CONFIRMATION))
     }
 
     /// Refuse a caller inside a coding session's process tree.
@@ -318,33 +507,10 @@ fn fd_refusal(peer: u32) -> IpcError {
     )
 }
 
-/// A process's parent and the name of its executable (the last part of
-/// its first argument), by `ps`, portable across macOS and Linux.
+/// Read the parent PID and executable name from the kernel's process table.
 async fn process(pid: u32) -> Result<(u32, String), ProcessLookup> {
-    let child = tokio::process::Command::new("ps")
-        .args(["-o", "ppid=", "-o", "args=", "-p", &pid.to_string()])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(PS_TIMEOUT, child)
-        .await
-        .map_err(|_| ProcessLookup::Unreadable)??;
-    if !output.status.success() {
-        return Err(ProcessLookup::Unreadable);
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut words = text.split_whitespace();
-    let parent = words
-        .next()
-        .and_then(|p| p.parse().ok())
-        .ok_or(ProcessLookup::Unreadable)?;
-    let name = words
-        .next()
-        .and_then(|program| program.rsplit('/').next())
-        .unwrap_or_default()
-        .to_owned();
-    Ok((parent, name))
+    let process = kernel_process::inspect(pid)?;
+    Ok((process.parent_pid, process.name))
 }
 
 /// `start` and every process above it up to pid 1, each with its name, or
@@ -372,6 +538,10 @@ where
 
 fn refusal(message: &str) -> IpcError {
     IpcError::new(codes::NOT_A_PERSON, message)
+}
+
+fn hook_owner_mismatch() -> IpcError {
+    IpcError::bad_request("the hook caller cannot refresh that session's process binding")
 }
 
 #[cfg(test)]

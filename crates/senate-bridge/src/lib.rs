@@ -60,6 +60,7 @@
 //! (`~/.senate`, or `$SENATE_HOME`).
 
 pub mod agent;
+pub mod app_confirmation;
 pub mod approvals;
 pub mod binding;
 pub mod catch_up;
@@ -82,6 +83,11 @@ pub mod init;
 pub mod install;
 pub mod ipc;
 pub mod joinname;
+mod kernel_process;
+#[cfg(target_os = "linux")]
+mod linux_scope;
+#[cfg(target_os = "macos")]
+mod mac_scope;
 pub mod mcp;
 pub mod notify;
 pub mod paths;

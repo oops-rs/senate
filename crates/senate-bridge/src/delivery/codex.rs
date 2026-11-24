@@ -76,12 +76,22 @@ pub const CLIENT_NAME: &str = "senate";
 /// # The codex CLI used for the proxy (default: `codex` on PATH).
 /// bin = "/opt/homebrew/bin/codex"
 /// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostedAppServer {
+    #[default]
+    Dedicated,
+    Shared,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct CodexConfig {
     #[serde(default)]
     pub listen: Option<String>,
     #[serde(default)]
     pub bin: Option<PathBuf>,
+    #[serde(default)]
+    pub hosted_app_server: HostedAppServer,
 }
 
 #[derive(Deserialize)]
@@ -726,10 +736,74 @@ pub async fn push_once(
         .unwrap_or(Err(CodexError::Timeout))
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Routes(
+    std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, Transport>>>,
+);
+
+impl Routes {
+    pub(crate) fn select(&self, session: &str, fallback: &Transport) -> Transport {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session)
+            .cloned()
+            .unwrap_or_else(|| fallback.clone())
+    }
+
+    pub(crate) fn set(&self, session: &str, transport: Option<Transport>) {
+        let mut routes = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(transport) = transport {
+            routes.insert(session.to_owned(), transport);
+        } else {
+            routes.remove(session);
+        }
+    }
+
+    pub(crate) fn retain(&self, sessions: &[String]) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|session, _| sessions.contains(session));
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct BackendLookup {
+    pub store: std::sync::Arc<crate::state::Store>,
+    pub home: PathBuf,
+}
+
+impl std::fmt::Debug for BackendLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackendLookup")
+            .field("home", &self.home)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BackendLookup {
+    pub(crate) fn dedicated(
+        &self,
+        session: &str,
+    ) -> Result<Option<Transport>, crate::state::StoreError> {
+        let paths = crate::Paths::new(&self.home);
+        Ok(self
+            .store
+            .codex_backend(session)?
+            .map(|id| Transport::Unix(crate::host::codex_backend::socket(&paths, &id))))
+    }
+}
+
 /// The ladder rung for Codex sessions.
 #[derive(Debug, Clone)]
 pub struct CodexAppServerAdapter {
     pub transport: Transport,
+    pub(crate) routes: Routes,
+    pub(crate) lookup: Option<BackendLookup>,
     /// Bound on one whole push (connect, read, start or steer).
     pub timeout: Duration,
 }
@@ -748,14 +822,20 @@ impl DeliveryAdapter for CodexAppServerAdapter {
         if session.runtime != Runtime::Codex {
             return DeliveryOutcome::unavailable("not a Codex session");
         }
-        match push_once(
-            &self.transport,
-            &session.session_id,
-            &batch.text,
-            self.timeout,
-        )
-        .await
+        let transport = match self
+            .lookup
+            .as_ref()
+            .map(|lookup| lookup.dedicated(&session.session_id))
+            .transpose()
         {
+            Ok(route) => route.flatten().unwrap_or_else(|| self.transport.clone()),
+            Err(error) => {
+                return DeliveryOutcome::unavailable(format!(
+                    "could not resolve Codex backend: {error}"
+                ));
+            }
+        };
+        match push_once(&transport, &session.session_id, &batch.text, self.timeout).await {
             Ok(pushed) => {
                 tracing::debug!(session = %session.session_id, ?pushed, "pushed into Codex");
                 DeliveryOutcome::Injected
@@ -791,7 +871,7 @@ mod tests {
         );
         let bad = CodexConfig {
             listen: Some("ws://127.0.0.1:1".into()),
-            bin: None,
+            ..Default::default()
         };
         assert!(bad.transport().is_err());
         let dir = tempfile::tempdir().unwrap();

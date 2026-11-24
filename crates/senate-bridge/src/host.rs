@@ -31,12 +31,16 @@ use rustix::fs::{FlockOperation, flock};
 use senate_core::EventId;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
+#[cfg(not(target_os = "linux"))]
+use tokio::process::Command;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::broadcast;
 
 use crate::host_approval::observed_at;
 use crate::ipc::{self, HostedModel, HostedRuntime, Request};
+pub(crate) mod codex_backend;
+
 use crate::paths::{HOME_ENV, Paths, SOCKET_PATH_LIMIT};
 
 use emulation::{Colors, Emulation, Scheme};
@@ -383,6 +387,7 @@ pub struct SessionCommand<'a> {
     pub program: &'a Path,
     pub resume: bool,
     pub codex_remote: Option<&'a str>,
+    pub codex_lease: Option<&'a Path>,
     /// The senator's alias, shown by the TUI as the session's own name.
     pub name: Option<&'a str>,
     /// The model and effort the TUI is started with.
@@ -462,6 +467,9 @@ pub(crate) fn start(
     before_spawn: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<(Child, File)> {
     let dir = directory(paths, id);
+    #[cfg(target_os = "linux")]
+    let mut command = crate::linux_scope::command(host_binary, id);
+    #[cfg(not(target_os = "linux"))]
     let mut command = Command::new(host_binary);
     command
         .arg("session-host")
@@ -479,6 +487,9 @@ pub(crate) fn start(
     }
     if let Some(remote) = session.codex_remote {
         command.arg("--codex-remote").arg(remote);
+    }
+    if let Some(lease) = session.codex_lease {
+        command.arg("--codex-lease").arg(lease);
     }
     if let Some(name) = session.name {
         command.arg("--name").arg(name);
@@ -543,6 +554,15 @@ pub async fn run(
     )
     .context("open the daemon publication pipe")?;
     let dir = directory(paths, id);
+    let _backend_lease = match session.codex_lease {
+        Some(path) => {
+            let lease = UnixStream::connect(path)
+                .await
+                .context("acquire dedicated Codex backend")?;
+            Some(lease)
+        }
+        None => None,
+    };
     let file = open_lock(&dir).context("own the host directory")?;
     // A liveness reader may have opened the file just before we locked it.
     flock(&file, FlockOperation::LockExclusive)?;
@@ -577,6 +597,12 @@ pub async fn run(
         .and_then(|pid| i32::try_from(pid).ok())
         .and_then(Pid::from_raw)
         .context("the coding TUI has no process ID")?;
+    if let Ok(owner) = crate::kernel_process::inspect(pid.as_raw_pid() as u32)
+        .and_then(|process| crate::kernel_process::BoundProcess::capture(process.identity))
+    {
+        std::fs::write(dir.join("actor"), serde_json::to_vec(&owner)?)
+            .context("record the terminal actor's process identity")?;
+    }
     let mut startup_pid = file.try_clone()?;
     writeln!(startup_pid, "{pid}")?;
     drop(startup_pid);
@@ -973,6 +999,13 @@ async fn stop_group(child: &mut Child, pid: Pid) -> anyhow::Result<()> {
     }
     child.wait().await.context("stop the coding TUI group")?;
     Ok(())
+}
+
+pub(crate) fn actor_owner(
+    paths: &Paths,
+    id: &EventId,
+) -> Option<crate::kernel_process::BoundProcess> {
+    serde_json::from_slice(&std::fs::read(directory(paths, id).join("actor")).ok()?).ok()
 }
 
 pub(crate) fn mark_shared_codex_thread(paths: &Paths, id: &EventId) -> io::Result<()> {

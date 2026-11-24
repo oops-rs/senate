@@ -154,6 +154,23 @@
         }
       }
     },
+    "approvals.person_confirmation": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm a Senate command"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "确认 Senate 命令"
+          }
+        }
+      }
+    },
     "approvals.allow": {
       "extractionState": "manual",
       "localizations": {

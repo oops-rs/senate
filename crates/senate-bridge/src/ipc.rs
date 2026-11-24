@@ -533,6 +533,9 @@ pub struct SessionsReply {
 /// and `senate session watch` shows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRow {
+    /// A hosted Codex thread still uses the shared app-server.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub codex_scope_advisory: bool,
     /// The host's id: its directory under `hosts/`.
     pub host_id: EventId,
     pub session_id: String,
@@ -1040,6 +1043,13 @@ pub enum Request {
         /// The runtime's model and effort; unset, its own default.
         #[serde(flatten)]
         model: HostedModel,
+    },
+    NativeAuthorityCandidate {
+        session_id: String,
+    },
+    AuthorizeNativeAuthority {
+        session_id: String,
+        approval: EventId,
     },
     /// Person-only repair of a legacy split hosted agy registration.
     RebindHost {
@@ -2744,6 +2754,8 @@ pub struct StatusReply {
     pub pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptors: Option<crate::fd::Snapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_guard_advisory: Option<String>,
     pub version: String,
     pub person: Name,
     /// The Senate this bridge serves, by its path (`acme/north-desk`), as
@@ -2871,8 +2883,51 @@ pub enum ClientError {
     Remote(IpcError),
 }
 
+/// Encode a request, with a one-time macOS scope proof for person operations.
+pub async fn request_line(socket: &Path, request: &Request) -> Result<Vec<u8>, ClientError> {
+    let body = serde_json::to_vec(request).map_err(|e| ClientError::Protocol(e.to_string()))?;
+    let mut frame = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        use crate::mac_scope::ProofKind;
+        let kind = if crate::daemon::approval_guard::person_only(request).is_some()
+            || crate::daemon::approval_guard::operator_only(request)
+            || matches!(
+                request,
+                Request::RemoteControl { .. }
+                    | Request::SessionDrop { .. }
+                    | Request::ActivityWatch { .. }
+                    | Request::TimelineWatch { .. }
+                    | Request::DeskDecide { .. }
+                    | Request::Sessions
+            ) {
+            Some(ProofKind::Operator)
+        } else if matches!(request, Request::Hook(_) | Request::SessionHook(_))
+            || matches!(request, Request::SetCard { session, .. } if session != &SessionSelector::default())
+            || crate::daemon::approval_guard::role_selector(request).is_some()
+        {
+            Some(ProofKind::Session)
+        } else {
+            None
+        };
+        if let Some(kind) = kind
+            && let Some(ticket) = crate::mac_scope::prove(socket, &body, kind).await
+        {
+            frame.extend_from_slice(b"SCOPE1 ");
+            frame.extend_from_slice(ticket.as_bytes());
+            frame.push(b' ');
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = socket;
+    frame.extend(body);
+    frame.push(b'\n');
+    Ok(frame)
+}
+
 /// One connection to the daemon.
 pub struct IpcClient {
+    socket: PathBuf,
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
 }
@@ -2891,6 +2946,7 @@ impl IpcClient {
         };
         let (r, w) = stream.into_split();
         Ok(Self {
+            socket: path.to_path_buf(),
             reader: BufReader::new(r),
             writer: w,
         })
@@ -2903,10 +2959,8 @@ impl IpcClient {
         timeout: Duration,
     ) -> Result<T, ClientError> {
         let exchange = async {
-            let mut line =
-                serde_json::to_string(request).map_err(|e| ClientError::Protocol(e.to_string()))?;
-            line.push('\n');
-            self.writer.write_all(line.as_bytes()).await?;
+            let line = request_line(&self.socket, request).await?;
+            self.writer.write_all(&line).await?;
             self.read_reply().await
         };
         tokio::time::timeout(timeout, exchange)

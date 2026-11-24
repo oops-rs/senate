@@ -465,24 +465,17 @@ async fn read_small(path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
-/// `start` and the processes above it, nearest first, at most `depth` pids,
-/// stopping below pid 1. Each parent is read with `ps -o ppid= -p <pid>`
-/// (portable across macOS and Linux) under `timeout`; a failure ends the
-/// chain early.
-pub async fn ancestor_pids(start: u32, depth: usize, timeout: Duration) -> Vec<u32> {
-    let mut out = Vec::new();
-    let mut pid = start;
-    while out.len() < depth && pid > 1 && !out.contains(&pid) {
-        out.push(pid);
-        if out.len() == depth {
-            break;
-        }
-        match parent_of(pid, timeout).await {
-            Some(parent) => pid = parent,
-            None => break,
-        }
+/// `start` and the processes above it, nearest first, at most `depth` PIDs.
+/// The process lookup uses the kernel directly. The timeout argument is
+/// retained for callers of the previous command-based lookup.
+pub async fn ancestor_pids(start: u32, depth: usize, _timeout: Duration) -> Vec<u32> {
+    if start <= 1 || depth == 0 {
+        return Vec::new();
     }
-    out
+    let ancestors = crate::kernel_process::ancestors(start, depth - 1).unwrap_or_default();
+    std::iter::once(start)
+        .chain(ancestors.into_iter().map(|process| process.pid))
+        .collect()
 }
 
 /// Whether an agy has the conversation of agy session `session_id` open
@@ -557,47 +550,14 @@ pub async fn ancestor_cwd(timeout: Duration) -> Option<PathBuf> {
     let own = std::env::current_dir().ok()?;
     let parent = std::os::unix::process::parent_id();
     for pid in ancestor_pids(parent, 4, timeout).await {
-        if let Some(cwd) = cwd_of(pid, timeout).await
+        if let Ok(cwd) = crate::kernel_process::cwd(pid)
+            && cwd.is_absolute()
             && cwd != own
         {
             return Some(cwd);
         }
     }
     None
-}
-
-/// `pid`'s working directory: `/proc` on Linux, `lsof` elsewhere.
-async fn cwd_of(pid: u32, timeout: Duration) -> Option<PathBuf> {
-    if let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
-        return Some(cwd);
-    }
-    let child = tokio::process::Command::new("lsof")
-        .args(["-a", "-d", "cwd", "-Fn", "-p", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(timeout, child).await.ok()?.ok()?;
-    String::from_utf8(output.stdout)
-        .ok()?
-        .lines()
-        .find_map(|line| line.strip_prefix('n'))
-        .map(PathBuf::from)
-        .filter(|cwd| cwd.is_absolute())
-}
-
-async fn parent_of(pid: u32, timeout: Duration) -> Option<u32> {
-    let child = tokio::process::Command::new("ps")
-        .args(["-o", "ppid=", "-p", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(timeout, child).await.ok()?.ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
 }
 
 /// Whether a process with this pid exists (it may belong to another user).

@@ -522,6 +522,17 @@ fn status_reply(version: &str) -> StatusReply {
 }
 
 #[test]
+fn doctor_reports_the_daemons_advisory_person_guard() {
+    let mut machine = healthy();
+    let notice = "The person-only guard is advisory on this machine.";
+    machine.daemon.as_mut().unwrap().person_guard_advisory = Some(notice.into());
+    let checks = live(&machine, EN);
+    let check = by_id(&checks, "daemon.person_guard");
+    assert_eq!(check.status, Status::Warn);
+    assert_eq!(check.found, notice);
+}
+
+#[test]
 fn doctor_warns_only_above_half_of_the_daemons_descriptor_limit() {
     for (open, expected) in [(64, Status::Ok), (65, Status::Warn)] {
         let mut live = healthy();
@@ -549,6 +560,7 @@ fn me(version: Option<&str>, epoch: &str, committees: &[&str]) -> Me {
 
 fn session(label: &str, running: bool, prompt: bool) -> SessionRow {
     SessionRow {
+        codex_scope_advisory: false,
         paused: false,
         chair: false,
         shown_name: None,

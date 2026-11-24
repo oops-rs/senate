@@ -18,6 +18,28 @@ use senate_bridge::state::{ItemStatus, Store};
 use senate_core::{Address, Kind, NewEvent, Refs, Seq};
 use serde_json::{Value, json};
 
+#[tokio::test]
+async fn the_local_person_is_reserved_when_a_session_registers() {
+    let mut h = Harness::new().await;
+    h.start().await;
+    let wd = h.workdir("w1", Some("refund-v2"));
+    let mut env = h.env_for("reserved", None);
+    env.agent = Some("alice".into());
+
+    assert!(
+        h.hook_with(HookKind::SessionStart, "reserved", &wd, &env)
+            .await
+            .is_none()
+    );
+    assert!(h.store().session("reserved").unwrap().is_none());
+
+    env.agent = None;
+    h.hook_with(HookKind::SessionStart, "reserved", &wd, &env)
+        .await;
+    assert!(h.store().session("reserved").unwrap().is_some());
+    h.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn directed_question_is_pushed_once_with_the_inbox_framing() {
     let mut h = Harness::new().await;
@@ -652,6 +674,7 @@ async fn streams_follow_sessions_and_configured_committees() {
             aliases: None,
             paused: Default::default(),
             daemon: Some(status.pid),
+            person_guard_advisory: status.person_guard_advisory.clone(),
             socket: h.socket(),
             person: Some("[senator::alice]".into()),
             senate: status.senate.clone(),

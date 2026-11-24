@@ -80,11 +80,22 @@ helper_sha="$(awk 'NR == 1 { print $1 }' "$out/senate-remote-admin.sha256")"
 export SENATE_REMOTE_ADMIN_SHA256="$helper_sha"
 if [[ -n "$team" ]]; then
   export SENATE_REMOTE_ADMIN_TEAM_ID="$team"
+  export SENATE_PERSON_TEAM_ID="$team"
 else
   unset SENATE_REMOTE_ADMIN_TEAM_ID
+  unset SENATE_PERSON_TEAM_ID
 fi
-cargo build --manifest-path "$repo/Cargo.toml" --locked --release --target-dir "$repo/target" -p senate-bridge --bin senate
+cargo build --manifest-path "$repo/Cargo.toml" --locked --release --target-dir "$repo/target" \
+  -p senate-bridge -p senated --bin senate --bin senated
 cp "$repo/target/release/senate" "$out/senate"
+cp "$repo/target/release/senated" "$out/senated"
+if [[ -n "$team" ]]; then
+  codesign --force --options runtime --identifier dev.senate.daemon \
+    --sign "$identity" "$helper_timestamp" "$out/senated"
+  codesign --verify --strict \
+    -R "=anchor apple generic and identifier \"dev.senate.daemon\" and certificate leaf[subject.OU] = \"$team\"" \
+    "$out/senated"
+fi
 
 xcodebuild -project Senate.xcodeproj -scheme Senate -configuration Release \
   -derivedDataPath build -archivePath "$archive" archive \

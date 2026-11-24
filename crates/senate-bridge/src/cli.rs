@@ -693,6 +693,8 @@ stdin.")]
         #[arg(long)]
         codex_remote: Option<String>,
         #[arg(long)]
+        codex_lease: Option<PathBuf>,
+        #[arg(long)]
         name: Option<String>,
         #[arg(long)]
         model: Option<String>,
@@ -701,6 +703,12 @@ stdin.")]
         /// See `host::prompt::QUIET`.
         #[arg(long)]
         prompt_quiet_ms: Option<u64>,
+    },
+    #[command(hide = true)]
+    SessionCodexBackend {
+        id: EventId,
+        program: PathBuf,
+        cwd: PathBuf,
     },
     /// Manual checks of the delivery plumbing.
     #[command(hide = true)]
@@ -804,6 +812,11 @@ enum DebugCmd {
 
 #[derive(Subcommand)]
 enum SessionCmd {
+    /// Reauthorize a privileged native seat for its current verified process.
+    Authorize {
+        /// The native session ID awaiting reauthorization.
+        session_id: String,
+    },
     /// Repair two agy conversation records for one hosted terminal.
     Rebind {
         /// The original senator by name or role, or the terminal's host ID.
@@ -1235,6 +1248,15 @@ enum SetupCmd {
     Service {
         #[command(subcommand)]
         command: ServiceCmd,
+    },
+    /// Install the trusted Linux cgroup launcher as an administrator.
+    Guard {
+        /// Unprivileged build artifact. Defaults to senate-host-guard beside the CLI.
+        #[arg(long)]
+        helper: Option<PathBuf>,
+        /// SHA-256 of the trusted helper artifact.
+        #[arg(long)]
+        sha256: String,
     },
     /// Check this machine, and say how to fix what is wrong.
     ///
@@ -1740,13 +1762,13 @@ async fn daemon_call<T: serde::de::DeserializeOwned>(
     paths: &Paths,
     request: &Request,
 ) -> anyhow::Result<T> {
-    Ok(ipc::request(
-        &paths.socket(),
-        request,
-        Duration::from_secs(1),
-        Duration::from_secs(20),
-    )
-    .await?)
+    let timeout = if cfg!(target_os = "macos") && crate::app_confirmation::required(request) {
+        eprintln!("Confirm this command in the signed Senate app.");
+        crate::app_confirmation::LIFETIME + Duration::from_secs(5)
+    } else {
+        Duration::from_secs(20)
+    };
+    Ok(ipc::request(&paths.socket(), request, Duration::from_secs(1), timeout).await?)
 }
 
 /// Open the joined committee on the server when it has no event there
@@ -3927,6 +3949,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             program,
             resume,
             codex_remote,
+            codex_lease,
             name,
             model,
             effort,
@@ -3946,10 +3969,17 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     program: &program,
                     resume,
                     codex_remote: codex_remote.as_deref(),
+                    codex_lease: codex_lease.as_deref(),
                     name: name.as_deref(),
                     model: &model,
                     prompt_quiet,
                 },
+            ))
+        }
+        Cmd::SessionCodexBackend { id, program, cwd } => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(crate::host::codex_backend::supervise(
+                &paths, &id, &program, &cwd,
             ))
         }
         Cmd::Mcp {
@@ -4115,6 +4145,9 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 ),
             };
             print!("{text}");
+            if let Some(notice) = view.person_guard_advisory {
+                println!("{notice}");
+            }
             if let Some(note) = crate::remote::experimental_notice(&paths) {
                 println!("{note}");
             }
@@ -4285,6 +4318,32 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             runtime(false)?.block_on(pause_sessions(
                 &paths, &selector, force, dry_run, timeout, locale,
             ))
+        }
+        SessionCmd::Authorize { session_id } => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(async {
+                let candidate: Option<(EventId, u32)> = daemon_call(
+                    &paths,
+                    &Request::NativeAuthorityCandidate {
+                        session_id: session_id.clone(),
+                    },
+                )
+                .await?;
+                let Some((approval, pid)) = candidate else {
+                    anyhow::bail!("No live process is waiting for authorization for this session");
+                };
+                let accepted: bool = daemon_call(
+                    &paths,
+                    &Request::AuthorizeNativeAuthority {
+                        session_id: session_id.clone(),
+                        approval,
+                    },
+                )
+                .await?;
+                anyhow::ensure!(accepted, "The pending process changed before authorization");
+                println!("Authorized session {session_id} for process {pid}");
+                Ok(())
+            })
         }
         SessionCmd::Rebind { host, to } => {
             let paths = Paths::from_env()?;
@@ -4787,6 +4846,15 @@ fn run_setup(command: SetupCmd, output: Output) -> anyhow::Result<()> {
             Ok(())
         }
         SetupCmd::Service { command } => run_service(command, output),
+        SetupCmd::Guard { helper, sha256 } => {
+            #[cfg(target_os = "linux")]
+            return crate::linux_scope::install(helper.as_deref(), &sha256);
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (helper, sha256);
+                anyhow::bail!("The cgroup launcher is only used on Linux and WSL");
+            }
+        }
         SetupCmd::Doctor { json } => run_doctor(json),
         SetupCmd::Clean { yes, delete_logs } => {
             let (paths, settings) = settings_here();

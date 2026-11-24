@@ -39,6 +39,12 @@ impl Launches {
             .map(|pending| pending.published.subscribe())
     }
 
+    pub(super) fn pending_host(&self, session_id: &str) -> Option<EventId> {
+        lock(&self.0).iter().find_map(|(host, pending)| {
+            (pending.session_id.as_deref() == Some(session_id)).then(|| host.clone())
+        })
+    }
+
     /// Whether host `id` is still starting: not an orphan, whatever the
     /// session registry says yet.
     pub(super) fn launching(&self, id: &EventId) -> bool {
@@ -510,17 +516,28 @@ impl Shared {
                 "repair needs a running hosted agy and a live agy conversation",
             ));
         }
-        let child = host::child_pid(&paths, &id)
-            .filter(|pid| session::pid_alive(*pid))
+        let process = host::child_pid(&paths, &id)
+            .and_then(|pid| kernel_process::inspect(pid).ok())
+            .map(|process| process.identity)
             .ok_or_else(|| IpcError::bad_request("the hosted agy process is gone"))?;
+        let child = process.pid;
         let observed = lock(&self.agy_host_observed).get(&id).is_some_and(|proof| {
-            proof.pid == child
+            proof.process == process
                 && proof.session_id == next.session_id
                 && proof.at.elapsed() <= AGY_HOST_PROOF_TTL
         });
         if !observed && !session::agy_owned_presence(child, &next.session_id).await {
             return Err(IpcError::bad_request(
                 "could not verify that conversation in this terminal. Send a prompt in the new conversation, then retry rebind",
+            ));
+        }
+        if kernel_process::inspect(child)
+            .map(|current| current.identity)
+            .ok()
+            != Some(process)
+        {
+            return Err(IpcError::bad_request(
+                "the hosted agy process changed during rebind",
             ));
         }
         let committee = next
@@ -744,13 +761,16 @@ impl Shared {
                 "this terminal host is still waiting for publication",
             ));
         }
+        let codex = self
+            .dedicated_codex_route(&session.session_id)
+            .map_err(internal)?
+            .unwrap_or_else(|| self.codex_transport.clone());
         let stop = host::control::begin_stop(
             &paths,
             &target.host_id,
             force,
             unconfirmed_audit,
-            (session.runtime == Runtime::Codex)
-                .then_some((&self.codex_transport, session.session_id.as_str())),
+            (session.runtime == Runtime::Codex).then_some((&codex, session.session_id.as_str())),
         )
         .await?;
         drop(binding);
@@ -1108,6 +1128,13 @@ impl Shared {
             if let Some(limit) = limit {
                 Self::check_host_capacity(&paths, &launches, limit)?;
             }
+            #[cfg(target_os = "macos")]
+            if !self.protected_hosting {
+                return Err(IpcError::new(
+                    codes::NOT_A_PERSON,
+                    "Hosted sessions require a protected launchd Senate service on macOS",
+                ));
+            }
             if let Some(id) = &resume {
                 if launches
                     .values()
@@ -1167,8 +1194,43 @@ impl Shared {
                 .and_then(|aliases| aliases.alias_of(&committee, seat).map(ToString::to_string)),
             (None, None) => None,
         };
-        // Keep the creating connection until the host has started. Delivery
-        // and the TUI use the same shared server for the life of the session.
+        let mut ignored_codex_listen = false;
+        let codex_backend = if runtime == HostedRuntime::Codex && self.owned_codex_backends {
+            use crate::delivery::codex::HostedAppServer;
+            let config = crate::delivery::codex::CodexConfig::load(&paths.config())
+                .map_err(IpcError::internal)?;
+            if config.hosted_app_server == HostedAppServer::Dedicated {
+                if config.listen.is_some() {
+                    ignored_codex_listen = true;
+                    tracing::info!(
+                        "hosted Codex uses its own app-server; codex.listen applies to native sessions"
+                    );
+                }
+                Some(
+                    host::codex_backend::Unpublished::start(
+                        &paths,
+                        &id,
+                        &self.host_binary,
+                        &program,
+                        &cwd,
+                    )
+                    .await
+                    .map_err(IpcError::internal)?,
+                )
+            } else {
+                tracing::warn!(
+                    "hosted Codex uses the shared app-server; its tool processes are advisory"
+                );
+                None
+            }
+        } else {
+            None
+        };
+        let codex_transport = codex_backend.as_ref().map_or_else(
+            || self.codex_transport.clone(),
+            |backend| backend.transport.clone(),
+        );
+        // Keep the creating connection until the terminal has acquired its backend.
         let mut app_server = None;
         let restoring = resume.is_some();
         let mut session_id = match runtime {
@@ -1183,11 +1245,11 @@ impl Shared {
                 resume.unwrap_or_else(|| Runtime::Agy.session_key(""))
             }
             HostedRuntime::Codex => {
-                let connect = || crate::delivery::codex::AppServer::connect(&self.codex_transport);
+                let connect = || crate::delivery::codex::AppServer::connect(&codex_transport);
                 let mut server = tokio::time::timeout(
                     CODEX_PUSH_TIMEOUT,
                     crate::delivery::codex::AppServer::connect_with_settings(
-                        &self.codex_transport,
+                        &codex_transport,
                         !model.is_default(),
                     ),
                 )
@@ -1207,6 +1269,14 @@ impl Shared {
                     model.model = Some(super::model_catalog::resolve(request, catalog)?);
                 }
                 let id = if let Some(id) = resume {
+                    if codex_backend.is_some() {
+                        tokio::time::timeout(CODEX_PUSH_TIMEOUT, server.hosted_settings(&id))
+                            .await
+                            .map_err(|_| IpcError::internal("Timed out loading the existing Codex thread in its dedicated app-server"))?
+                            .map_err(|error| IpcError::bad_request(format!(
+                                "The dedicated app-server could not load the existing Codex thread: {error}"
+                            )))?;
+                    }
                     id
                 } else {
                     if let Some(attempt) = attempt.as_deref_mut() {
@@ -1260,13 +1330,16 @@ impl Shared {
         if !unnamed && let Some(pending) = lock(&self.hosts.0).get_mut(&id) {
             pending.session_id = Some(session_id.clone());
         }
-        let remote = (runtime == HostedRuntime::Codex).then(|| self.codex_transport.remote());
+        let remote = (runtime == HostedRuntime::Codex).then(|| codex_transport.remote());
         let launch_session = session_id.clone();
         let launch = host::SessionCommand {
             session_id: &launch_session,
             program: &program,
             resume: restoring && !start_empty,
             codex_remote: remote.as_deref(),
+            codex_lease: codex_backend
+                .as_ref()
+                .map(|backend| backend.lease.as_path()),
             name: name.as_deref(),
             model: &model,
             prompt_quiet: self.timing.screen_prompt_quiet,
@@ -1402,7 +1475,14 @@ impl Shared {
             // Native SessionEnd may have run while the restore was waiting
             // for the new terminal. Inspect the prior registration under
             // the same lock used by SessionEnd.
-            let shared_codex = restoring
+            if ignored_codex_listen {
+                let notice = "Hosted Codex uses its own app-server. codex.listen applies to native sessions.";
+                reply.model_warning = Some(match reply.model_warning.take() {
+                    Some(warning) => format!("{warning}\n{notice}"),
+                    None => notice.into(),
+                });
+            }
+            let shared_codex = codex_backend.is_none() && restoring
                 && runtime == HostedRuntime::Codex
                 && self
                     .store
@@ -1442,6 +1522,7 @@ impl Shared {
                     &reply.committee,
                     cursor.map(|(_, seqs)| seqs),
                     &recorded_model,
+                    codex_backend.is_some(),
                 )
                 .map_err(internal)?;
             if !restoring {
@@ -1479,6 +1560,9 @@ impl Shared {
             if restoring && runtime == HostedRuntime::Agy {
                 // --conversation opens at the input prompt without a seed turn or Stop hook.
                 self.mark_agy_idle(&session_id);
+            }
+            if codex_backend.is_some() {
+                self.codex_routes.set(&session_id, Some(codex_transport.clone()));
             }
             published.send_replace(true);
             if let Some(mut ack) = publication.take()
@@ -1522,7 +1606,7 @@ impl Shared {
             }
             if !restoring && app_server.is_some() {
                 record_rollback(&mut rollback, "archive Codex thread", async {
-                    crate::delivery::codex::AppServer::connect(&self.codex_transport)
+                    crate::delivery::codex::AppServer::connect(&codex_transport)
                         .await?
                         .archive_thread(&session_id)
                         .await

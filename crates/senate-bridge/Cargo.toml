@@ -72,6 +72,9 @@ tempfile = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3.7", default-features = false }
 
+[build-dependencies]
+cc = "1"
+
 [dev-dependencies]
 axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

@@ -38,6 +38,7 @@ pub struct StatusView {
     pub aliases: Option<senate_core::alias::KnownAliases>,
     /// The daemon's pid, when it answered.
     pub daemon: Option<u32>,
+    pub person_guard_advisory: Option<String>,
     pub socket: PathBuf,
     /// `senator::<person>`.
     pub person: Option<String>,
@@ -102,6 +103,7 @@ impl StatusView {
         Self {
             aliases: None,
             daemon: Some(reply.pid),
+            person_guard_advisory: reply.person_guard_advisory,
             socket,
             person: Some(Address::senior(&reply.person).in_text()),
             senate: reply.senate,
@@ -240,6 +242,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
     let mut view = StatusView {
         aliases: None,
         daemon: None,
+        person_guard_advisory: None,
         socket: paths.socket(),
         person: config
             .as_ref()
@@ -998,6 +1001,7 @@ mod tests {
         StatusView {
             aliases: None,
             daemon: None,
+            person_guard_advisory: None,
             socket: "/h/bridge.sock".into(),
             person: Some("[senator::alice]".into()),
             senate: None,

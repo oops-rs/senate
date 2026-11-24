@@ -1258,6 +1258,7 @@ mod tests {
         let config = CodexConfig {
             listen: Some("ws://127.0.0.1:4500".into()),
             bin: Some("/opt/codex".into()),
+            ..Default::default()
         };
         let c = terminal_command(&config, None, None);
         assert_eq!(c.argv, ["/opt/codex", "--remote", "ws://127.0.0.1:4500"]);
@@ -1393,4 +1394,28 @@ impl From<DefaultSecretary> for SecretaryView {
             }),
         }
     }
+}
+
+/// A CLI request waiting for an explicit action in the signed app.
+#[derive(uniffi::Record)]
+pub struct PersonApprovalPrompt {
+    pub id: String,
+    pub display: String,
+}
+
+#[uniffi::export]
+pub fn person_approval_prompts(home: String) -> Vec<PersonApprovalPrompt> {
+    senate_bridge::app_confirmation::pending(&Paths::new(home))
+        .into_iter()
+        .map(|prompt| PersonApprovalPrompt {
+            id: prompt.id.to_string(),
+            display: prompt.display,
+        })
+        .collect()
+}
+
+#[uniffi::export]
+pub fn resolve_person_approval(home: String, id: String, approved: bool) -> bool {
+    id.parse()
+        .is_ok_and(|id| senate_bridge::app_confirmation::respond(&Paths::new(home), id, approved))
 }
