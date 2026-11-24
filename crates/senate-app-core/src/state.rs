@@ -695,9 +695,12 @@ pub(crate) fn speaker_mention(s: &StatusReply) -> Option<String> {
 pub(crate) fn speaker_is_person(s: &StatusReply) -> bool {
     match s.roles.as_ref().and_then(|r| r.office.as_ref()) {
         Some(office) => {
-            office.kind == senate_core::SenatorKind::Person && office.speaker.name().as_str() == s.person.as_str()
+            office.kind == senate_core::SenatorKind::Person
+                && office.speaker.name().as_str() == s.person.as_str()
         }
-        None => matches!(&s.speaker, Some(SpeakerSeat::Senator(p)) if p.as_str() == s.person.as_str()),
+        None => {
+            matches!(&s.speaker, Some(SpeakerSeat::Senator(p)) if p.as_str() == s.person.as_str())
+        }
     }
 }
 

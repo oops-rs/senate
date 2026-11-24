@@ -221,14 +221,26 @@ impl Task {
             ),
             links: s.links.as_ref().map_or_else(
                 || self.links.clone(),
-                |links| links.iter().map(|x| (x.label.clone(), x.url.clone())).collect(),
+                |links| {
+                    links
+                        .iter()
+                        .map(|x| (x.label.clone(), x.url.clone()))
+                        .collect()
+                },
             ),
             escalated_to: if s.withdraw {
                 None
             } else {
-                s.escalated_to.as_ref().map(ToString::to_string).or_else(|| self.escalated_to.clone())
+                s.escalated_to
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .or_else(|| self.escalated_to.clone())
             },
-            takeover: s.takeover.as_ref().map(ToString::to_string).or_else(|| self.takeover.clone()),
+            takeover: s
+                .takeover
+                .as_ref()
+                .map(ToString::to_string)
+                .or_else(|| self.takeover.clone()),
         }
     }
 
@@ -237,11 +249,18 @@ impl Task {
     fn line(&self, s: &senate_core::StatusPayload, locale: Locale) -> StatusLine {
         use senate_core::StatusState as S;
         let words = match (s.state, s.takeover.as_ref(), s.escalated_to.as_ref()) {
-            (_, Some(who), _) => locale.pick(format!("由 {who} 接手"), format!("taken over by {who}")),
-            (S::Suspended, None, Some(who)) => match s.reason.as_deref().filter(|r| !r.trim().is_empty()) {
-                Some(why) => locale.pick(format!("等待 {who}：{why}"), format!("waiting on {who}: {why}")),
-                None => locale.pick(format!("等待 {who}"), format!("waiting on {who}")),
-            },
+            (_, Some(who), _) => {
+                locale.pick(format!("由 {who} 接手"), format!("taken over by {who}"))
+            }
+            (S::Suspended, None, Some(who)) => {
+                match s.reason.as_deref().filter(|r| !r.trim().is_empty()) {
+                    Some(why) => locale.pick(
+                        format!("等待 {who}：{why}"),
+                        format!("waiting on {who}: {why}"),
+                    ),
+                    None => locale.pick(format!("等待 {who}"), format!("waiting on {who}")),
+                }
+            }
             (S::Suspended, None, None) => locale.pick("已暂停", "suspended").to_string(),
             (S::Processing, ..) => locale.pick("处理中", "working on it").to_string(),
             (S::Active, ..) => locale.pick("进行中", "active").to_string(),
@@ -257,12 +276,18 @@ impl Task {
             steps: self
                 .steps
                 .iter()
-                .map(|(label, done)| StatusStep { label: label.clone(), done: *done })
+                .map(|(label, done)| StatusStep {
+                    label: label.clone(),
+                    done: *done,
+                })
                 .collect(),
             links: self
                 .links
                 .iter()
-                .map(|(label, url)| StatusLink { label: label.clone(), url: url.clone() })
+                .map(|(label, url)| StatusLink {
+                    label: label.clone(),
+                    url: url.clone(),
+                })
                 .collect(),
         }
     }
@@ -343,7 +368,8 @@ mod tests {
 
     fn status(seq: u64, from: Address, payload: &senate_core::StatusPayload) -> Event {
         let mut e = event(seq, Kind::Status, from, "");
-        e.meta.insert(senate_core::StatusPayload::META_KEY.into(), payload.value());
+        e.meta
+            .insert(senate_core::StatusPayload::META_KEY.into(), payload.value());
         e
     }
 
@@ -351,7 +377,7 @@ mod tests {
     /// it, one of which repeats the one before.
     #[test]
     fn statuses_read_as_activity_lines_and_a_repeat_is_left_out() {
-        use senate_core::{Link, Step, StatusPayload, StatusState};
+        use senate_core::{Link, StatusPayload, StatusState, Step};
         let agent: SenatorName = "announceseats".parse().unwrap();
         let alice = Name::new("alice").unwrap();
         let mut first = StatusPayload::new(StatusState::Processing);
@@ -360,10 +386,21 @@ mod tests {
         let mut next = StatusPayload::new(StatusState::Processing);
         next.title = Some("Cover the uplink reconnect cycle".into());
         next.steps = Some(vec![
-            Step { id: "a".into(), label: "Reproduce".into(), done: true },
-            Step { id: "b".into(), label: "Fix".into(), done: false },
+            Step {
+                id: "a".into(),
+                label: "Reproduce".into(),
+                done: true,
+            },
+            Step {
+                id: "b".into(),
+                label: "Fix".into(),
+                done: false,
+            },
         ]);
-        next.links = Some(vec![Link { label: "PR".into(), url: "https://example.test/pr/1".into() }]);
+        next.links = Some(vec![Link {
+            label: "PR".into(),
+            url: "https://example.test/pr/1".into(),
+        }]);
         let mut waiting = StatusPayload::new(StatusState::Suspended);
         waiting.escalated_to = Some(alice.clone());
         waiting.reason = Some("which uplink to keep?".into());
@@ -374,7 +411,12 @@ mod tests {
             committee: CommitteeId::new("refund-v2").unwrap(),
             root: Seq(1),
             events: vec![
-                event(1, Kind::Request, Address::senior(&alice), "announce the seats"),
+                event(
+                    1,
+                    Kind::Request,
+                    Address::senior(&alice),
+                    "announce the seats",
+                ),
                 status(2, by.clone(), &first),
                 status(3, by.clone(), &same),
                 status(4, by.clone(), &next),
@@ -385,29 +427,65 @@ mod tests {
         let view = thread_view(reply, Some(&alice), Locale::En);
         let seqs: Vec<u64> = view.events.iter().map(|e| e.seq).collect();
         assert_eq!(seqs, [1, 2, 4, 5, 6], "the repeat (3) is left out");
-        let line = |seq: u64| view.events.iter().find(|e| e.seq == seq).unwrap().status.clone().unwrap();
-        assert_eq!(line(2).line, "working on it — Wait for startup seat reports");
+        let line = |seq: u64| {
+            view.events
+                .iter()
+                .find(|e| e.seq == seq)
+                .unwrap()
+                .status
+                .clone()
+                .unwrap()
+        };
+        assert_eq!(
+            line(2).line,
+            "working on it — Wait for startup seat reports"
+        );
         assert!(line(2).steps.is_empty() && line(2).links.is_empty());
-        assert_eq!(line(4).line, "working on it — Cover the uplink reconnect cycle");
-        assert_eq!(line(4).steps, [
-            StatusStep { label: "Reproduce".into(), done: true },
-            StatusStep { label: "Fix".into(), done: false },
-        ]);
+        assert_eq!(
+            line(4).line,
+            "working on it — Cover the uplink reconnect cycle"
+        );
+        assert_eq!(
+            line(4).steps,
+            [
+                StatusStep {
+                    label: "Reproduce".into(),
+                    done: true
+                },
+                StatusStep {
+                    label: "Fix".into(),
+                    done: false
+                },
+            ]
+        );
         assert_eq!(line(4).links[0].url, "https://example.test/pr/1");
         assert_eq!(line(5).state, "suspended");
-        assert_eq!(line(5).line, "waiting on alice: which uplink to keep? — Cover the uplink reconnect cycle");
-        assert_eq!(line(6).line, "taken over by alice — Cover the uplink reconnect cycle");
+        assert_eq!(
+            line(5).line,
+            "waiting on alice: which uplink to keep? — Cover the uplink reconnect cycle"
+        );
+        assert_eq!(
+            line(6).line,
+            "taken over by alice — Cover the uplink reconnect cycle"
+        );
         assert!(view.events[0].status.is_none(), "a message is not a status");
 
         let zh = thread_view(
-            ThreadReply { committee: CommitteeId::new("refund-v2").unwrap(), root: Seq(1), events: vec![
-                event(1, Kind::Request, Address::senior(&alice), "x"),
-                status(2, by, &first),
-            ] },
+            ThreadReply {
+                committee: CommitteeId::new("refund-v2").unwrap(),
+                root: Seq(1),
+                events: vec![
+                    event(1, Kind::Request, Address::senior(&alice), "x"),
+                    status(2, by, &first),
+                ],
+            },
             Some(&alice),
             Locale::Zh,
         );
-        assert_eq!(zh.events[1].status.as_ref().unwrap().line, "处理中 — Wait for startup seat reports");
+        assert_eq!(
+            zh.events[1].status.as_ref().unwrap().line,
+            "处理中 — Wait for startup seat reports"
+        );
     }
 
     /// A status event without a readable payload is not shown at all.

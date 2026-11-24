@@ -498,14 +498,29 @@ mod tests {
 
     #[test]
     fn mcp_tools_read_as_server_dot_tool() {
-        assert_eq!(mcp_label("mcp__senate__answer").as_deref(), Some("senate.answer"));
+        assert_eq!(
+            mcp_label("mcp__senate__answer").as_deref(),
+            Some("senate.answer")
+        );
         assert_eq!(
             mcp_label("mcp__claude_ai_Claude_Docs__batch").as_deref(),
             Some("claude_ai_Claude_Docs.batch")
         );
         // Codex names them server__tool.
-        assert_eq!(mcp_label("senate__catch_up").as_deref(), Some("senate.catch_up"));
-        for own in ["Bash", "Read", "shell", "apply_patch", "web_search", "update_plan", "mcp__", "mcp__senate"] {
+        assert_eq!(
+            mcp_label("senate__catch_up").as_deref(),
+            Some("senate.catch_up")
+        );
+        for own in [
+            "Bash",
+            "Read",
+            "shell",
+            "apply_patch",
+            "web_search",
+            "update_plan",
+            "mcp__",
+            "mcp__senate",
+        ] {
             assert_eq!(mcp_label(own), None, "{own}");
         }
     }
