@@ -151,6 +151,15 @@ private struct Shortcuts: View {
 private struct Sidebar: View {
     @Bindable var store: CoreStore
     @State private var searching = false
+    /// The committees as the list shows them: the store's, caught up with
+    /// at most one committee gaining rows per turn of the run loop. Rows
+    /// inserted under more than one item of the outline in one update
+    /// make AppKit re-enter its row-height bookkeeping ("reentrant
+    /// operation in its NSTableView delegate"); one at a time it does not.
+    @State private var shown: [SessionGroup] = []
+    /// The committees shown open (by id), caught up the same way: opening
+    /// one inserts its rows.
+    @State private var opened: Set<String> = []
     @FocusState private var searchFocused: Bool
 
     var body: some View {
@@ -221,10 +230,11 @@ private struct Sidebar: View {
             }
             // Offline, nothing is known: say nothing rather than "no sessions".
             if store.state.online {
-                let groups = store.shownGroups
+                let groups = shown
                 Section {
                     ForEach(groups) { group in
-                        CommitteeGroup(store: store, group: group, searching: !store.query.isEmpty)
+                        CommitteeGroup(store: store, group: group, open: opened.contains(group.id),
+                                       searching: !store.query.isEmpty)
                     }
                     if groups.isEmpty {
                         Text(verbatim: store.query.isEmpty ? L("sidebar.no_sessions") : L("sidebar.no_matches"))
@@ -253,6 +263,9 @@ private struct Sidebar: View {
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
+        .onChange(of: store.shownGroups, initial: true) { catchUp() }
+        .onChange(of: store.folded) { catchUp() }
+        .onChange(of: store.query.isEmpty) { catchUp() }
         .environment(\.defaultMinListRowHeight, Theme.rowHeight)
         // The archived committees: read when asked for, and on reconnecting.
         .task(id: store.showArchived && store.state.online) { await store.loadArchived() }
@@ -292,6 +305,18 @@ private struct Sidebar: View {
         .padding(.bottom, Theme.Space.s)
     }
 
+    /// Bring the list to the store's committees, a step a turn of the run
+    /// loop (`SidebarStaging`).
+    private func catchUp() {
+        let target = store.shownGroups
+        let searching = !store.query.isEmpty
+        let wantOpen = Set(target.map(\.id).filter { searching || !store.folded.contains($0) })
+        let (next, nextOpen) = SidebarStaging.step(shown: shown, opened: opened, target: target, wantOpen: wantOpen)
+        shown = next
+        opened = nextOpen
+        if next != target || nextOpen != wantOpen { DispatchQueue.main.async { catchUp() } }
+    }
+
     private func openSearch() {
         searching = true
         searchFocused = true
@@ -319,6 +344,8 @@ private struct Sidebar: View {
 private struct CommitteeGroup: View {
     @Bindable var store: CoreStore
     let group: SessionGroup
+    /// Shown open (the sidebar staggers opening; see `Sidebar.catchUp`).
+    let open: Bool
     /// While searching every group is open.
     let searching: Bool
 
@@ -368,8 +395,10 @@ private struct CommitteeGroup: View {
 
     private var expanded: Binding<Bool> {
         Binding(
-            get: { searching || !store.folded.contains(group.id) },
+            get: { open },
+            // The person's choice; the sidebar opens it in its own update.
             set: { open in
+                guard !searching, store.folded.contains(group.id) == open else { return }
                 if open { store.folded.remove(group.id) } else { store.folded.insert(group.id) }
             }
         )
@@ -947,5 +976,39 @@ struct ThreadStateMark: View {
 
     static func label(_ state: String, waiting: Bool) -> String {
         waiting ? L("thread.state_waiting") : L("thread.state_\(state)")
+    }
+}
+
+/// How the sidebar's committees catch up with the store's: new committees,
+/// content changes, removals and closing at once; of the committees that
+/// gain rows (new sessions, a new committee with sessions, or opening),
+/// one a step. Rows inserted under more than one item of the outline in
+/// one update make AppKit re-enter its row-height bookkeeping ("reentrant
+/// operation in its NSTableView delegate"); one at a time it does not.
+enum SidebarStaging {
+    static func step(
+        shown: [SessionGroup], opened: Set<String>, target: [SessionGroup], wantOpen: Set<String>
+    ) -> (shown: [SessionGroup], opened: Set<String>) {
+        let before = Dictionary(shown.map { ($0.id, Set($0.sessions.map(\.sessionId))) }, uniquingKeysWith: { a, _ in a })
+        var grew = false
+        var next: [SessionGroup] = []
+        var nextOpen = opened.intersection(wantOpen)
+        for group in target {
+            let ids = Set(group.sessions.map(\.sessionId))
+            let isOpen = wantOpen.contains(group.id)
+            let opens = isOpen && !opened.contains(group.id)
+            // Rows inserted: open, with sessions it did not show before
+            // (opening an empty one inserts nothing).
+            let gains = isOpen && !ids.isEmpty && (opens || before[group.id].map { !ids.isSubset(of: $0) } ?? true)
+            if gains && grew {
+                // Its turn comes next: as it was for now (not yet, when new).
+                if let old = shown.first(where: { $0.id == group.id }) { next.append(old) }
+                continue
+            }
+            if gains { grew = true }
+            next.append(group)
+            if isOpen { nextOpen.insert(group.id) }
+        }
+        return (next, nextOpen)
     }
 }
