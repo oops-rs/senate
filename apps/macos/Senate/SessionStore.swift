@@ -96,7 +96,10 @@ extension CoreStore {
     /// Read and follow the open session's conversation; let go of one no
     /// longer open. Called whenever the place changes.
     func syncTimeline() {
-        let open: String? = if case let .session(id) = place { id } else { nil }
+        let open: String? = switch place {
+        case let .session(id), let .past(id): id
+        default: nil
+        }
         guard timeline?.sessionId != open else { return }
         if let old = timeline {
             core?.stopTimeline(sessionId: old.sessionId)
@@ -106,7 +109,7 @@ extension CoreStore {
             return
         }
         let t = SessionTimeline(sessionId: open)
-        t.committee = session(open)?.committee
+        t.committee = session(open)?.committee ?? history.row(open)?.committee
         timeline = t
         Task { await readTail(t) }
     }
@@ -236,4 +239,36 @@ extension SessionLine: @retroactive Identifiable {
 
 extension TimelineEntry: @retroactive Identifiable {
     public var id: UInt64 { seq }
+}
+
+extension CoreStore {
+    /// Open the session a search found, scrolled to the item that matched
+    /// with the words highlighted: a live session on its page, an ended one
+    /// in History. Older pages are read until the item is there.
+    func open(_ hit: SearchHit, query: String) {
+        reveal = Reveal(sessionId: hit.sessionId, seq: hit.seq, query: query)
+        place = hit.live && session(hit.sessionId) != nil ? .session(hit.sessionId) : .past(hit.sessionId)
+        Task { await revealWhenRead() }
+    }
+
+    private func revealWhenRead() async {
+        guard let r = reveal else { return }
+        defer { if reveal == r { reveal = nil } }
+        if history.row(r.sessionId) == nil, case .past = place { await history.find(r.sessionId) }
+        // Its timeline, read.
+        for _ in 0..<200 {
+            if let t = timeline, t.sessionId == r.sessionId, !t.loading { break }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        guard let t = timeline, t.sessionId == r.sessionId, reveal == r else { return }
+        // Older pages until the item is among them.
+        var pages = 0
+        while let first = t.firstSeq, first > r.seq, t.hasOlder, pages < 200, reveal == r {
+            await loadOlder()
+            pages += 1
+        }
+        // Reasoning has no row of its own: the row it folded into.
+        let row = t.rows.first { $0.id >= r.seq }?.id ?? t.rows.last?.id ?? r.seq
+        await page.reveal(row: row, query: r.query)
+    }
 }

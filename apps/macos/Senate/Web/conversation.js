@@ -605,6 +605,34 @@
     post({ action: "found", count: found.length, index: found.length ? foundAt + 1 : 0 });
   }
 
+  // A search's match: the row it is in, its blocks rendered (a tool call
+  // opened), scrolled to the first match in that row, highlighted.
+  async function reveal(id, q) {
+    const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+    const rowEl = () => main().querySelector('[data-id="' + id + '"]');
+    for (let i = 0; i < 100 && !rowEl(); i++) await pause(20);
+    let r = rowEl();
+    if (!r) return;
+    if (r.classList.contains("k-tool") && !open.has(Number(id))) { toggle(Number(id)); r = rowEl(); }
+    for (const d of docs.values()) {
+      if (!r.contains(d.el)) continue;
+      for (const [bid, b] of d.blocks) if (b.state === "placeholder" || b.state === "stale") queue(d.key, bid, true);
+    }
+    for (let i = 0; i < 100 && (flushing || outstanding > 0); i++) await pause(20);
+    r = rowEl();
+    found = q ? search(q) : [];
+    foundQuery = q;
+    foundAt = found.findIndex((range) => r.contains(range.startContainer));
+    if (foundAt >= 0) {
+      paint();
+      const box = found[foundAt].getBoundingClientRect();
+      scroller().scrollTop += box.top - window.innerHeight / 3;
+    } else {
+      scroller().scrollTop += r.getBoundingClientRect().top - window.innerHeight / 3;
+    }
+    stuck = measureBottom();
+  }
+
   // MARK: The debug overlay (⌥D): what each update cost.
 
   const debug = (() => {
@@ -660,6 +688,7 @@
     apply,
     blocks,
     find,
+    reveal,
     selectAll,
     renderAll,
     plainText: () => { const f = document.createDocumentFragment(); f.appendChild(main().cloneNode(true)); return copied(f); },

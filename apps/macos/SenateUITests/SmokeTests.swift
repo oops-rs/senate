@@ -201,3 +201,34 @@ extension SmokeTests {
     }
 }
 
+
+extension SmokeTests {
+    /// History: its ended sessions, a search that opens a match in its
+    /// session, and a restore that brings that session back to life.
+    func testHistorySearchAndRestore() throws {
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 10))
+        let row = window.outlines.descendants(matching: .any).matching(NSPredicate(format: "label == 'History'")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "the History row")
+        row.click()
+        let past = window.descendants(matching: .any).matching(NSPredicate(format: "label == 'scout-1'")).firstMatch
+        XCTAssertTrue(past.waitForExistence(timeout: 10), "an ended session listed")
+
+        let field = window.textFields["Search past and live conversations"].firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.click()
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("ledger migration", forType: .string)
+        field.typeKey("v", modifierFlags: .command)
+        let hit = window.descendants(matching: .any).matching(NSPredicate(format: "label == 'mender-1'")).firstMatch
+        XCTAssertTrue(hit.waitForExistence(timeout: 10), "a match in an ended session")
+        hit.click()
+        let opened = XCTNSPredicateExpectation(predicate: NSPredicate(format: "title == 'mender-1'"), object: window)
+        XCTAssertEqual(XCTWaiter.wait(for: [opened], timeout: 10), .completed, "its session opened")
+
+        let restore = window.buttons["Restore"].firstMatch
+        XCTAssertTrue(restore.waitForExistence(timeout: 5), "Restore")
+        restore.click()
+        XCTAssertTrue(window.buttons["Attach"].firstMatch.waitForExistence(timeout: 15), "live again")
+    }
+}

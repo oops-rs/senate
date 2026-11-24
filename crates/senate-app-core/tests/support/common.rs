@@ -1376,7 +1376,9 @@ fn timeline_page(
                 .iter()
                 .find(|r| r.session_id == session_id)
                 .map(|r| r.runtime)
-        });
+        })
+        // An ended session's conversation reads as a live one's does.
+        .or_else(|| w.history.iter().find(|r| r.session_id == session_id).map(|r| r.runtime));
     let Some(runtime) = runtime else {
         return Reply::err(IpcError::bad_request(format!("no session {session_id}")));
     };

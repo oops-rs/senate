@@ -448,6 +448,13 @@ final class ConversationPage: NSObject {
         web.window?.makeFirstResponder(web)
     }
 
+    /// Show a search's match: the row it is in, its blocks rendered (a
+    /// tool call opened), scrolled to the first match in it, highlighted.
+    func reveal(row: UInt64, query: String) async {
+        for _ in 0..<200 where !ready { try? await Task.sleep(for: .milliseconds(25)) }
+        _ = await evaluate("await window.senate.reveal(id, q); return true", ["id": row, "q": query])
+    }
+
     func selectAll() {
         call("window.senate.selectAll()", [:])
     }

@@ -99,6 +99,39 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
         try record("reply \(committee) \(thread) \(body)")
     }
     func restoreSession(label: String) async throws { try record("restore \(label)") }
+    /// History: 12 ended sessions, three committees, newest first.
+    var historyRows: [HistoryRow] = (0..<12).map(FakeCore.pastRow)
+    static func pastRow(_ i: Int) -> HistoryRow {
+        let started = Date(timeIntervalSinceNow: Double(-3600 * (i + 2)))
+        let last = Date(timeIntervalSinceNow: Double(-3600 * (i + 1)))
+        let runtime = i % 2 == 0 ? "claude" : "codex"
+        return HistoryRow(sessionId: "past-\(i)", name: "past-\(i)", label: "c\(i % 3)::past-\(i)",
+                          committee: "c\(i % 3)", runtime: runtime, model: nil, dir: "/tmp", branch: nil,
+                          title: "Title \(i)", startedAt: started, lastActivity: last,
+                          readable: i != 5, restorable: i != 5, itemCount: 4)
+    }
+    /// Searches answered as partial (indexing) this many times first.
+    var indexingFor = 0
+    func history(committee: String?, before: String?, limit: UInt32) async throws -> HistoryPage {
+        try record("history \(committee ?? "-") \(before ?? "-")")
+        let rows = historyRows.filter { committee == nil || $0.committee == committee }
+        let from = Int(before ?? "0") ?? 0
+        let page = Array(rows.dropFirst(from).prefix(Int(limit)))
+        return HistoryPage(rows: page, next: from + page.count < rows.count ? String(from + page.count) : nil)
+    }
+    func searchSessions(query: String, committee: String?, cursor: String?, limit: UInt32) async throws -> SearchPage {
+        try record("search \(query)")
+        let hits = [SearchHit(sessionId: "past-3", seq: 2, kind: .reply, snippet: "about \(query) here", at: Date(), live: false)]
+        if indexingFor > 0 {
+            indexingFor -= 1
+            return SearchPage(hits: [], next: nil, indexing: true, indexed: 3, total: 10)
+        }
+        return SearchPage(hits: hits, next: nil, indexing: false, indexed: nil, total: nil)
+    }
+    func forgetSession(sessionId: String) async throws {
+        try record("forget \(sessionId)")
+        historyRows.removeAll { $0.sessionId == sessionId }
+    }
     var secretary = SecretaryView(committee: "office", alias: "secretary", senator: nil, state: .notRecorded, action: nil)
     func defaultSecretary() async throws -> SecretaryView { secretary }
     func ensureSecretary() async throws -> SecretaryView {

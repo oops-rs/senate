@@ -87,6 +87,22 @@ enum Snapshot {
             // The pinned Secretary row's page (the fake's FAKE_SECRETARY).
             store.place = .secretary
             await shot("secretary")
+                        // History: the list, a search, and a match opened in its session.
+            store.place = .section(.history)
+            await shot("history")
+            store.history.query = "ledger migration"
+            try? await Task.sleep(for: .seconds(1.5))
+            await shot("history-search")
+            if let hit = store.history.hits.first(where: { !$0.live }) {
+                store.open(hit, query: store.history.query)
+                try? await Task.sleep(for: .seconds(2))
+                await shot("history-match")
+            }
+            store.history.query = ""
+            if let row = store.history.rows.first(where: { $0.readable && $0.restorable }) {
+                store.place = .past(row.sessionId)
+                await shot("history-session")
+            }
                         // Every session state in the sidebar at once, stopped included.
             store.showInactive = true
             await shot("sidebar-states")
