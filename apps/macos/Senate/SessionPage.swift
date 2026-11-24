@@ -139,16 +139,16 @@ struct SessionActions: View {
     ) -> some View {
         switch style {
         case .toolbar:
-            // A familiar action is its icon; the page's one decisive
-            // action (Restore) keeps its words.
-            Button { Task { await run() } } label: {
-                if decisive {
-                    Label(title, systemImage: symbol).labelStyle(.titleAndIcon)
-                } else {
-                    Label(title, systemImage: symbol)
-                }
+            // Every action is its icon, its title in the tooltip; the
+            // page's one decisive action (Restore) is tinted.
+            if decisive {
+                Button { Task { await run() } } label: { Label(title, systemImage: symbol) }
+                    .buttonStyle(.borderedProminent)
+                    .help(title)
+            } else {
+                Button { Task { await run() } } label: { Label(title, systemImage: symbol) }
+                    .help(title)
             }
-                .help(help)
         case .buttons:
             Button(title) { Task { await run() } }
                 .buttonStyle(.pill(danger ? .danger : filled ? .filled : .tonal))

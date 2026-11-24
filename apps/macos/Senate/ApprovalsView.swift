@@ -336,18 +336,18 @@ private struct DeskEntryDetail: View {
         if let detail, outcome == nil, actionError == nil, detail.blocked == nil {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { Task { await submit(nil) } } label: {
-                    Label(L("desk.forward_title"), systemImage: "arrowshape.turn.up.right")
-                        .labelStyle(.titleAndIcon)
+                    // Send, not Share's arrow: it goes on to its addressee.
+                    Label(L("desk.forward_title"), systemImage: "paperplane")
                 }
                 .buttonStyle(.borderedProminent)
                 .accessibilityIdentifier("desk-forward")
-                .help(L("desk.forward"))
+                .help(L("desk.forward_title"))
                 .disabled(busy || !store.state.online)
                 Button { refusing = true } label: {
-                    Label(L("desk.refuse_title"), systemImage: "hand.raised.slash")
-                        .labelStyle(.titleAndIcon)
+                    // A no-entry sign, unlike Take's raised hand.
+                    Label(L("desk.refuse_title"), systemImage: "nosign")
                 }
-                .help(L("desk.refuse"))
+                .help(L("desk.refuse_title"))
                 .disabled(busy || !store.state.online)
             }
         }
