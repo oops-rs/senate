@@ -810,7 +810,7 @@ final class CoreStore {
             var paths: [String] = []
             for file in files {
                 let path = try await core.sessionDrop(sessionId: id, name: file.name, bytes: file.data)
-                if file.thumbnail != nil { await MainActor.run { Thumbnails.remember(path: path, data: file.data) } }
+                if file.thumbnail != nil { Thumbnails.remember(path: path, data: file.data) }
                 paths.append(path)
             }
             body = Attachment.noteBody(text, paths: paths)
