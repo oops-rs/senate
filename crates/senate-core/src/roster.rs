@@ -411,6 +411,18 @@ impl Office {
         self.speaker.senate().is_none().then(|| self.speaker.name())
     }
 
+    /// The senator this Senate keeps the Speaker's desk under: whose
+    /// secretaries work it, and who a matter the desk cannot settle goes
+    /// to. The Speaker when it is a senator here; a person Speaker of the
+    /// Senate above too, by the same handle (a person is recognised by the
+    /// same handle across a tree of Senates, and a child keeps that
+    /// person's desk for itself, in its own roster). `None` for an agent
+    /// of another Senate: its desk is where it is seated.
+    pub fn desk_owner(&self) -> Option<&SenatorName> {
+        (self.speaker.senate().is_none() || self.kind == SenatorKind::Person)
+            .then(|| self.speaker.name())
+    }
+
     /// Whether `senator` works the desk (the Speaker itself when it is an
     /// agent, or one of its secretaries).
     pub fn works_desk(&self, senator: &SenatorName) -> bool {
@@ -684,10 +696,13 @@ impl Roster {
         let kind = if here {
             self.kind_of(&name)
         } else {
-            // A senator of the Senate above: a principal there, the person
-            // whose machine this is.
+            // A senator of the Senate above: the person whose machine this
+            // is, known here by the same handle. One whose handle is no
+            // principal here is not a person of this Senate (an agent above,
+            // which a machine refuses at start when it can tell): its desk is
+            // not kept here ([`Office::desk_owner`]).
             self.principal(name.name())
-                .map_or(SenatorKind::Person, |p| p.kind.into())
+                .map_or(SenatorKind::Agent, |p| p.kind.into())
         };
         let mut desk = Vec::new();
         if here && matches!(kind, SenatorKind::Agent | SenatorKind::BuiltIn) {
@@ -1456,6 +1471,31 @@ mod tests {
         assert!(
             office.desk.is_empty(),
             "no secretary: the desk waits on the Speaker"
+        );
+        // Its desk is kept here, under the person's handle, and the agents
+        // appointed to it work it.
+        assert_eq!(office.desk_owner(), Some(&senator("wendell")));
+        let mut staffed = child.clone();
+        staffed.seat(senator("claude"), &name("wendell")).unwrap();
+        staffed
+            .set_secretaries(senator("wendell"), vec![senator("claude")])
+            .unwrap();
+        let office = staffed.office().unwrap();
+        assert_eq!(office.desk, [senator("claude")]);
+        assert!(staffed.may_act_for_office(&name("wendell"), &senator("claude")));
+        // A senator above that is no person here (an agent of the Senate
+        // above): its desk is not kept here.
+        let above_agent = plain
+            .clone()
+            .with_speaker(id("/acme::senator::claude-up"))
+            .unwrap();
+        let office = above_agent.office().unwrap();
+        assert_eq!(office.kind, SenatorKind::Agent);
+        assert_eq!(office.desk_owner(), None);
+        // A senator of this Senate keeps its desk here, whatever its kind.
+        assert_eq!(
+            agent.office().unwrap().desk_owner(),
+            Some(&senator("claude"))
         );
 
         // A configuration written before Speakers were ids: a bare name.

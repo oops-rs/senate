@@ -6237,6 +6237,30 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     };
                     (reply, false)
                 }
+                // As the person (no session): what an agent must not do in
+                // their name. With a session it is the Speaker's office's,
+                // checked by the front and the server.
+                Ok(
+                    request @ Request::SetChair {
+                        session:
+                            SessionSelector {
+                                session_id: None,
+                                claude_pid: None,
+                            },
+                        ..
+                    },
+                ) => {
+                    match shared
+                        .refuse_agent_caller(
+                            peer,
+                            "Naming a chair as the person is the person's to do: run `senate senator chair` from your own terminal",
+                        )
+                        .await
+                    {
+                        Ok(()) => (shared.dispatch(request).await, false),
+                        Err(refused) => (Reply::err(refused), false),
+                    }
+                }
                 Ok(Request::EnsureSecretary) => {
                     match shared
                         .refuse_agent_caller(

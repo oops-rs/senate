@@ -503,7 +503,7 @@ impl Shared {
             SenatorName::new(self.config.person.clone())
                 .map_err(|e| IpcError::bad_request(e.to_string()))?,
         ];
-        if let Some(speaker) = self.office().and_then(|o| o.speaker_here().cloned())
+        if let Some(speaker) = self.office().and_then(|o| o.desk_owner().cloned())
             && !principals.contains(&speaker)
         {
             principals.push(speaker);

@@ -58,9 +58,9 @@ pub struct Live {
     /// Whether the Codex app-server answered: `None` when there is no
     /// Codex to ask (no `codex` and no `codex.listen`).
     pub codex: Option<Result<(), CodexProbe>>,
-    /// The machine's default secretary; `None` with the daemon down, or
-    /// when the daemon could not say.
-    pub secretary: Option<crate::ipc::DefaultSecretary>,
+    /// The machine's default secretary, or why the daemon could not have
+    /// one here; `None` with the daemon down.
+    pub secretary: Option<Result<crate::ipc::DefaultSecretary, String>>,
 }
 
 /// Why the Codex app-server did not answer.
@@ -160,7 +160,8 @@ pub async fn gather(paths: &Paths) -> Live {
             ASK,
         )
         .await
-        .ok(),
+        .map_err(|e| e.to_string())
+        .into(),
         Err(_) => None,
     };
     let mut live = Live {
@@ -363,8 +364,17 @@ pub fn live(live: &Live, l: Locale) -> Vec<Check> {
     if let Some(codex) = &live.codex {
         checks.push(codex_check(codex, l));
     }
-    if let Some(secretary) = &live.secretary {
-        checks.push(secretary_check(secretary, l));
+    match &live.secretary {
+        Some(Ok(secretary)) => checks.push(secretary_check(secretary, l)),
+        Some(Err(why)) => checks.push(Check::warn(
+            "secretary.default",
+            l.pick(
+                format!("这台机器上不能有默认 secretary：{why}"),
+                format!("no default secretary on this machine: {why}"),
+            ),
+            None::<String>,
+        )),
+        None => {}
     }
     if let Some(parent) = &live.parent {
         checks.push(reach("uplink.parent", parent, l));

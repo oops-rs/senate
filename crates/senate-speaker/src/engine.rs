@@ -3265,7 +3265,7 @@ impl Engine {
     /// this Senate, else the person who runs the agent that is Speaker.
     fn speakers_person(&self) -> Option<SenatorName> {
         let office = self.roster.office()?;
-        let speaker = office.speaker_here()?;
+        let speaker = office.desk_owner()?;
         match office.kind {
             senate_core::SenatorKind::Person => Some(speaker.clone()),
             senate_core::SenatorKind::Agent => self
