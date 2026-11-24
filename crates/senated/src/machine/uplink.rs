@@ -967,6 +967,9 @@ impl Worker {
                 match outcome.and_then(|v| v["decision"].as_str()) {
                     Some("allow" | "allow_for_session") => locale.pick("已授权：", "Approved: "),
                     Some("deny" | "cancel") => locale.pick("已拒绝：", "Denied: "),
+                    _ if outcome.is_some_and(|v| v["dismissed"] == true) => {
+                        locale.pick("提示已消失，未收到答复：", "Prompt went away unanswered: ")
+                    }
                     _ => locale.pick("不再等待：", "No longer waiting: "),
                 }
             };

@@ -73,6 +73,7 @@ impl Server {
             triaged: false,
             built_in: None,
             simulator: None,
+            observe: None,
         }
     }
 }
@@ -94,9 +95,16 @@ pub struct ServerBuilder {
     triaged: bool,
     built_in: Option<SenatorName>,
     simulator: Option<Arc<dyn ChatSimulator>>,
+    observe: Option<Arc<senate_observe::Registry>>,
 }
 
 impl ServerBuilder {
+    /// Mount the machine-owned observer on its embedded loopback listener.
+    pub fn observe(mut self, registry: Arc<senate_observe::Registry>) -> Self {
+        self.observe = Some(registry);
+        self
+    }
+
     /// Serve simulated chat (`senate chat send`, [`senate_core::chat_sim`])
     /// through `simulator`, the mounted chat gateway. Without one, those
     /// requests are answered that this Senate has no chat platform.
@@ -168,6 +176,7 @@ impl ServerBuilder {
             triaged,
             built_in,
             simulator,
+            observe,
         } = self;
         config.validate_intervals()?;
         let auth: Arc<dyn Authenticate> = match auth {
@@ -295,7 +304,7 @@ impl ServerBuilder {
             source,
         })?;
 
-        let app = http::router(AppState {
+        let mut app = http::router(AppState {
             hub: hub.clone(),
             auth,
             epoch: epoch_header,
@@ -303,6 +312,12 @@ impl ServerBuilder {
             triaged,
             simulator,
         });
+        let observe = observe.filter(|registry| embedded && registry.address() == local_addr);
+        let observe_enabled = observe.is_some();
+        if let Some(registry) = &observe {
+            registry.attach_senate(Arc::new(crate::observe::Source::new(&hub, registry)));
+            app = app.merge(senate_observe::router(registry.clone()));
+        }
         let (stop_http, stopped) = oneshot::channel::<()>();
         let http_task = tokio::spawn(async move {
             let shutdown = async move {
@@ -310,9 +325,12 @@ impl ServerBuilder {
                 if stopped.await.is_err() {
                     tracing::debug!("server handle dropped; shutting down HTTP");
                 }
+                if let Some(registry) = observe {
+                    registry.shutdown_observation();
+                }
             };
             if embedded && local_addr.ip().is_loopback() {
-                serve_embedded_http(listener, app, shutdown).await;
+                serve_embedded_http(listener, app, observe_enabled, shutdown).await;
                 Ok(())
             } else {
                 axum::serve(listener, app)
@@ -376,32 +394,81 @@ async fn load_registry(
 // The bridge holds an open SSE stream per seat. Hyper's default limit of
 // 200 streams queues excess seats forever when all the streams are SSE.
 // Change that limit only on the machine-owned loopback listener.
+const EMBEDDED_CONNECTION_LIMIT: usize = 64;
+const FIRST_HTTP_REQUEST: Duration = Duration::from_secs(5);
+
 async fn serve_embedded_http(
     mut listener: TcpListener,
     app: axum::Router,
+    observe_enabled: bool,
     shutdown: impl Future<Output = ()>,
 ) {
-    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
     use hyper_util::server::{conn::auto, graceful::GracefulShutdown};
     use hyper_util::service::TowerToHyperService;
 
+    let connections = Arc::new(tokio::sync::Semaphore::new(EMBEDDED_CONNECTION_LIMIT));
     let mut builder = auto::Builder::new(TokioExecutor::new());
     builder.http2().max_concurrent_streams(8192);
+    if observe_enabled {
+        builder
+            .http1()
+            .timer(TokioTimer::new())
+            .header_read_timeout(FIRST_HTTP_REQUEST);
+        builder
+            .http2()
+            .timer(TokioTimer::new())
+            .keep_alive_interval(Duration::from_secs(15))
+            .keep_alive_timeout(Duration::from_secs(5));
+    }
     let builder = Arc::new(builder);
     let graceful = GracefulShutdown::new();
     tokio::pin!(shutdown);
     loop {
-        let stream = tokio::select! {
+        let (stream, address) = tokio::select! {
             // Axum's listener retries accept errors, including EMFILE/ENFILE.
-            (stream, _) = axum::serve::Listener::accept(&mut listener) => stream,
+            accepted = axum::serve::Listener::accept(&mut listener) => accepted,
             _ = &mut shutdown => break,
         };
+        let permit = if observe_enabled {
+            let Ok(permit) = connections.clone().try_acquire_owned() else {
+                continue;
+            };
+            Some(permit)
+        } else {
+            None
+        };
+        let mut connection_app = app
+            .clone()
+            .layer(axum::Extension(axum::extract::ConnectInfo(address)));
+        let first = Arc::new(tokio::sync::Notify::new());
+        if observe_enabled {
+            let first = first.clone();
+            connection_app = connection_app.layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let first = first.clone();
+                    async move {
+                        first.notify_one();
+                        next.run(request).await
+                    }
+                },
+            ));
+        }
         let builder = builder.clone();
-        let service = TowerToHyperService::new(app.clone());
+        let service = TowerToHyperService::new(connection_app);
         let watcher = graceful.watcher();
         tokio::spawn(async move {
-            let connection = builder.serve_connection(TokioIo::new(stream), service);
-            if let Err(error) = watcher.watch(connection).await {
+            let _permit = permit;
+            let connection = watcher.watch(builder.serve_connection(TokioIo::new(stream), service));
+            tokio::pin!(connection);
+            if observe_enabled {
+                tokio::select! {
+                    _ = &mut connection => return,
+                    _ = tokio::time::sleep(FIRST_HTTP_REQUEST) => return,
+                    _ = first.notified() => {}
+                }
+            }
+            if let Err(error) = connection.await {
                 tracing::trace!(%error, "embedded Senate HTTP connection ended");
             }
         });
@@ -466,5 +533,87 @@ impl Drop for Running {
             // shutdown; stop the tree so open streams end too.
             self.supervisor.stop(Some("server handle dropped".into()));
         }
+    }
+}
+
+#[cfg(test)]
+mod embedded_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    #[tokio::test]
+    async fn an_h2_preface_without_a_request_releases_its_connection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let (stop, stopped) = oneshot::channel();
+        let server = tokio::spawn(serve_embedded_http(
+            listener,
+            axum::Router::new(),
+            true,
+            async move {
+                let _ = stopped.await;
+            },
+        ));
+        let mut client = TcpStream::connect(address).await?;
+        client
+            .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+            .await?;
+        let mut bytes = Vec::new();
+        let result = tokio::time::timeout(
+            FIRST_HTTP_REQUEST + Duration::from_secs(2),
+            client.read_to_end(&mut bytes),
+        )
+        .await?;
+        assert!(
+            result.is_ok()
+                || result.is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset)
+        );
+        let _ = stop.send(());
+        server.await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cap_test {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    #[tokio::test]
+    async fn the_embedded_listener_rejects_connections_past_its_cap()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let (stop, stopped) = oneshot::channel();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(|| async { axum::http::StatusCode::NO_CONTENT }),
+        );
+        let server = tokio::spawn(serve_embedded_http(listener, app, true, async move {
+            let _ = stopped.await;
+        }));
+        let request = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        let mut clients = Vec::new();
+        for _ in 0..EMBEDDED_CONNECTION_LIMIT {
+            let mut client = TcpStream::connect(address).await?;
+            client.write_all(request).await?;
+            let mut prefix = [0; 12];
+            tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut prefix)).await??;
+            assert_eq!(&prefix, b"HTTP/1.1 204");
+            clients.push(client);
+        }
+        let mut extra = TcpStream::connect(address).await?;
+        let result = tokio::time::timeout(Duration::from_secs(2), extra.read(&mut [0; 1])).await?;
+        assert!(
+            matches!(result, Ok(0))
+                || result.is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset)
+        );
+        drop(clients);
+        let _ = stop.send(());
+        server.await?;
+        Ok(())
     }
 }

@@ -1,0 +1,818 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Snapshot",
+  "type": "object",
+  "properties": {
+    "approvals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Approval"
+      }
+    },
+    "as_of": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "committees": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Committee"
+      }
+    },
+    "cursor": {
+      "$ref": "#/$defs/Cursor"
+    },
+    "desk_items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DeskItem"
+      }
+    },
+    "links": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SenateLink"
+      }
+    },
+    "navigation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Navigation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Project"
+      }
+    },
+    "retired": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RetiredSenator"
+      }
+    },
+    "schema_version": {
+      "$ref": "#/$defs/V1"
+    },
+    "senate": {
+      "$ref": "#/$defs/Senate"
+    },
+    "senators": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Senator"
+      }
+    },
+    "threads": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Thread"
+      }
+    },
+    "windows": {
+      "$ref": "#/$defs/Windows"
+    }
+  },
+  "required": [
+    "schema_version",
+    "capabilities",
+    "as_of",
+    "cursor",
+    "senate",
+    "links",
+    "committees",
+    "projects",
+    "senators",
+    "threads",
+    "desk_items",
+    "approvals",
+    "windows"
+  ],
+  "$defs": {
+    "Address": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "senator"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "office"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "external"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "Approval": {
+      "type": "object",
+      "properties": {
+        "asked_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "committee_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "senator_id": {
+          "type": "string"
+        },
+        "tool_kind": {
+          "$ref": "#/$defs/ApprovalTool"
+        }
+      },
+      "required": [
+        "id",
+        "committee_id",
+        "senator_id",
+        "tool_kind",
+        "asked_at"
+      ]
+    },
+    "ApprovalTool": {
+      "type": "string",
+      "enum": [
+        "command",
+        "edit",
+        "other",
+        "unknown"
+      ]
+    },
+    "Awaiting": {
+      "type": "string",
+      "enum": [
+        "pick",
+        "addressed",
+        "away",
+        "child_offline",
+        "unknown"
+      ]
+    },
+    "Card": {
+      "type": "object",
+      "properties": {
+        "revision": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "revision",
+        "updated_at",
+        "value"
+      ]
+    },
+    "Committee": {
+      "type": "object",
+      "properties": {
+        "archived": {
+          "type": "boolean"
+        },
+        "card": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Card"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "chair_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "archived"
+      ]
+    },
+    "Cursor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$"
+    },
+    "DeskItem": {
+      "type": "object",
+      "properties": {
+        "awaiting": {
+          "$ref": "#/$defs/Awaiting"
+        },
+        "committee_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/MessageKind"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "root_seq": {
+          "$ref": "#/$defs/Seq"
+        }
+      },
+      "required": [
+        "committee_id",
+        "root_seq",
+        "kind",
+        "awaiting"
+      ]
+    },
+    "Hosting": {
+      "type": "string",
+      "enum": [
+        "here",
+        "elsewhere",
+        "unknown"
+      ]
+    },
+    "LinkKind": {
+      "type": "string",
+      "enum": [
+        "parent",
+        "child",
+        "paired_machine",
+        "unknown"
+      ]
+    },
+    "LinkState": {
+      "type": "string",
+      "enum": [
+        "up",
+        "down",
+        "unknown"
+      ]
+    },
+    "MessageKind": {
+      "type": "string",
+      "enum": [
+        "question",
+        "request",
+        "answer",
+        "note",
+        "decision",
+        "unknown"
+      ]
+    },
+    "Navigation": {
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "desk": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "history": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inbox": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Person": {
+      "type": "object",
+      "properties": {
+        "card": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Card"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "Project": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "releases": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ProjectRelease"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "ProjectRelease": {
+      "type": "object",
+      "properties": {
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "fixes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "merges": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "tag": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tag",
+        "at",
+        "merges",
+        "fixes"
+      ]
+    },
+    "RetiredSenator": {
+      "type": "object",
+      "properties": {
+        "alias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "card": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Card"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "committee_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_active_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retired_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "runtime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "committee_id",
+        "retired_at"
+      ]
+    },
+    "Senate": {
+      "type": "object",
+      "properties": {
+        "desk_owner": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "desk_workers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "person": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Person"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ]
+    },
+    "SenateLink": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/LinkKind"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/LinkState"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "name",
+        "state"
+      ]
+    },
+    "Senator": {
+      "type": "object",
+      "properties": {
+        "alias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "card": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Card"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "committee_id": {
+          "type": "string"
+        },
+        "hosted": {
+          "$ref": "#/$defs/Hosting"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SenatorKind"
+        },
+        "last_active_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/SenatorState"
+        },
+        "viewer_attached": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "committee_id",
+        "kind",
+        "state",
+        "hosted"
+      ]
+    },
+    "SenatorKind": {
+      "type": "string",
+      "enum": [
+        "person",
+        "agent",
+        "unknown"
+      ]
+    },
+    "SenatorState": {
+      "type": "string",
+      "enum": [
+        "working",
+        "idle",
+        "waiting_on_person",
+        "paused",
+        "stopped",
+        "away",
+        "unknown"
+      ]
+    },
+    "Seq": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "Thread": {
+      "type": "object",
+      "properties": {
+        "addressees": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Address"
+          }
+        },
+        "committee_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/MessageKind"
+        },
+        "link": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "opener": {
+          "$ref": "#/$defs/Address"
+        },
+        "root_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "state": {
+          "$ref": "#/$defs/ThreadState"
+        },
+        "waits_on": {
+          "$ref": "#/$defs/WaitsOn"
+        }
+      },
+      "required": [
+        "committee_id",
+        "root_seq",
+        "kind",
+        "opener",
+        "addressees",
+        "state",
+        "waits_on"
+      ]
+    },
+    "ThreadState": {
+      "type": "string",
+      "enum": [
+        "processing",
+        "active",
+        "suspended",
+        "archived",
+        "unknown"
+      ]
+    },
+    "Truncation": {
+      "type": "object",
+      "properties": {
+        "committee_id": {
+          "type": "string"
+        },
+        "desk_items": {
+          "type": "boolean"
+        },
+        "open_threads": {
+          "type": "boolean"
+        },
+        "settled_threads": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "committee_id",
+        "open_threads",
+        "settled_threads",
+        "desk_items"
+      ]
+    },
+    "V1": {
+      "type": "integer",
+      "const": 1
+    },
+    "WaitsOn": {
+      "type": "string",
+      "enum": [
+        "agents",
+        "person",
+        "none",
+        "unknown"
+      ]
+    },
+    "Windows": {
+      "type": "object",
+      "properties": {
+        "desk_items_per_committee": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "open_threads_per_committee": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "settled_threads_per_committee": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Truncation"
+          }
+        }
+      },
+      "required": [
+        "open_threads_per_committee",
+        "settled_threads_per_committee",
+        "desk_items_per_committee",
+        "truncated"
+      ]
+    }
+  }
+}

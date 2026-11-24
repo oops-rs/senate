@@ -59,3 +59,5 @@ pub use config::{ConfigError, DEFAULT_PRESENCE_GRACE_SECS, ServerConfig, TokenCo
 pub use hub::{BROADCAST_CAPACITY, LiveStream, STREAM_BUFFER, ServerHub};
 pub use office::{DEFAULT_BUILT_IN_NAME, default_built_in_name};
 pub use server::{Running, Server, ServerBuilder, ServerError};
+
+mod observe;

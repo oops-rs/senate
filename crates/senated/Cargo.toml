@@ -16,6 +16,7 @@ path = "src/main.rs"
 testing = []
 
 [dependencies]
+senate-observe.workspace = true
 senate-core = { workspace = true }
 senate-log = { workspace = true }
 senate-server = { workspace = true }
@@ -44,6 +45,8 @@ name = "membership"
 required-features = ["testing"]
 
 [dev-dependencies]
+senate-observe-protocol.workspace = true
+reqwest = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "net", "io-util"] }

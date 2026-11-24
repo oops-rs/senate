@@ -978,12 +978,32 @@ pub enum SessionSearchKind {
     ToolCall,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CardTarget {
+    Own,
+    Committee {
+        committee: Option<CommitteeId>,
+    },
+    Member {
+        senator: senate_core::alias::AliasName,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     #[doc(hidden)]
     RemoteControl {
         command: crate::remote::Control,
+    },
+    ObserveAdmin {
+        command: senate_observe::AdminRequest,
+    },
+    SetCard {
+        session: SessionSelector,
+        target: CardTarget,
+        document: String,
     },
     Ping,
     Status,

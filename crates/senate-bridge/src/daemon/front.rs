@@ -21,6 +21,7 @@ use crate::ipc::{DocketReply, PresidesReply, Presiding, SenateDocket};
 
 pub(crate) struct Front {
     senates: Vec<Arc<Shared>>,
+    pub(super) observe: Option<Arc<senate_observe::Registry>>,
     pub(super) remote: Option<Arc<crate::remote::Service>>,
     relay: Arc<Relay>,
     pub(super) process_checks: tokio::sync::Semaphore,
@@ -38,6 +39,7 @@ impl Front {
         app_clients: Arc<std::sync::atomic::AtomicUsize>,
     ) -> Self {
         Self {
+            observe: None,
             remote: None,
             senates: vec![senate],
             relay,
@@ -96,6 +98,17 @@ impl Front {
 
     pub(crate) async fn dispatch(self: &Arc<Self>, request: Request) -> Reply {
         match request {
+            Request::ObserveAdmin { command } => self.on_observe_admin(command).await,
+            Request::SetCard {
+                session,
+                target,
+                document,
+            } if session == SessionSelector::default() => {
+                wrap(self.set_observer_card(None, target, &document).await)
+            }
+            Request::SetCard { .. } => Reply::err(IpcError::bad_request(
+                "Card writes require a verified session",
+            )),
             Request::RemoteControl { .. } => Reply::err(IpcError::bad_request(
                 "remote control requires the local person socket",
             )),
@@ -251,8 +264,121 @@ impl Front {
         }
     }
 
-    /// Register the session, and tell a presiding session what it presides
-    /// over.
+    async fn on_observe_admin(&self, command: senate_observe::AdminRequest) -> Reply {
+        use senate_observe::AdminRequest;
+
+        let Some(registry) = self.observe.clone() else {
+            return Reply::err(IpcError::bad_request(
+                "Observe requires a machine-hosted Senate",
+            ));
+        };
+        let bad = |error: senate_observe::GrantError| IpcError::bad_request(error.to_string());
+        let command = match command {
+            AdminRequest::Preview { committee, seq } => {
+                return wrap(registry.preview(&committee, seq).await.map_err(bad));
+            }
+            AdminRequest::Publish {
+                committee,
+                seq,
+                reviewed,
+            } => {
+                return wrap(
+                    registry
+                        .publish_line(&committee, seq, reviewed)
+                        .await
+                        .map_err(bad),
+                );
+            }
+            AdminRequest::Withdraw { committee, seq } => {
+                return wrap(registry.withdraw_line(&committee, seq).await.map_err(bad));
+            }
+            AdminRequest::HistorySession { id } => {
+                return wrap((|| -> Result<Option<String>, IpcError> {
+                    let grants = registry.selector_grants(&id);
+                    let sessions = self.primary().store.all_sessions().map_err(internal)?;
+                    Ok(sessions
+                        .into_iter()
+                        .filter(|session| !session.is_live())
+                        .find_map(|session| {
+                            let committee = session.committee()?;
+                            grants
+                                .iter()
+                                .any(|grant| {
+                                    grant
+                                        .committees
+                                        .as_ref()
+                                        .is_none_or(|allow| allow.contains(committee))
+                                        && registry
+                                            .history_id(grant, &session.session_id)
+                                            .is_ok_and(|candidate| candidate == id)
+                                })
+                                .then_some(session.session_id)
+                        }))
+                })());
+            }
+            AdminRequest::SeatIdentity { id, committee } => {
+                let grants = registry.selector_grants(&id);
+                let me = match self.primary().api.me().await {
+                    Ok(me) => me,
+                    Err(error) => return Reply::err(server_error(error)),
+                };
+                let seat = me.agents.into_iter().find(|agent| {
+                    agent.is_session_name()
+                        && grants.iter().any(|grant| {
+                            grant
+                                .committees
+                                .as_ref()
+                                .is_none_or(|allow| allow.contains(&committee))
+                                && registry
+                                    .seat_id(grant, agent.as_str())
+                                    .is_ok_and(|candidate| candidate == id)
+                        })
+                });
+                return Reply::ok(&seat);
+            }
+            other => other,
+        };
+        let readable = if matches!(&command, AdminRequest::Create { .. }) {
+            match self.primary().api.me().await {
+                Ok(me) => me.committees.into_iter().chain(me.archived).collect(),
+                Err(error) => return Reply::err(server_error(error)),
+            }
+        } else {
+            BTreeSet::new()
+        };
+        match tokio::task::spawn_blocking(move || match command {
+            AdminRequest::Create { grant } => wrap(
+                registry
+                    .create(grant, readable)
+                    .map_err(|error| IpcError::bad_request(error.to_string())),
+            ),
+            AdminRequest::List => Reply::ok(&registry.list()),
+            AdminRequest::SeatIdentity { .. }
+            | AdminRequest::HistorySession { .. }
+            | AdminRequest::Preview { .. }
+            | AdminRequest::Publish { .. }
+            | AdminRequest::Withdraw { .. } => {
+                Reply::err(IpcError::internal("unexpected Observe preview request"))
+            }
+            AdminRequest::Identity => wrap(
+                registry
+                    .installation()
+                    .map_err(|error| IpcError::bad_request(error.to_string())),
+            ),
+            AdminRequest::Revoke { id } => wrap(
+                registry
+                    .revoke(&id)
+                    .map_err(|error| IpcError::bad_request(error.to_string())),
+            ),
+        })
+        .await
+        {
+            Ok(reply) => reply,
+            Err(error) => Reply::err(IpcError::internal(error)),
+        }
+    }
+
+    /// Register the session, and tell a presiding session what it presides over.
     async fn on_hook(&self, report: HookReport, native: bool) -> Result<HookReply, IpcError> {
         let codex = report.runtime == Runtime::Codex;
         let target = self.primary().clone();

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResetFrame",
+  "type": "object",
+  "properties": {
+    "at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "data": {
+      "$ref": "#/$defs/ResetData"
+    },
+    "kind": {
+      "$ref": "#/$defs/ResetKind"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/V1"
+    }
+  },
+  "required": [
+    "schema_version",
+    "at",
+    "kind",
+    "data"
+  ],
+  "$defs": {
+    "ResetData": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/ResetReason"
+        }
+      },
+      "required": [
+        "reason"
+      ]
+    },
+    "ResetKind": {
+      "type": "string",
+      "enum": [
+        "stream.reset"
+      ]
+    },
+    "ResetReason": {
+      "type": "string",
+      "enum": [
+        "overrun",
+        "source_reset",
+        "policy_changed",
+        "unknown"
+      ]
+    },
+    "V1": {
+      "type": "integer",
+      "const": 1
+    }
+  }
+}

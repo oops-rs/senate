@@ -289,8 +289,20 @@ impl Machine {
             });
         bridge.validate().map_err(MachineError::Invalid)?;
         let pauser = Pauser::default();
+        // A separate grant store belongs to the carrier Senate. A broken
+        // observer store must not prevent deliberation on an existing Senate.
+        let observe = plans.first().and_then(|plan| {
+            match senate_observe::Registry::open(&plan.dir, plan.listen) {
+                Ok(registry) => Some(registry),
+                Err(error) => {
+                    tracing::warn!(%error, "the machine observation service is unavailable");
+                    None
+                }
+            }
+        });
         let side = Arc::new(DeveloperMachine {
             in_process: !plans.is_empty(),
+            observe: observe.clone(),
             pauser: pauser.clone(),
             options: DaemonOptions {
                 paths: paths.clone(),
@@ -345,6 +357,9 @@ impl Machine {
             }
             if carries {
                 assembly = assembly.component_arc(side.clone());
+                if let Some(registry) = &observe {
+                    assembly = assembly.observe(registry.clone());
+                }
             }
             let daemon = assembly
                 .start_with_listener(Some(p.listener))
@@ -790,6 +805,7 @@ pub fn nested_notice(agent: &str, dir: &Path, locale: Locale) -> String {
 /// assembly's supervision.
 struct DeveloperMachine {
     in_process: bool,
+    observe: Option<Arc<senate_observe::Registry>>,
     options: DaemonOptions,
     pauser: Pauser,
 }
@@ -803,7 +819,7 @@ impl Component for DeveloperMachine {
     async fn run(&self, ctx: ComponentContext) -> anyhow::Result<()> {
         let options = self.options.clone();
         let handle = if self.in_process {
-            daemon::start_in_process(options).await?
+            daemon::start_in_process(options, self.observe.clone()).await?
         } else {
             daemon::start(options).await?
         };
@@ -832,6 +848,258 @@ mod tests {
 
     fn quiet() -> Timing {
         Timing::default()
+    }
+
+    async fn first_observed_event(
+        stream: &mut reqwest::Response,
+        seq: senate_core::Seq,
+        want_line: bool,
+    ) -> anyhow::Result<senate_observe_protocol::EventFrame> {
+        use senate_observe_protocol::{Event, EventFrame};
+
+        let mut buffer = Vec::new();
+        while let Some(bytes) = stream.chunk().await? {
+            buffer.extend_from_slice(&bytes);
+            assert!(buffer.len() <= 128 * 1024);
+            while let Some(end) = buffer.windows(2).position(|bytes| bytes == b"\n\n") {
+                let raw: Vec<_> = buffer.drain(..end + 2).collect();
+                let frame = std::str::from_utf8(&raw)?;
+                assert!(!frame.contains("body-canary") && !frame.contains("hidden-canary"));
+                if !want_line {
+                    assert!(!frame.contains("first-line-canary"));
+                }
+                let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data: ")) else {
+                    continue;
+                };
+                let event: EventFrame = serde_json::from_str(data)?;
+                if matches!(&event.event, Event::MessagePosted(message) if message.seq.0.get() == seq.0)
+                {
+                    return Ok(event);
+                }
+            }
+        }
+        anyhow::bail!("observation stream closed before the committed event")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observer_credentials_are_only_accepted_on_the_machine_observe_routes()
+    -> anyhow::Result<()> {
+        use senate_bridge::ipc::{IpcClient, Request};
+        use senate_observe::{AdminRequest, CreateGrant, IssuedGrant, LinePolicy, Preview, Scope};
+        use senate_observe_protocol::{Event, Snapshot};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir()?;
+        let paths = Paths::new(dir.path().join("senate"));
+        let config = toml::from_str("person = \"alice\"\n")?;
+        let hosted = toml::from_str("[local]\nname = \"observe-test\"\n")?;
+        let machine = Machine::start_with(paths.clone(), config, hosted, quiet()).await?;
+        let top = machine
+            .senate()
+            .ok_or_else(|| anyhow::anyhow!("missing hosted Senate"))?;
+        let wait = Duration::from_secs(5);
+        // Machine::start_with returns after the HTTP listeners are bound.
+        // The bridge is a supervised component and opens its socket later.
+        let socket = paths.socket();
+        let mut ipc = tokio::time::timeout(wait, async {
+            loop {
+                match IpcClient::connect(&socket, wait).await {
+                    Err(senate_bridge::ipc::ClientError::Connect { source, .. })
+                        if matches!(
+                            source.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                        ) =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    other => break other,
+                }
+            }
+        })
+        .await??;
+        let visible: senate_core::CommitteeId = "visible".parse()?;
+        let hidden: senate_core::CommitteeId = "hidden".parse()?;
+        let local = senate_core::Address::senior(&Name::new("alice")?);
+        let append = |committee, body| {
+            senate_core::NewEvent::new(committee, senate_core::Kind::Note, local.clone(), body)
+        };
+        for committee in [&visible, &hidden] {
+            top.daemon
+                .hub
+                .append(append(committee.clone(), "bootstrap-canary"))
+                .await?;
+        }
+        let issue = |name: &str| Request::ObserveAdmin {
+            command: AdminRequest::Create {
+                grant: CreateGrant {
+                    name: name.into(),
+                    committees: Some(vec![visible.clone()]),
+                    all_committees: false,
+                    scope: Scope::Metadata,
+                    origins: vec![],
+                    topology: false,
+                    expires_in_days: None,
+                    lines: None,
+                },
+            },
+        };
+        ipc.call::<()>(
+            &Request::SetCard {
+                session: Default::default(),
+                target: senate_bridge::ipc::CardTarget::Own,
+                document: r#"{"fixture":{"palette":2}}"#.into(),
+            },
+            wait,
+        )
+        .await?;
+        let mut profile = issue("topology metadata");
+        if let Request::ObserveAdmin {
+            command: AdminRequest::Create { grant },
+        } = &mut profile
+        {
+            grant.scope = Scope::Lines;
+            grant.lines = Some(LinePolicy::Auto);
+            grant.topology = true;
+        }
+        assert!(ipc.call::<IssuedGrant>(&profile, wait).await.is_err());
+        if let Request::ObserveAdmin {
+            command: AdminRequest::Create { grant },
+        } = &mut profile
+        {
+            grant.lines = Some(LinePolicy::Published);
+        }
+        assert!(ipc.call::<IssuedGrant>(&profile, wait).await.is_err());
+        if let Request::ObserveAdmin {
+            command: AdminRequest::Create { grant },
+        } = &mut profile
+        {
+            grant.scope = Scope::Metadata;
+            grant.lines = None;
+        }
+        let profile: IssuedGrant = ipc.call(&profile, wait).await?;
+        let issued: IssuedGrant = ipc.call(&issue("first scene"), wait).await?;
+        let other: IssuedGrant = ipc.call(&issue("second scene"), wait).await?;
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(wait)
+            .build()?;
+        let state = format!("{}/v1/observe/state", top.url);
+        assert_eq!(issued.url, top.url);
+        let snapshot = http
+            .get(&state)
+            .bearer_auth(&issued.token)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        assert!(!snapshot.contains("bootstrap-canary"));
+        assert!(!snapshot.contains("hidden"));
+        let snapshot: Snapshot = serde_json::from_str(&snapshot)?;
+        assert_eq!(snapshot.committees.len(), 1);
+        assert_eq!(snapshot.committees[0].id, "visible");
+        let events = format!("{}/v1/observe/events", top.url);
+        let profile_state: Snapshot = http
+            .get(&state)
+            .bearer_auth(&profile.token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert!(
+            !profile_state
+                .capabilities
+                .iter()
+                .any(|capability| capability == "published_lines")
+        );
+        assert_eq!(
+            profile_state
+                .senate
+                .person
+                .and_then(|person| person.card)
+                .and_then(|card| card.value.get("fixture").cloned()),
+            Some(serde_json::json!({"palette":2}))
+        );
+        let resume = |bearer: &str| {
+            http.get(&events)
+                .bearer_auth(bearer)
+                .header("last-event-id", snapshot.cursor.as_str())
+        };
+        assert_eq!(resume(&other.token).send().await?.status(), 409);
+
+        let committed = top
+            .daemon
+            .hub
+            .append(append(visible.clone(), "first-line-canary\nbody-canary"))
+            .await?;
+        top.daemon
+            .hub
+            .append(append(hidden, "hidden-canary"))
+            .await?;
+        let mut stream = resume(&issued.token).send().await?.error_for_status()?;
+        let candidate: Preview = ipc
+            .call(
+                &Request::ObserveAdmin {
+                    command: AdminRequest::Preview {
+                        committee: visible.clone(),
+                        seq: committed.event.seq,
+                    },
+                },
+                wait,
+            )
+            .await?;
+        assert_eq!(candidate.line, "first-line-canary");
+        let expected = committed.event.seq;
+        let pong = first_observed_event(&mut stream, expected, false).await?;
+        let Event::MessagePosted(message) = pong.event else {
+            anyhow::bail!("expected message event");
+        };
+        assert_eq!(message.line, None);
+        assert_eq!(pong.committee_id.as_deref(), Some("visible"));
+        assert_eq!(
+            http.get(&state)
+                .bearer_auth(&top.token)
+                .send()
+                .await?
+                .status(),
+            401
+        );
+        assert_eq!(
+            http.get(format!("{}/v1/me", top.url))
+                .bearer_auth(&issued.token)
+                .send()
+                .await?
+                .status(),
+            401
+        );
+        ipc.call::<()>(
+            &Request::ObserveAdmin {
+                command: AdminRequest::Revoke {
+                    id: issued.grant.id,
+                },
+            },
+            wait,
+        )
+        .await?;
+        assert_eq!(
+            http.get(&state)
+                .bearer_auth(&issued.token)
+                .send()
+                .await?
+                .status(),
+            401
+        );
+        assert!(
+            tokio::time::timeout(wait, async {
+                while stream.chunk().await?.is_some() {}
+                Ok::<(), reqwest::Error>(())
+            })
+            .await?
+            .is_ok()
+        );
+        machine.shutdown().await;
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

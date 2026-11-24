@@ -200,10 +200,17 @@ impl Emulation {
         let mut at = 0;
         while let Some(start) = data[at..].iter().position(|b| *b == 0x1b).map(|i| at + i) {
             display.extend_from_slice(&data[at..start]);
+            let was_alternate = self.keyboard.in_alternate();
             match self.sequence(&data[start..], &mut answers, &mut after) {
                 Some((len, handled)) => {
                     at = start + len;
                     if !handled {
+                        // Terminals can keep keyboard flags in their inactive
+                        // alternate screen. Clear the viewer's copy before
+                        // leaving it. The virtual screen keeps its own flags.
+                        if was_alternate && !self.keyboard.in_alternate() {
+                            super::keyboard::set_flags(&mut display, 0);
+                        }
                         display.extend_from_slice(&data[start..at]);
                     }
                     display.append(&mut after);
@@ -495,9 +502,23 @@ mod tests {
         assert_eq!(tui.route(b"\x1b[>7u").1, b"\x1b[=7u");
         assert_eq!(tui.route(b"\x1b[?u").0, b"\x1b[?7u");
         assert_eq!(tui.keyboard_preamble(), b"\x1b[=7u\x1b[>4;2m");
-        assert_eq!(tui.route(b"\x1b[?1049l").1, b"\x1b[?1049l\x1b[=5u");
+        assert_eq!(tui.route(b"\x1b[?1049l").1, b"\x1b[=0u\x1b[?1049l\x1b[=5u");
+        assert_eq!(tui.route(b"\x1b[?1049h").1, b"\x1b[?1049h\x1b[=7u");
+        assert_eq!(tui.route(b"\x1b[?1049l").1, b"\x1b[=0u\x1b[?1049l\x1b[=5u");
         assert_eq!(tui.route(b"\x1b[<u").1, b"\x1b[=0u");
         assert_eq!(tui.route(b"\x1b[?u").0, b"\x1b[?0u");
+    }
+
+    #[test]
+    fn a_default_keyboard_overrides_modes_left_by_the_viewer() {
+        let mut tui = Emulation::new(Scheme::Light);
+        for _ in 0..2 {
+            tui.attach();
+            assert_eq!(tui.keyboard_preamble(), b"\x1b[=0u\x1b[>4;0m");
+            assert_eq!(tui.route(b"\x1b[?1049h").1, b"\x1b[?1049h\x1b[=0u");
+            assert_eq!(tui.route(b"\x1b[?1049l").1, b"\x1b[=0u\x1b[?1049l\x1b[=0u");
+            tui.detach();
+        }
     }
 
     #[test]

@@ -52,6 +52,12 @@ pub(super) fn answers_a_prompt(request: &Request) -> bool {
 /// for any other request.
 pub(super) fn person_only(request: &Request) -> Option<&'static str> {
     Some(match request {
+        Request::SetCard { session, .. } if session == &SessionSelector::default() => {
+            "Manage your profile card from your own terminal or the Senate app"
+        }
+        Request::ObserveAdmin { .. } => {
+            "Manage Observe grants from your own terminal or the Senate app"
+        }
         Request::RebindHost { .. } => "Run `senate session rebind` from your own terminal",
         Request::Timeline { .. }
         | Request::SessionHistory { .. }
@@ -129,6 +135,43 @@ impl Front {
                 at: Instant::now(),
             },
         );
+        Ok(())
+    }
+
+    pub(super) async fn verify_card_session(
+        &self,
+        peer: Option<u32>,
+        session: &Session,
+    ) -> Result<(), IpcError> {
+        let no_identity =
+            || IpcError::bad_request("Cannot verify the calling process owns the card's session");
+        let peer = peer.ok_or_else(no_identity)?;
+        let _permit = self
+            .process_checks
+            .acquire()
+            .await
+            .map_err(|_| no_identity())?;
+        let shared = self.primary();
+        if !session.is_live() {
+            return Err(no_identity());
+        }
+        let mut allowed = Vec::new();
+        allowed.extend(session.claude_pid);
+        if let Some(host_id) = shared
+            .store
+            .session_host(&session.session_id)
+            .map_err(internal)?
+        {
+            let paths = Paths::new(&shared.home);
+            allowed.extend(host::child_pid(&paths, &host_id));
+        }
+        if allowed.is_empty() {
+            return Err(no_identity());
+        }
+        let chain = ancestry(peer, process).await.map_err(|_| no_identity())?;
+        if !chain.into_iter().any(|(pid, _)| allowed.contains(&pid)) {
+            return Err(no_identity());
+        }
         Ok(())
     }
 

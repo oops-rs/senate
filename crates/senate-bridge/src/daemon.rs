@@ -177,6 +177,8 @@ mod host_policy;
 mod hosted_approvals;
 mod hosts;
 mod model_catalog;
+mod observe;
+mod observe_tools;
 mod pause;
 #[path = "daemon/stats.rs"]
 mod personal_stats;
@@ -509,6 +511,7 @@ pub(crate) struct Shared {
     speaker: Mutex<Option<SpeakerSeat>>,
     pub(crate) store: Store,
     pub(crate) api: ApiClient,
+    observe: Option<Arc<senate_observe::Registry>>,
     /// The Senate above, when the machine's Senate is a child of it
     /// ([`BridgeConfig::uplink`]): asked second when a qualified name is
     /// resolved, written to with the person's token there.
@@ -713,14 +716,17 @@ pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
 
 pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_bridge(options, host_binary, false).await
+    start_bridge(options, host_binary, false, None).await
 }
 
 /// Start the bridge against the loopback Senate listener owned by this
 /// process. That listener supports HTTP/2 without negotiation.
-pub async fn start_in_process(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
+pub async fn start_in_process(
+    options: DaemonOptions,
+    observe: Option<Arc<senate_observe::Registry>>,
+) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_bridge(options, host_binary, true).await
+    start_bridge(options, host_binary, true, observe).await
 }
 
 /// Start the bridge with a companion Senate CLI at an explicit path.
@@ -728,13 +734,14 @@ pub async fn start_with_host_binary(
     options: DaemonOptions,
     host_binary: PathBuf,
 ) -> anyhow::Result<DaemonHandle> {
-    start_bridge(options, host_binary, false).await
+    start_bridge(options, host_binary, false, None).await
 }
 
 async fn start_bridge(
     options: DaemonOptions,
     host_binary: PathBuf,
     in_process: bool,
+    observe: Option<Arc<senate_observe::Registry>>,
 ) -> anyhow::Result<DaemonHandle> {
     let DaemonOptions {
         paths,
@@ -805,6 +812,7 @@ async fn start_bridge(
     );
     tracing::debug!(transport = %codex.transport, "Codex sessions are pushed through the app-server");
     let common = Common {
+        observe: observe.clone(),
         host_binary,
         timing,
         codex,
@@ -825,6 +833,13 @@ async fn start_bridge(
         }
     };
     let mut front = Front::new(shared.clone(), relay, watch, app_clients);
+    if let Some(registry) = &observe {
+        registry.attach_machine(Arc::new(observe::Source {
+            shared: Arc::downgrade(&shared),
+            tools: observe_tools::Tools::default(),
+        }));
+    }
+    front.observe = observe;
     front.remote = remote.as_ref().map(|(service, _)| service.clone());
     let front = Arc::new(front);
 
@@ -893,6 +908,7 @@ async fn start_bridge(
 /// What every Senate's half of the daemon shares: one Codex transport and
 /// approvals relay, one watch channel, one companion configuration.
 struct Common {
+    observe: Option<Arc<senate_observe::Registry>>,
     host_binary: PathBuf,
     timing: Timing,
     codex: CodexAppServerAdapter,
@@ -971,6 +987,7 @@ impl Shared {
             config,
             store,
             api,
+            observe: common.observe.clone(),
             uplink,
             timing: common.timing,
             streams: Mutex::new(BTreeMap::new()),
@@ -2547,12 +2564,44 @@ impl Shared {
             match route {
                 Route::To(s) => plan.entry(s.session_id.clone()).or_default().push(item),
                 Route::Wait { until, to } => {
+                    self.observe_route(
+                        &item.event.committee,
+                        item.event.seq,
+                        Some(&item.agent),
+                        senate_observe_protocol::RoutePhase::Queued,
+                        Some(senate_observe_protocol::HoldReason::AwaitingTriage),
+                    );
                     due = Some(due.map_or(until, |d| d.min(until)));
                     if let Some(s) = to {
                         waiting.insert(s.session_id.clone());
                     }
                 }
-                Route::Nowhere => {}
+                Route::Nowhere => {
+                    if self
+                        .observe
+                        .as_ref()
+                        .is_some_and(|registry| registry.is_watched())
+                    {
+                        let paused = self
+                            .store
+                            .paused(&item.agent)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|pause| pause.committee == item.event.committee);
+                        let reason = if paused {
+                            senate_observe_protocol::HoldReason::Paused
+                        } else {
+                            senate_observe_protocol::HoldReason::Offline
+                        };
+                        self.observe_route(
+                            &item.event.committee,
+                            item.event.seq,
+                            Some(&item.agent),
+                            senate_observe_protocol::RoutePhase::Queued,
+                            Some(reason),
+                        );
+                    }
+                }
             }
         }
         if let Some(item) = for_companion {
@@ -2580,6 +2629,21 @@ impl Shared {
                 match self.hold(&sid, held, now) {
                     Hold::Ready => {}
                     Hold::Until(at) => {
+                        if self
+                            .observe
+                            .as_ref()
+                            .is_some_and(|registry| registry.is_watched())
+                        {
+                            for item in &items {
+                                self.observe_route(
+                                    &item.event.committee,
+                                    item.event.seq,
+                                    Some(&item.agent),
+                                    senate_observe_protocol::RoutePhase::Queued,
+                                    Some(senate_observe_protocol::HoldReason::Busy),
+                                );
+                            }
+                        }
                         due = Some(due.map_or(at, |d| d.min(at)));
                         continue;
                     }
@@ -2643,6 +2707,11 @@ impl Shared {
             // flight first, a hook running just then would find nothing and
             // the backlog would wait for the hook after it.
             let held = self.store.hold_pending_for_hooks(&keys, sid)?;
+            self.observe_routes(
+                &held,
+                senate_observe_protocol::RoutePhase::HeldForHook,
+                Some(senate_observe_protocol::HoldReason::NoPush),
+            );
             if !held.is_empty() {
                 tracing::info!(
                     session = sid,
@@ -2653,6 +2722,24 @@ impl Shared {
             return Ok(false);
         }
         let claimed = self.store.claim_inflight_with_held(&keys, sid)?;
+        if self
+            .observe
+            .as_ref()
+            .is_some_and(|registry| registry.is_watched())
+        {
+            for item in items
+                .iter()
+                .filter(|item| item.status == ItemStatus::Queued && claimed.contains(&item.key()))
+            {
+                self.observe_route(
+                    &item.event.committee,
+                    item.event.seq,
+                    Some(agent),
+                    senate_observe_protocol::RoutePhase::Released,
+                    None,
+                );
+            }
+        }
         let resent: Vec<ItemKey> = items
             .iter()
             .filter(|i| i.redelivered && claimed.contains(&i.key()))
@@ -2711,7 +2798,12 @@ impl Shared {
                     Some(name) => name,
                     None => "push",
                 };
-                self.store.finish_inflight(&now, sid, via)?;
+                let delivered = self.store.finish_inflight(&now, sid, via)?;
+                self.observe_routes(
+                    &delivered,
+                    senate_observe_protocol::RoutePhase::Delivered,
+                    None,
+                );
                 self.own_roots(agent, &batch.events, sid)?;
                 self.store.set_socket_ok(sid, true)?;
                 self.store.consume_dropped(agent, &committee, dropped)?;
@@ -2730,7 +2822,12 @@ impl Shared {
                 self.store.consume_dropped(agent, &committee, dropped)?;
             }
             DeliveryOutcome::Queued => {
-                self.store.hold_for_hooks(&now, sid)?;
+                let held = self.store.hold_for_hooks(&now, sid)?;
+                self.observe_routes(
+                    &held,
+                    senate_observe_protocol::RoutePhase::HeldForHook,
+                    Some(senate_observe_protocol::HoldReason::Retry),
+                );
                 if let Some(delay) = self.note_refused(sid) {
                     // Recompute the delivery loop's timer with the retry
                     // just scheduled, even with no future hook or event.
@@ -2813,7 +2910,7 @@ impl Shared {
         id: &str,
         decision: crate::approvals::Decision,
     ) -> Result<crate::approvals::Approval, IpcError> {
-        self.relay
+        let approval = self.relay
             .answer_with(id, decision, None, |approval| {
                 if self
                     .store
@@ -2831,7 +2928,21 @@ impl Shared {
                 Ok(())
             })
             .await
-            .map_err(IpcError::bad_request)
+            .map_err(IpcError::bad_request)?;
+        if self
+            .observe
+            .as_ref()
+            .is_some_and(|registry| registry.is_watched())
+            && let Ok(Some(session)) = self.store.session(&approval.session_id)
+        {
+            self.observe_approval_decided(
+                &approval.id,
+                &session,
+                observe::approval_tool(approval.kind),
+                decision,
+            );
+        }
+        Ok(approval)
     }
 
     fn publish(&self, event: WatchEvent) {
@@ -3220,7 +3331,9 @@ impl Shared {
                 wrap(result.map_err(server_error))
             }
             Request::Status => wrap(self.on_status()),
-            Request::RemoteControl { .. } => Reply::err(IpcError::bad_request("local device management only")),
+            Request::RemoteControl { .. } | Request::ObserveAdmin { .. } | Request::SetCard { .. } => {
+                Reply::err(IpcError::bad_request("local person socket only"))
+            }
             Request::Profiles => wrap(Ok(&self.config.profiles)),
             Request::Sessions => wrap(self.on_sessions(false).await),
             Request::CommitteeThreads { committee, include_archived, limit, cursor } =>
@@ -4406,6 +4519,11 @@ impl Shared {
             .included;
             let keys = keys_of(agent, &events[..fit]);
             let claimed = self.store.claim_for_hook(&keys, sid).map_err(internal)?;
+            self.observe_routes(
+                &claimed,
+                senate_observe_protocol::RoutePhase::Delivered,
+                None,
+            );
             let mine: Vec<Event> = events
                 .iter()
                 .filter(|e| claimed.contains(&(agent.clone(), e.committee.clone(), e.seq)))
@@ -4863,6 +4981,22 @@ impl Shared {
                 return Err(server_error(e));
             }
         };
+        if !r.duplicate {
+            self.observe_route(
+                &r.event.committee,
+                r.event.seq,
+                None,
+                senate_observe_protocol::RoutePhase::Received,
+                None,
+            );
+            self.observe_route(
+                &r.event.committee,
+                r.event.seq,
+                None,
+                senate_observe_protocol::RoutePhase::Filed,
+                None,
+            );
+        }
         Ok(Posted {
             committee: r.event.committee,
             seq: r.event.seq,
@@ -6332,9 +6466,11 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
     use tokio::io::AsyncWriteExt;
 
     // Who is calling, from the socket: for the requests only a person makes.
-    let peer = stream
-        .peer_cred()
-        .ok()
+    let credentials = stream.peer_cred().ok();
+    let same_owner = credentials
+        .as_ref()
+        .is_some_and(|cred| cred.uid() == rustix::process::geteuid().as_raw());
+    let peer = credentials
         .and_then(|cred| cred.pid())
         .and_then(|pid| u32::try_from(pid).ok());
     let (read, mut write) = stream.into_split();
@@ -6480,6 +6616,34 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     // The person's own acts (see approval_guard::person_only):
                     // refused from inside a coding session's process tree. One
                     // boxed arm keeps this connection's future small.
+                    Ok(Request::ObserveAdmin { .. } | Request::SetCard { .. }) if !same_owner => (
+                        Reply::err(IpcError::bad_request(
+                            "Observe grants require the daemon's local user",
+                        )),
+                        false,
+                    ),
+                    Ok(Request::SetCard {
+                        session,
+                        target,
+                        document,
+                    }) if session != SessionSelector::default() => {
+                        let _binding = shared.primary().session_bindings.read().await;
+                        let reply = match shared.primary().resolve(&session) {
+                            Ok(session) => match shared.verify_card_session(peer, &session).await {
+                                Ok(()) => wrap(
+                                    Box::pin(shared.set_observer_card(
+                                        Some(session),
+                                        target,
+                                        &document,
+                                    ))
+                                    .await,
+                                ),
+                                Err(error) => Reply::err(error),
+                            },
+                            Err(error) => Reply::err(error),
+                        };
+                        (reply, false)
+                    }
                     Ok(request) if let Some(guidance) = approval_guard::person_only(&request) => (
                         Box::pin(shared.guarded_dispatch(peer, guidance, request)).await,
                         false,

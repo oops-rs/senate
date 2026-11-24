@@ -113,6 +113,7 @@ pub struct Assembly {
     model_check: Option<ModelCheck>,
     /// No built-in session, whatever the configuration says.
     without_session: bool,
+    observe: Option<Arc<senate_observe::Registry>>,
 }
 
 impl Assembly {
@@ -132,6 +133,7 @@ impl Assembly {
             secretary: None,
             model_check: None,
             without_session: false,
+            observe: None,
         }
     }
 
@@ -244,6 +246,11 @@ impl Assembly {
         self
     }
 
+    pub(crate) fn observe(mut self, registry: Arc<senate_observe::Registry>) -> Self {
+        self.observe = Some(registry);
+        self
+    }
+
     /// Open the log, start the server, then the built-in session (when it
     /// runs: see the module docs) and every component.
     pub async fn start(self) -> Result<Senated, AssemblyError> {
@@ -269,6 +276,7 @@ impl Assembly {
             secretary,
             model_check,
             without_session,
+            observe,
         } = self;
         let remote = crate::gateway_ipc::RemoteGateway::from_config(&config)
             .map_err(AssemblyError::GatewayConfig)?;
@@ -353,6 +361,9 @@ impl Assembly {
         if let Some(simulator) = simulator.filter(|_| session.is_some()) {
             // Simulated chat is answered by the Speaker: none, no chat.
             server = server.chat_simulator(simulator);
+        }
+        if let Some(registry) = observe {
+            server = server.observe(registry);
         }
         let running = match listener {
             Some(listener) => server.start_with_listener(listener).await?,

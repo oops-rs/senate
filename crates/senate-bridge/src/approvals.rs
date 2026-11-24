@@ -43,7 +43,7 @@ use tokio::task::JoinHandle;
 use crate::delivery::codex::ws::{Incoming, WsWriter};
 use crate::delivery::codex::{AppServer, CodexError, Transport};
 use crate::host_approval::{
-    CodexApprovalSignal, CodexPrompt, PromptDecision, observed_at, tool_label,
+    CodexApprovalOutcome, CodexApprovalSignal, CodexPrompt, PromptDecision, observed_at, tool_label,
 };
 use crate::ipc::WatchEvent;
 
@@ -276,13 +276,13 @@ impl Relay {
         &self,
         session_id: &str,
         request_id: Option<String>,
-        answer: Option<PromptDecision>,
+        outcome: CodexApprovalOutcome,
     ) {
         if let Some(observer) = &self.hosted {
             let _ = observer.send(CodexApprovalSignal::Resolved {
                 session_id: session_id.to_owned(),
                 request_id,
-                answer,
+                outcome,
                 at: observed_at(),
             });
         }
@@ -328,6 +328,22 @@ impl Relay {
         for (_, task) in lock(&self.subscribers).drain() {
             task.abort();
         }
+    }
+
+    /// The only runtime fields required by the public approval projection.
+    pub(crate) fn observe_inputs(&self) -> Vec<(String, String, ApprovalKind, DateTime<Utc>)> {
+        lock(&self.pending)
+            .values()
+            .map(|pending| {
+                let approval = &pending.approval;
+                (
+                    approval.id.clone(),
+                    approval.session_id.clone(),
+                    approval.kind,
+                    approval.received_at,
+                )
+            })
+            .collect()
     }
 
     /// Pending approvals, oldest first.
@@ -383,7 +399,7 @@ impl Relay {
                     self.resolved_for_host(
                         &pending.approval.session_id,
                         Some(id.to_owned()),
-                        Some(PromptDecision { decision, actor }),
+                        CodexApprovalOutcome::Answered(PromptDecision { decision, actor }),
                     );
                 }
                 self.publish(WatchEvent::ApprovalResolved {
@@ -456,7 +472,7 @@ impl Relay {
             .await
             .map_err(|_| CodexError::Timeout)??;
         if sub.approvals_clear {
-            self.resolved_for_host(thread, None, None);
+            self.resolved_for_host(thread, None, CodexApprovalOutcome::Dismissed);
         }
         tracing::debug!(thread, "listening for Codex approvals");
         let writer = Arc::new(tokio::sync::Mutex::new(sub.writer));
@@ -477,6 +493,34 @@ impl Relay {
             return;
         };
         let method = msg.get("method").and_then(Value::as_str);
+        if method == Some("thread/status/changed")
+            && msg.pointer("/params/threadId").and_then(Value::as_str) == Some(thread)
+            && msg.pointer("/params/status/type").and_then(Value::as_str) == Some("idle")
+        {
+            // Idle is positive evidence that the native approval no longer
+            // waits. A broken connection alone does not tell us that.
+            let mut pending = lock(&self.pending);
+            pending.retain(|id, request| {
+                if request.approval.session_id != thread {
+                    return true;
+                }
+                if request.hosted.is_some() {
+                    self.resolved_for_host(
+                        thread,
+                        Some(id.clone()),
+                        CodexApprovalOutcome::Dismissed,
+                    );
+                }
+                self.publish(WatchEvent::ApprovalResolved {
+                    id: id.clone(),
+                    session_id: thread.to_owned(),
+                    by: ResolvedBy::Gone,
+                    decision: None,
+                });
+                false
+            });
+            return;
+        }
         if method == Some(RESOLVED) {
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
             let of = params
@@ -490,7 +534,11 @@ impl Relay {
             if let Some(p) = lock(&self.pending).remove(&id) {
                 tracing::info!(id, "a Codex approval was answered elsewhere");
                 if p.hosted.is_some() {
-                    self.resolved_for_host(of, Some(id.clone()), None);
+                    self.resolved_for_host(
+                        of,
+                        Some(id.clone()),
+                        CodexApprovalOutcome::ResolvedElsewhere,
+                    );
                 }
                 self.publish(WatchEvent::ApprovalResolved {
                     id,

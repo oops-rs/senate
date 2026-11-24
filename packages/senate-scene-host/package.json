@@ -1,0 +1,9 @@
+{
+  "name": "@senate/scene-host",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": { ".": { "types": "./src/index.d.ts", "default": "./src/index.js" } },
+  "files": ["src"],
+  "dependencies": { "@senate/observe": "1.0.0" },
+  "scripts": { "test": "node --test" }
+}

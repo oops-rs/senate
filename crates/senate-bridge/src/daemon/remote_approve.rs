@@ -82,6 +82,12 @@ impl Shared {
                     .answer_with(&approval.id, decision, Some(auth.actor()), |_| Ok(()))
                     .await
                     .map_err(IpcError::bad_request)?;
+                self.observe_approval_decided(
+                    &answered.id,
+                    &session,
+                    super::observe::approval_tool(answered.kind),
+                    decision,
+                );
                 Some(answered.summary)
             }
             Runtime::Claude => {
@@ -103,12 +109,15 @@ impl Shared {
                     .ok_or_else(|| self.nothing_pending(&host_id, &session))?;
                 let paths = Paths::new(&self.home);
                 let attach = format!("senate attach {}", session.agent);
+                let check_started = crate::host_approval::observed_at();
                 match host::control::answer(&paths, &host_id, choice).await? {
                     Answer::Answered => {}
                     Answer::NoDialog => {
+                        self.dismiss_claude(&host_id, &session.session_id, check_started)
+                            .map_err(internal)?;
                         return Err(IpcError::bad_request(self.locale.pick(
-                            format!("{who} 请求过工具授权，但它的终端现在没有显示 Claude Code 的权限对话，未输入任何内容。请运行 `{attach}` 查看。"),
-                            format!("{who} asked for a permission, but its terminal does not show Claude Code's permission dialog now, so nothing was typed. Run `{attach}` to see it."),
+                            format!("{who} 的终端已无 Claude Code 权限对话。已将该请求标记为未答复关闭，未输入任何内容。"),
+                            format!("{who}'s terminal shows no Claude Code permission dialog. The pending request was dismissed unanswered and nothing was typed."),
                         )));
                     }
                     Answer::NoOption => {
@@ -127,6 +136,12 @@ impl Shared {
                 }
                 self.settle_claude_answer(&host_id, &candidate, decision, auth.actor())
                     .map_err(internal)?;
+                self.observe_approval_decided(
+                    &super::observe::claude_id(&host_id, &candidate),
+                    &session,
+                    super::observe::claude_tool(&candidate.tool),
+                    decision,
+                );
                 Some(candidate.tool)
             }
             Runtime::Agy | Runtime::Acp => {

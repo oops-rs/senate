@@ -8,6 +8,8 @@ repository.workspace = true
 description = "The Senate server: supervision tree over the log, HTTP/SSE API for bridges, authentication and roster seams, and the Hub for in-process components."
 
 [dependencies]
+senate-observe.workspace = true
+senate-observe-protocol.workspace = true
 senate-core = { workspace = true }
 senate-log = { workspace = true }
 anyhow = { workspace = true }
