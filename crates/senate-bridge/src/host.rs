@@ -1323,10 +1323,33 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
             }
         }
     };
-    let result = tokio::select! {
-        biased;
-        result = from_terminal => result,
-        result = to_terminal => result,
+    let result = {
+        let mut from_terminal = std::pin::pin!(from_terminal);
+        tokio::select! {
+            biased;
+            result = from_terminal.as_mut() => result,
+            result = to_terminal => {
+                let result: anyhow::Result<()> = result;
+                // A viewer can close just after writing its last KEYS.
+                // The failed redraw can wake before the queued input does.
+                // Finish reading complete frames before recording detach.
+                let disconnected = result.as_ref().err().is_some_and(|error| {
+                    error.downcast_ref::<io::Error>().is_some_and(|error| {
+                        matches!(
+                            error.kind(),
+                            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                        )
+                    })
+                });
+                if disconnected {
+                    tokio::time::timeout(Duration::from_secs(1), from_terminal)
+                        .await
+                        .unwrap_or(result)
+                } else {
+                    result
+                }
+            }
+        }
     };
     if let Some(at) = classify.finish() {
         Viewer::lock(viewer).input(at);
@@ -1352,6 +1375,9 @@ async fn forward_keys(
     classify: &mut input::Input,
     keys: &[u8],
 ) -> anyhow::Result<()> {
+    // Use the same order as a nudge: the PTY write lock comes before
+    // observing the draft. Both state and bytes then have one order.
+    let mut write = tty.write.lock().await;
     // Timestamp before forwarding: these keys can cause the next prompt,
     // whose episode they must not clear.
     let at = observed_at();
@@ -1364,7 +1390,6 @@ async fn forward_keys(
         // Terminal reports are escape sequences, which the draft passes over.
         viewer.draft.observe(keys);
     }
-    let mut write = tty.write.lock().await;
     if let Some(scheme) = classify.take_viewer_scheme() {
         tty.emulation().viewer_scheme(scheme);
     }
@@ -1562,6 +1587,39 @@ mod tests {
         };
         let (result, ()) = tokio::join!(relay(host, &tty, &activity), check);
         result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn losing_viewer_output_does_not_drop_an_in_flight_key_frame() -> anyhow::Result<()> {
+        let (pty, _pts) = pty_process::open()?;
+        let (_, write) = pty.into_split();
+        let tty = Tty::new(write, Scheme::Light, 3, 40);
+        tty.output(b"ready").await;
+        let viewer = Mutex::new(Viewer {
+            path: PathBuf::new(),
+            activity: ViewerActivity::default(),
+            dirty: false,
+            draft: input::Draft::default(),
+        });
+        let (host, mut client) = UnixStream::pair()?;
+        let mut relay = std::pin::pin!(relay(host, &tty, &viewer));
+        tokio::select! {
+            () = async {
+                begin_viewer(&mut client, 3, 40).await;
+                viewer_output(&mut client, b"ready").await;
+            } => {}
+            result = relay.as_mut() => panic!("attachment closed during setup: {result:?}"),
+        }
+        // Let the relay wait on the body, then queue the last input and
+        // close the viewer before the reactor polls the pending read.
+        client.write_all(&[KEYS, 0, 5]).await?;
+        assert!(futures::poll!(relay.as_mut()).is_pending());
+        assert_eq!(client.try_write(b"draft")?, 5);
+        drop(client);
+        tty.output(b"redraw").await;
+        relay.await?;
+        assert!(Viewer::lock(&viewer).draft.pending());
+        Ok(())
     }
 
     #[tokio::test]
