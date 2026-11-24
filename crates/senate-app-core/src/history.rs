@@ -65,6 +65,12 @@ pub struct SearchHit {
 pub struct SearchPage {
     pub hits: Vec<SearchHit>,
     pub next: Option<String>,
+    /// The daemon is still indexing: these hits are partial (and `next`
+    /// is none); ask the same query again, from the first page.
+    pub indexing: bool,
+    /// Sessions indexed so far, of how many, while indexing.
+    pub indexed: Option<u64>,
+    pub total: Option<u64>,
 }
 
 impl From<SessionHistoryRow> for HistoryRow {

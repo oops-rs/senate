@@ -583,6 +583,9 @@ impl AppCore {
         Ok(crate::history::SearchPage {
             hits: reply.hits.into_iter().map(Into::into).collect(),
             next: reply.next_cursor,
+            indexing: reply.indexing,
+            indexed: reply.progress.map(|p| p.indexed as u64),
+            total: reply.progress.map(|p| p.total as u64),
         })
     }
 

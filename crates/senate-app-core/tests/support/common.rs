@@ -847,7 +847,12 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             let limit = limit.unwrap_or(30).max(1);
             let page: Vec<_> = hits.iter().skip(from).take(limit).cloned().collect();
             let next = (from + page.len() < hits.len()).then(|| (from + page.len()).to_string());
-            Reply::ok(&senate_bridge::ipc::SessionSearchReply { hits: page, next_cursor: next })
+            Reply::ok(&senate_bridge::ipc::SessionSearchReply {
+                hits: page,
+                next_cursor: next,
+                indexing: false,
+                progress: None,
+            })
         }
         Request::SessionForget { session_id } => {
             match w.history.iter().position(|r| r.session_id == session_id) {
@@ -2542,7 +2547,7 @@ fn search_sessions(
                 seq: it.seq,
                 kind,
                 snippet,
-                ts: Some(it.at),
+                ts: it.ts,
                 live,
             });
         }
@@ -2613,6 +2618,7 @@ pub fn history(w: &mut World, n: usize) {
                 call_id: format!("c-{i}"),
                 name: "Bash".into(),
                 status: S::Completed,
+                output: None,
                 detail: D::Shell {
                     command: command.into(),
                     cwd: None,
@@ -2629,7 +2635,7 @@ pub fn history(w: &mut World, n: usize) {
             }),
         ];
         for (k, it) in items.iter_mut().enumerate() {
-            it.at = at(k as i64 * 4);
+            it.ts = Some(at(k as i64 * 4));
         }
         w.timelines.insert(id, items);
     }
