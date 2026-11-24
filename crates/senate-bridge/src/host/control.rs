@@ -181,12 +181,16 @@ pub(super) async fn next_stop(
 /// left a line unsubmitted, which it never touches. A
 /// watcher records no input, so watching never holds a nudge back.
 async fn nudge_once(stream: &mut UnixStream, viewer: &Mutex<Viewer>, tty: &Tty, quiet: Duration) {
+    // Check the draft in the same order as viewer writes. Keep the lock
+    // through Enter so no viewer input can become part of the nudge.
+    let mut write = tty.write.lock().await;
     let now = observed_at();
     let (input_at, draft) = {
         let viewer = Viewer::lock(viewer);
         (viewer.activity.input_at, viewer.draft.pending())
     };
     if draft {
+        drop(write);
         let _ = stream.write_u8(DRAFT_PENDING).await;
         return;
     }
@@ -200,6 +204,7 @@ async fn nudge_once(stream: &mut UnixStream, viewer: &Mutex<Viewer>, tty: &Tty, 
         None
     };
     if let Some(wait) = wait {
+        drop(write);
         let mut reply = vec![TYPED_RECENTLY];
         reply.extend_from_slice(
             &u64::try_from(wait.as_millis())
@@ -210,15 +215,12 @@ async fn nudge_once(stream: &mut UnixStream, viewer: &Mutex<Viewer>, tty: &Tty, 
         return;
     }
     let typed = async {
-        tty.write
-            .lock()
-            .await
-            .write_all(AGY_NUDGE.as_bytes())
-            .await?;
+        write.write_all(AGY_NUDGE.as_bytes()).await?;
         tokio::time::sleep(NUDGE_ENTER_DELAY).await;
-        tty.write.lock().await.write_all(b"\r").await
+        write.write_all(b"\r").await
     }
     .await;
+    drop(write);
     match typed {
         Ok(()) => {
             let _ = stream.write_u8(NUDGED).await;
@@ -435,5 +437,62 @@ pub(crate) async fn wait_stopped(mut stream: UnixStream) -> Result<bool, IpcErro
             codes::INTERNAL,
             "the terminal host did not confirm shutdown",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read as _;
+
+    use super::*;
+    use crate::host::{ViewerActivity, emulation::Scheme, forward_keys, input};
+
+    #[tokio::test(start_paused = true)]
+    async fn viewer_keys_cannot_join_the_nudge_before_enter() -> anyhow::Result<()> {
+        let (pty, pts) = pty_process::open()?;
+        let mut slave = std::fs::File::from(rustix::io::dup(&pts)?);
+        let mut raw = rustix::termios::tcgetattr(&slave)?;
+        raw.make_raw();
+        rustix::termios::tcsetattr(&slave, rustix::termios::OptionalActions::Now, &raw)?;
+        let flags = rustix::fs::fcntl_getfl(&slave)?;
+        rustix::fs::fcntl_setfl(&slave, flags | rustix::fs::OFlags::NONBLOCK)?;
+        let (_, write) = pty.into_split();
+        let tty = Tty::new(write, Scheme::Light, 24, 80);
+        let viewer = Mutex::new(Viewer {
+            path: PathBuf::new(),
+            activity: ViewerActivity::default(),
+            dirty: false,
+            draft: input::Draft::default(),
+        });
+        let (mut server, mut client) = UnixStream::pair()?;
+        let mut nudge = std::pin::pin!(nudge_once(&mut server, &viewer, &tty, Duration::ZERO));
+        let cursor = Mutex::new(input::CursorQueries::default());
+        let mut classify = input::Input::default();
+        let keys = forward_keys(&tty, &viewer, &cursor, &mut classify, b"draft");
+
+        // Poll until the nudge has written its text and reached its Enter
+        // delay, with the viewer input still ready to arrive before Enter.
+        let mut prefix = [0; AGY_NUDGE.len()];
+        let mut read = 0;
+        while read < prefix.len() {
+            assert!(futures::poll!(nudge.as_mut()).is_pending());
+            match slave.read(&mut prefix[read..]) {
+                Ok(0) => anyhow::bail!("PTY closed before the nudge arrived"),
+                Ok(n) => read += n,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        assert_eq!(prefix, AGY_NUDGE.as_bytes());
+        let ((), keys) = tokio::join!(nudge, keys);
+        keys?;
+        assert_eq!(client.read_u8().await?, NUDGED);
+        let mut tail = [0; 6];
+        slave.read_exact(&mut tail)?;
+        assert_eq!(&tail, b"\rdraft");
+        assert!(Viewer::lock(&viewer).draft.pending());
+        Ok(())
     }
 }
