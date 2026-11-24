@@ -608,7 +608,9 @@ quote no code or secrets); `links` are branch, PR or preview URLs. Omit what did
 Waiting on your user? Use `escalate` instead. An escalation lasts until your user speaks in the \
 thread or takes it: a later `status` (ticking off steps, `active`) updates the card but does not \
 withdraw it. Only when it no longer needs them, pass `withdraw_escalation: true` with the `state` \
-to go back to.";
+to go back to. A thread you asked yourself (you wrote its root) you may only archive: \
+pass `state: archived` and nothing else once the answer settles it, for instance when you \
+accept the work you requested.";
 
 const ESCALATE: &str = "When the scope of a received task is unclear or a committee decision is needed, \
 prefer the chain from member to committee chair to the Speaker's desk. Omit `to` and explain the \

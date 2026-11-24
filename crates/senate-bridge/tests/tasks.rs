@@ -385,3 +385,95 @@ async fn a_question_the_speaker_answered_while_away_is_not_pushed_on_return() {
     assert!(!ctx.contains("用哪个 header？"), "{ctx}");
     h.stop().await;
 }
+
+/// The asker archives a thread it asked once the answer settles it: it
+/// leaves the addressee's inbox (and its person's), and the asker's own
+/// archive, through its session, takes nothing on (no owner).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_askers_archive_closes_the_thread_for_everyone() {
+    use senate_bridge::ipc::{self, InboxReply, Posted, Request, SessionSelector};
+    let mut h = Harness::new().await;
+    let _inbox = joined(&mut h, fast_timing()).await;
+    let inbox = |h: &Harness| {
+        let socket = h.socket();
+        async move {
+            ipc::request::<InboxReply>(
+                &socket,
+                &Request::Inbox {
+                    session: SessionSelector::default(),
+                    committee: Some(committee()),
+                    agent: None,
+                    all: false,
+                },
+                WAIT,
+                WAIT,
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    // bob's copilot asked alice's claude; claude answered; bob's copilot,
+    // the asker, archives it: gone from what waits here.
+    let asked = h
+        .server
+        .append(question(claude("bob"), claude("alice"), "合并了吗？"));
+    let roots = |r: &InboxReply| r.threads.iter().map(|t| t.root).collect::<Vec<_>>();
+    let until = |want: bool| {
+        let h = &h;
+        async move {
+            let deadline = tokio::time::Instant::now() + WAIT;
+            loop {
+                if roots(&inbox(h).await).contains(&asked.seq) == want {
+                    return;
+                }
+                assert!(tokio::time::Instant::now() < deadline, "waited {want}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    until(true).await;
+    h.server.append(
+        NewEvent::new(committee(), Kind::Status, claude("bob"), "")
+            .in_thread(asked.seq)
+            .with_meta(
+                meta::STATUS,
+                StatusPayload::new(StatusState::Archived).value(),
+            ),
+    );
+    until(false).await;
+
+    // alice's claude asked bob's copilot, and archives its own thread
+    // through its session: posted as claude, and claude does not become
+    // the thread's owner.
+    let mine = h
+        .server
+        .append(question(claude("alice"), claude("bob"), "header?"));
+    let posted: Posted = ipc::request(
+        &h.socket(),
+        &Request::Task {
+            session: SessionSelector {
+                session_id: Some("s1".into()),
+                claude_pid: None,
+            },
+            thread: mine.seq,
+            status: StatusPayload::new(StatusState::Archived),
+            id: None,
+            committee: Some(committee()),
+            agent: None,
+            as_person: false,
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    let event = h.server.last_event("refund-v2");
+    assert_eq!(event.seq, posted.seq);
+    assert_eq!(event.from, claude("alice"));
+    let status = StatusPayload::of(&event).unwrap();
+    assert_eq!(status.state, StatusState::Archived);
+    assert_eq!(status.session, None, "the asker names no session");
+    assert_eq!(h.store().owner(&committee(), mine.seq).unwrap(), None);
+    h.stop().await;
+}

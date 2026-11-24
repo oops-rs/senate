@@ -1825,3 +1825,98 @@ async fn an_unknown_name_is_answered_with_the_committees_aliases() {
     }
     server.running.shutdown().await.unwrap();
 }
+
+/// The asker of a task thread may archive it once the answer settles it,
+/// and say nothing else on it; nobody else who is not its agent may; a
+/// guest never changes state.
+#[tokio::test]
+async fn the_asker_archives_its_own_thread_and_nothing_more() {
+    let server = TestServer::start().await;
+    let f = committee();
+    // claude (bob's) asks copilot (alice's).
+    let asker = agent_addr("claude");
+    let agent = agent_addr("copilot");
+    let root: AppendResponse = server
+        .post_event(
+            BOB,
+            &NewEvent::new(f.clone(), Kind::Request, asker.clone(), "合并 feat/x")
+                .to(agent.clone()),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    let root = root.event.seq;
+    let archived = StatusPayload::new(StatusState::Archived);
+    let mut titled = archived.clone();
+    titled.title = Some("done".into());
+    let mut stepped = archived.clone();
+    stepped.steps = Some(Vec::new());
+
+    // Anything but a bare archive from the asker: refused.
+    for payload in [
+        StatusPayload::new(StatusState::Processing),
+        StatusPayload::new(StatusState::Active),
+        titled,
+        stepped,
+    ] {
+        let response = server
+            .post_event(BOB, &status(&f, asker.clone(), root, &payload))
+            .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{payload:?}");
+        assert!(response.text().await.unwrap().contains("may archive it"));
+    }
+    // A third agent, neither asker nor addressee: refused.
+    let third = agent_addr("gemini");
+    let response = server
+        .post_event(CAROL, &status(&f, third, root, &archived))
+        .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("may only report on threads addressed to it, or archive a thread it asked")
+    );
+
+    // The asker archives it: the thread is archived.
+    let mut with_reason = archived.clone();
+    with_reason.reason = Some("accepted".into());
+    let ok = server
+        .post_event(BOB, &status(&f, asker.clone(), root, &with_reason))
+        .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    let page: ThreadsPage = server
+        .request(
+            Method::GET,
+            &format!("{}?state=archived", threads_path(&f)),
+            ALICE,
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(page.threads.iter().any(|t| t.root == root), "{page:?}");
+
+    // A guest's own question: the guest never archives it.
+    let guest = Address::Guest("chat/u_1".parse().unwrap());
+    let asked = server
+        .running
+        .hub
+        .append(NewEvent::new(f.clone(), Kind::Question, guest.clone(), "在吗？").to(agent.clone()))
+        .await
+        .unwrap();
+    assert!(
+        server
+            .running
+            .hub
+            .append(status(&f, guest, asked.event.seq, &archived))
+            .await
+            .is_err(),
+        "a guest may not change state"
+    );
+    server.running.shutdown().await.unwrap();
+}
