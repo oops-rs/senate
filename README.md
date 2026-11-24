@@ -574,6 +574,9 @@ senate spawn claude --secretary --alias desk # add a Speaker’s desk secretary
 senate attach reviewer                 # restore or resume as needed (Ctrl-] detaches)
 senate session list                    # active hosted sessions (a waiting command: its first line)
 senate session list --all               # include stopped and paused sessions
+senate session history --committee project    # past sessions
+senate session history --search "build error"  # search local conversations
+senate session show <session-id>               # read one past conversation
 senate session watch                   # read-only grid of terminals without an interactive viewer
 senate session watch --all             # include attached, paused and stopped sessions
 senate session approve reviewer        # answer its permission prompt (--always, --deny)
@@ -771,6 +774,18 @@ with no real message to join it by (the server writes `chat_gateway.json`
 in its `data_dir` on every attach and detach and whenever that changes).
 
 ---
+
+Past sessions remain registered after their terminal stops. The History
+commands use local person-only IPC. Search builds a private, rebuildable
+SQLite index in `$SENATE_HOME/history` in the background, newest sessions
+first, and refreshes changed transcripts incrementally. While it builds,
+search replies include partial hits and progress. Prompts, replies, tool commands and paths
+are searchable, with a short prefix of tool output. The runtime transcript
+remains the source of truth. Forgetting a History entry removes its session
+record and index entries while leaving the runtime transcript in place.
+History shows the last recorded activity time. To rebuild the derived index,
+remove `history/session-search.sqlite` and its SQLite sidecars while the
+daemon is stopped, then start it again.
 
 ## Remote machines
 

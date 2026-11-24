@@ -95,7 +95,7 @@ impl From<rusqlite::Error> for Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct FileStamp {
     id: (u64, u64),
     modified: Option<SystemTime>,
@@ -122,7 +122,7 @@ impl FileStamp {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Stamp {
     main: FileStamp,
     wal: Option<FileStamp>,
@@ -409,13 +409,14 @@ fn collect(
     Ok((items, false))
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Anchor {
     idx: i64,
     kind: i64,
     ts: Option<DateTime<Utc>>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct Watch {
     path: PathBuf,
     id: (u64, u64),
@@ -482,6 +483,13 @@ impl Watch {
             output.extend(self.queued.pop_front());
         }
         Ok(output)
+    }
+
+    pub(super) fn index_batch(&mut self, path: &Path) -> Result<(Vec<TimelineItem>, bool)> {
+        let prior = self.high;
+        let items = self.updates(path)?;
+        let more = !self.queued.is_empty() || (self.stamp.is_none() && self.high > prior);
+        Ok((items, more))
     }
 
     fn read_changes(&mut self, stamp: Stamp) -> Result<()> {

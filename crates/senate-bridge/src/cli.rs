@@ -9,6 +9,8 @@
 mod cli_chat;
 #[path = "cli_help.rs"]
 mod cli_help;
+#[path = "cli_history.rs"]
+mod cli_history;
 #[path = "cli_legacy.rs"]
 mod cli_legacy;
 #[path = "cli_secretary.rs"]
@@ -722,6 +724,21 @@ enum DebugCmd {
 
 #[derive(Subcommand)]
 enum SessionCmd {
+    /// List past sessions or search their conversations.
+    History {
+        /// Restrict history to this committee.
+        #[arg(long, add = ArgValueCandidates::new(completion::committees))]
+        committee: Option<CommitteeId>,
+        /// Search conversation text, commands and paths.
+        #[arg(long)]
+        search: Option<String>,
+    },
+    /// Read a past conversation.
+    Show {
+        /// A session ID, senator name or committee-qualified alias.
+        #[arg(add = ArgValueCandidates::new(completion::history))]
+        session: String,
+    },
     /// List this machine's hosted sessions.
     ///
     /// Each session's name (`committee::alias`, else its senator),
@@ -3583,6 +3600,8 @@ const REPLACE_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
     match command {
+        SessionCmd::History { committee, search } => cli_history::history(committee, search),
+        SessionCmd::Show { session } => cli_history::show(&session),
         SessionCmd::List {
             all,
             machine,

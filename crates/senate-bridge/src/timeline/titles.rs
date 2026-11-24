@@ -56,7 +56,7 @@ impl TitleCache {
             .collect()
     }
 
-    fn metadata(&mut self, path: &Path, runtime: Runtime) -> Option<SidebarTranscript> {
+    pub(crate) fn metadata(&mut self, path: &Path, runtime: Runtime) -> Option<SidebarTranscript> {
         if runtime == Runtime::Agy {
             let metadata = self.agy.entry(path.to_owned()).or_default().read(path);
             if metadata.is_none() {
