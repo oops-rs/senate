@@ -65,6 +65,9 @@ final class TownScene: SKScene {
     private var checks = 0
     /// Where the signs, flags and visitors are: bubbles keep off them.
     private var signRects: [String: [CGRect]] = [:]
+    /// Each house's name sign, its room and its width: slid along the roof
+    /// edge when a bubble has to cover where it is.
+    private var signNodes: [String: (node: SKNode, room: CGRect, width: CGFloat)] = [:]
     private var signs: [CGRect] { signRects.values.flatMap { $0 } }
 
     override init(size: CGSize) {
@@ -322,6 +325,7 @@ final class TownScene: SKScene {
         checks = 0
         world.removeAllChildren()
         signRects = [:]
+        signNodes = [:]
         houses = [:]
         people = [:]
         threads = [:]
@@ -419,6 +423,7 @@ final class TownScene: SKScene {
         node.position = CGPoint(x: room.midX, y: room.maxY + 14)
         node.zPosition = 30
         signRects[text, default: []].append(CGRect(x: room.midX - width / 2, y: room.maxY + 4, width: width, height: 20))
+        signNodes[text] = (node, room, width)
         return node
     }
 
@@ -894,6 +899,7 @@ final class TownScene: SKScene {
         let rect = CGRect(x: placed.centre.x - size.width / 2, y: placed.centre.y - size.height / 2,
                           width: size.width, height: size.height)
         bubbles.append((node, rect))
+        slideSigns(clearOf: rect, for: hold + 0.45)
         node.run(.sequence([
             .group([.fadeIn(withDuration: 0.18), .scale(to: scale, duration: 0.18)]),
             .wait(forDuration: hold),
@@ -926,6 +932,26 @@ final class TownScene: SKScene {
 
     /// A speech bubble with the first words of what was said; a click on it
     /// opens the thread.
+    /// Move any name sign under `bubble` along its roof edge to the end that
+    /// is clear of it, and back when the bubble is gone.
+    private func slideSigns(clearOf bubble: CGRect, for duration: TimeInterval) {
+        for (_, sign) in signNodes {
+            let (node, room, width) = sign
+            func rect(_ x: CGFloat) -> CGRect { CGRect(x: x - width / 2, y: room.maxY + 4, width: width, height: 20) }
+            guard rect(room.midX).intersects(bubble) else { continue }
+            let ends = [room.minX + width / 2 + 10, room.maxX - width / 2 - 10]
+            guard let x = ends.first(where: { !rect($0).intersects(bubble) }) else { continue }
+            let duration = max(duration, 0.4)
+            let slide = reduceMotion ? 0 : 0.2
+            node.removeAction(forKey: "slide")
+            node.run(.sequence([
+                .moveTo(x: x, duration: slide),
+                .wait(forDuration: duration),
+                .moveTo(x: room.midX, duration: slide),
+            ]), withKey: "slide")
+        }
+    }
+
     /// `tip` is where the tail points, from the bubble's centre, unscaled.
     private func bubble(_ words: SKLabelNode, size: CGSize, tip: CGPoint, thread: TownThreadRef) -> SKNode {
         let node = SKNode()

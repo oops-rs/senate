@@ -77,6 +77,8 @@ final class TownModel {
 
     /// The scripted busy events (snapshots and trying the scene).
     func play(_ events: [TownEvent], state: TownState) {
+        var state = state
+        state.person = input?.person ?? state.person
         input = state
         scene.apply(state, events: events)
     }
@@ -142,7 +144,12 @@ struct TownPage: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     var body: some View {
-        let input = model.script ?? TownState(store: store)
+        // The scripted town waits on whoever is signed in, like the real one.
+        let input = model.script.map { scripted in
+            var town = scripted
+            town.person = store.state.person ?? scripted.person
+            return town
+        } ?? TownState(store: store)
         let list = model.showList ?? voiceOver
         ZStack(alignment: .topTrailing) {
             if list {
