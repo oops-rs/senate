@@ -101,22 +101,31 @@ impl Shared {
                 host::viewer_activity(&paths, host_id).map_or(0, |viewer| viewer.input_at);
             self.edit_approvals(host_id, |state| {
                 let contextualized = set_context(state, session_id);
+                if at <= state.claude_stop_at {
+                    return contextualized;
+                }
+                let last_request = state
+                    .claude_request_at
+                    .max(state.claude.as_ref().map_or(0, |request| request.at));
                 let attended = observe_input(state, input_at);
                 let observed = match signal {
                     ClaudeApprovalSignal::Requested { tool, fingerprint } => {
-                        if at > input_at && state.claude.as_ref().is_none_or(|prior| prior.at <= at)
-                        {
+                        let newer = at > last_request;
+                        state.claude_request_at = last_request.max(at);
+                        if newer && at > input_at {
                             state.claude = Some(ClaudeCandidate {
                                 tool,
                                 fingerprint,
                                 at,
                             });
-                            true
-                        } else {
-                            false
                         }
+                        newer
                     }
                     ClaudeApprovalSignal::Pending => {
+                        // Notification carries no tool or turn ID. Once Stop
+                        // ended the turn, only a fresh request can rearm it.
+                        let from_current_turn = state.claude_stop_at == 0
+                            || (last_request > state.claude_stop_at && last_request <= at);
                         let candidate = state.claude.as_ref().filter(|pending| pending.at <= at);
                         let (prompt, tool) = candidate.map_or_else(
                             || ("claude:unspecified".into(), None),
@@ -124,7 +133,9 @@ impl Shared {
                                 (candidate.fingerprint.clone(), Some(candidate.tool.clone()))
                             },
                         );
-                        at > input_at && open_notice(state, &session, at, prompt, tool)
+                        from_current_turn
+                            && at > input_at
+                            && open_notice(state, &session, at, prompt, tool)
                     }
                     ClaudeApprovalSignal::Finished { fingerprint } => {
                         let completed = state.claude.as_ref().is_some_and(|candidate| {
@@ -260,8 +271,8 @@ impl Shared {
         })
     }
 
-    /// A negative screen check or a turn boundary settles only observations
-    /// that were already present when the check or hook began.
+    /// A negative screen check settles observations that were already
+    /// present when the check began.
     pub(super) fn dismiss_claude(
         &self,
         id: &EventId,
@@ -288,7 +299,15 @@ impl Shared {
         if session.runtime != Runtime::Claude {
             return Ok(());
         }
-        self.dismiss_claude(&id, session_id, at)
+        self.edit_approvals(&id, |state| {
+            let contextualized = set_context(state, session_id);
+            let advanced = at > state.claude_stop_at;
+            state.claude_stop_at = state.claude_stop_at.max(at);
+            let candidate = state.claude.take_if(|c| c.at <= at).is_some();
+            // Fence the old screen marker in the same state change that
+            // makes these notices ineligible for the Sessions projection.
+            dismiss_notices(state, |n| n.at <= at) || candidate || contextualized || advanced
+        })
     }
 
     /// Each host's oldest open notice, dated on the wall clock.
@@ -355,7 +374,9 @@ impl Shared {
                     return moved || attended;
                 }
                 let had_candidate = state.claude.take().is_some();
-                dismiss_notices(state, |_| true) || had_candidate
+                let had_stop = std::mem::take(&mut state.claude_stop_at) != 0;
+                let had_request = std::mem::take(&mut state.claude_request_at) != 0;
+                dismiss_notices(state, |_| true) || had_candidate || had_stop || had_request
             })?;
             if check_claude && current.as_deref() == Some(native.as_str()) {
                 let paths = &paths;
@@ -419,6 +440,9 @@ impl Shared {
             let native_approval = relayed.iter().any(|prompt| prompt.session_id == native);
             let viewer = host::viewer_activity(paths, &id);
             self.edit_approvals(&id, |state| {
+                let shown = shown.filter(|prompt| {
+                    state.session_id != native || prompt.since > state.claude_stop_at
+                });
                 let key = shown.map(|prompt| format!("screen:{}", prompt.since));
                 // Senate's own approval of what is on the screen comes first.
                 let approval = native_approval
@@ -877,6 +901,8 @@ fn set_context(state: &mut HostApprovalState, session_id: &str) -> bool {
     }
     state.session_id = session_id.to_owned();
     state.claude = None;
+    state.claude_stop_at = 0;
+    state.claude_request_at = 0;
     dismiss_notices(state, |_| true);
     true
 }

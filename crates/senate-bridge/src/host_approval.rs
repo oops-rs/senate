@@ -75,12 +75,22 @@ pub(crate) enum CodexApprovalOutcome {
 pub(crate) struct HostApprovalState {
     pub session_id: String,
     pub claude: Option<ClaudeCandidate>,
+    /// Stop fences off hook and screen observations from the ended turn.
+    #[serde(default)]
+    pub claude_stop_at: u64,
+    /// A new request can arrive before a Notification even if terminal
+    /// input cleared its candidate in the meantime.
+    #[serde(default)]
+    pub claude_request_at: u64,
     pub notices: Vec<ApprovalNotice>,
 }
 
 impl HostApprovalState {
     pub fn is_empty(&self) -> bool {
-        self.claude.is_none() && self.notices.is_empty()
+        self.claude.is_none()
+            && self.claude_stop_at == 0
+            && self.claude_request_at == 0
+            && self.notices.is_empty()
     }
 }
 
