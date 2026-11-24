@@ -661,7 +661,12 @@ async fn history_pages_filters_searches_forgets_and_restores() {
     // Newest first, a page at a time, to the end.
     let first = core.history(None, None, 8).await.unwrap();
     assert_eq!(first.rows.len(), 8);
-    assert!(first.rows.windows(2).all(|w| w[0].last_activity >= w[1].last_activity));
+    assert!(
+        first
+            .rows
+            .windows(2)
+            .all(|w| w[0].last_activity >= w[1].last_activity)
+    );
     let mut all = first.rows.clone();
     let mut next = first.next.clone();
     while let Some(cursor) = next {
@@ -673,21 +678,53 @@ async fn history_pages_filters_searches_forgets_and_restores() {
     let gone = all.iter().find(|r| !r.readable).expect("an unreadable one");
     assert!(!gone.restorable);
     let named = &all[0];
-    assert!(named.label.contains("::"), "committee::alias: {}", named.label);
+    assert!(
+        named.label.contains("::"),
+        "committee::alias: {}",
+        named.label
+    );
 
     // On one committee.
-    let payments = core.history(Some("payments".into()), None, 50).await.unwrap();
+    let payments = core
+        .history(Some("payments".into()), None, 50)
+        .await
+        .unwrap();
     assert!(!payments.rows.is_empty());
-    assert!(payments.rows.iter().all(|r| r.committee.as_deref() == Some("payments")));
+    assert!(
+        payments
+            .rows
+            .iter()
+            .all(|r| r.committee.as_deref() == Some("payments"))
+    );
 
     // Search: past conversations, and live ones.
-    let hits = core.search_sessions("ledger migration".into(), None, None, 50).await.unwrap();
+    let hits = core
+        .search_sessions("ledger migration".into(), None, None, 50)
+        .await
+        .unwrap();
     assert!(!hits.indexing);
-    assert!(hits.hits.iter().any(|h| !h.live && h.session_id.starts_with("past-")), "{hits:?}");
+    assert!(
+        hits.hits
+            .iter()
+            .any(|h| !h.live && h.session_id.starts_with("past-")),
+        "{hits:?}"
+    );
     let hit = &hits.hits[0];
-    assert!(hit.snippet.to_lowercase().contains("ledger migration"), "{}", hit.snippet);
-    let live = core.search_sessions("cargo publish".into(), None, None, 50).await.unwrap();
-    assert!(live.hits.iter().any(|h| h.live && h.kind == SearchKind::Tool), "{live:?}");
+    assert!(
+        hit.snippet.to_lowercase().contains("ledger migration"),
+        "{}",
+        hit.snippet
+    );
+    let live = core
+        .search_sessions("cargo publish".into(), None, None, 50)
+        .await
+        .unwrap();
+    assert!(
+        live.hits
+            .iter()
+            .any(|h| h.live && h.kind == SearchKind::Tool),
+        "{live:?}"
+    );
 
     // Forget: the record goes; a live session cannot be forgotten.
     let forgotten = all.iter().find(|r| r.readable).unwrap().session_id.clone();
@@ -700,7 +737,9 @@ async fn history_pages_filters_searches_forgets_and_restores() {
     let back = after.rows.iter().find(|r| r.restorable).unwrap().clone();
     core.restore_session(back.label.clone()).await.unwrap();
     until(&listener, "the restored session in the sidebar", |s| {
-        s.groups.iter().any(|g| g.sessions.iter().any(|l| l.session_id == back.session_id))
+        s.groups
+            .iter()
+            .any(|g| g.sessions.iter().any(|l| l.session_id == back.session_id))
     })
     .await;
     let later = core.history(None, None, 50).await.unwrap();

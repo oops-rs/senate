@@ -831,11 +831,19 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 None => Reply::err(IpcError::bad_request(format!("no session {label}"))),
             }
         }
-        Request::SessionHistory { committee, before, limit } => {
+        Request::SessionHistory {
+            committee,
+            before,
+            limit,
+        } => {
             let mut rows: Vec<_> = w
                 .history
                 .iter()
-                .filter(|r| committee.as_ref().is_none_or(|c| r.committee.as_ref() == Some(c)))
+                .filter(|r| {
+                    committee
+                        .as_ref()
+                        .is_none_or(|c| r.committee.as_ref() == Some(c))
+                })
                 .cloned()
                 .collect();
             rows.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
@@ -843,9 +851,17 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             let limit = limit.unwrap_or(30).max(1);
             let page: Vec<_> = rows.iter().skip(from).take(limit).cloned().collect();
             let next = (from + page.len() < rows.len()).then(|| (from + page.len()).to_string());
-            Reply::ok(&senate_bridge::ipc::SessionHistoryReply { rows: page, next_before: next })
+            Reply::ok(&senate_bridge::ipc::SessionHistoryReply {
+                rows: page,
+                next_before: next,
+            })
         }
-        Request::SessionSearch { query, committee, limit, cursor } => {
+        Request::SessionSearch {
+            query,
+            committee,
+            limit,
+            cursor,
+        } => {
             let hits = search_sessions(&w, &query, committee.as_ref());
             let from: usize = cursor.and_then(|c| c.parse().ok()).unwrap_or(0);
             let limit = limit.unwrap_or(30).max(1);
@@ -1402,7 +1418,12 @@ fn timeline_page(
                 .map(|r| r.runtime)
         })
         // An ended session's conversation reads as a live one's does.
-        .or_else(|| w.history.iter().find(|r| r.session_id == session_id).map(|r| r.runtime));
+        .or_else(|| {
+            w.history
+                .iter()
+                .find(|r| r.session_id == session_id)
+                .map(|r| r.runtime)
+        });
     let Some(runtime) = runtime else {
         return Reply::err(IpcError::bad_request(format!("no session {session_id}")));
     };
@@ -2515,7 +2536,9 @@ fn item_text(kind: &TimelineKind) -> Option<(senate_bridge::ipc::SessionSearchKi
         TimelineKind::ToolCall { detail, name, .. } => Some((
             K::ToolCall,
             match detail {
-                D::Shell { command, output, .. } => format!("{command}\n{}", output.clone().unwrap_or_default()),
+                D::Shell {
+                    command, output, ..
+                } => format!("{command}\n{}", output.clone().unwrap_or_default()),
                 other => format!("{name} {other:?}"),
             },
         )),
@@ -2539,8 +2562,20 @@ fn search_sessions(
             .iter()
             .find(|r| r.session_id == id)
             .and_then(|r| r.committee.clone())
-            .or_else(|| w.sessions.local_rows.iter().find(|r| r.session_id == id).and_then(|r| r.committee.clone()))
-            .or_else(|| w.sessions.rows.iter().find(|r| r.session_id == id).and_then(|r| r.committee.clone()))
+            .or_else(|| {
+                w.sessions
+                    .local_rows
+                    .iter()
+                    .find(|r| r.session_id == id)
+                    .and_then(|r| r.committee.clone())
+            })
+            .or_else(|| {
+                w.sessions
+                    .rows
+                    .iter()
+                    .find(|r| r.session_id == id)
+                    .and_then(|r| r.committee.clone())
+            })
     };
     let mut hits = Vec::new();
     for (id, items) in &w.timelines {
@@ -2549,9 +2584,13 @@ fn search_sessions(
         }
         let live = !w.history.iter().any(|r| &r.session_id == id);
         for it in items {
-            let Some((kind, text)) = item_text(&it.kind) else { continue };
+            let Some((kind, text)) = item_text(&it.kind) else {
+                continue;
+            };
             let lower = text.to_lowercase();
-            let Some(at) = lower.find(&needle) else { continue };
+            let Some(at) = lower.find(&needle) else {
+                continue;
+            };
             // About 50 characters either side, on character boundaries.
             let mut start = at.saturating_sub(50);
             while !text.is_char_boundary(start) {
@@ -2591,17 +2630,58 @@ pub fn history(w: &mut World, n: usize) {
     let committees = ["refund-v2", "payments", "infra", "docs", ""];
     let runtimes = [Runtime::Claude, Runtime::Codex, Runtime::Agy, Runtime::Acp];
     let subjects = [
-        ("Refund threshold review", "the refund threshold", "cargo test -p refund"),
-        ("Ledger migration plan", "the ledger migration", "ledgerctl migrate --dry-run 0042"),
-        ("Flaky watch test", "the flaky watch test", "cargo test -p senate-bridge watch -- --nocapture"),
-        ("Release notes for 0.11", "the release notes", "git log --oneline v0.10.0..HEAD"),
-        ("Docs site navigation", "the docs navigation", "npm run build"),
-        ("Approval card layout", "the approval card", "xcodebuild -scheme Senate build"),
-        ("Rate limiter for the API", "the rate limiter", "cargo bench -p gateway"),
-        ("On-call runbook", "the on-call runbook", "rg -n 'page' runbooks/"),
+        (
+            "Refund threshold review",
+            "the refund threshold",
+            "cargo test -p refund",
+        ),
+        (
+            "Ledger migration plan",
+            "the ledger migration",
+            "ledgerctl migrate --dry-run 0042",
+        ),
+        (
+            "Flaky watch test",
+            "the flaky watch test",
+            "cargo test -p senate-bridge watch -- --nocapture",
+        ),
+        (
+            "Release notes for 0.11",
+            "the release notes",
+            "git log --oneline v0.10.0..HEAD",
+        ),
+        (
+            "Docs site navigation",
+            "the docs navigation",
+            "npm run build",
+        ),
+        (
+            "Approval card layout",
+            "the approval card",
+            "xcodebuild -scheme Senate build",
+        ),
+        (
+            "Rate limiter for the API",
+            "the rate limiter",
+            "cargo bench -p gateway",
+        ),
+        (
+            "On-call runbook",
+            "the on-call runbook",
+            "rg -n 'page' runbooks/",
+        ),
         ("退款审批流程", "退款审批", "cargo test -p refund approval"),
     ];
-    let names = ["scout", "mender", "auditor-2", "scribe-old", "builder", "porter", "tester", "planner"];
+    let names = [
+        "scout",
+        "mender",
+        "auditor-2",
+        "scribe-old",
+        "builder",
+        "porter",
+        "tester",
+        "planner",
+    ];
     for i in 0..n {
         let committee = committees[i % committees.len()];
         let runtime = runtimes[i % runtimes.len()];
@@ -2611,7 +2691,12 @@ pub fn history(w: &mut World, n: usize) {
         let started = Utc::now() - chrono::Duration::hours(6 + i as i64 * 9);
         let ran = chrono::Duration::minutes(25 + (i as i64 * 37) % 180);
         let readable = i % 9 != 8;
-        let primary = path(&format!("{}-{:08x}-0000-4000-8000-{:012x}", runtime.as_str(), i, i));
+        let primary = path(&format!(
+            "{}-{:08x}-0000-4000-8000-{:012x}",
+            runtime.as_str(),
+            i,
+            i
+        ));
         w.history.push(SessionHistoryRow {
             session_id: id.clone(),
             primary,
@@ -2624,8 +2709,19 @@ pub fn history(w: &mut World, n: usize) {
                 effort: (runtime == Runtime::Claude && i % 2 == 0).then(|| "high".into()),
                 ..HostedModel::default()
             },
-            dir: format!("/Users/alice/dev/{}", if committee.is_empty() { "scratch" } else { committee }).into(),
-            branch: Some(format!("feat/{}", title.to_lowercase().split(' ').next().unwrap_or("work"))),
+            dir: format!(
+                "/Users/alice/dev/{}",
+                if committee.is_empty() {
+                    "scratch"
+                } else {
+                    committee
+                }
+            )
+            .into(),
+            branch: Some(format!(
+                "feat/{}",
+                title.to_lowercase().split(' ').next().unwrap_or("work")
+            )),
             title: Some(title.into()),
             started_at: started,
             last_activity: started + ran,
@@ -2638,27 +2734,59 @@ pub fn history(w: &mut World, n: usize) {
         }
         let at = |minutes: i64| started + chrono::Duration::minutes(minutes);
         let mut items = vec![
-            item(1, 0, TimelineKind::UserMessage { text: format!("Look into {topic} and tell me what you find.") }),
-            item(2, 0, TimelineKind::Reasoning { text: format!("Start with {topic}: read the code, then run the check.") }),
-            item(3, 0, TimelineKind::ToolCall {
-                call_id: format!("c-{i}"),
-                name: "Bash".into(),
-                status: S::Completed,
-                output: None,
-                detail: D::Shell {
-                    command: command.into(),
-                    cwd: None,
-                    output: Some(format!("ok: {topic} checked, 0 failures")),
-                    exit_code: Some(0),
+            item(
+                1,
+                0,
+                TimelineKind::UserMessage {
+                    text: format!("Look into {topic} and tell me what you find."),
                 },
-            }),
-            item(4, 0, TimelineKind::AssistantMessage {
-                text: format!("## {title}\n\nI looked at **{topic}**. The check passes; one thing to decide:\n\n- keep the current behaviour\n- or tighten it behind a flag\n\n```bash\n{command}\n```"),
-            }),
-            item(5, 0, TimelineKind::UserMessage { text: "Tighten it behind a flag, then stop here.".into() }),
-            item(6, 0, TimelineKind::AssistantMessage {
-                text: format!("Done: {topic} is behind `--strict`, off by default. Stopping."),
-            }),
+            ),
+            item(
+                2,
+                0,
+                TimelineKind::Reasoning {
+                    text: format!("Start with {topic}: read the code, then run the check."),
+                },
+            ),
+            item(
+                3,
+                0,
+                TimelineKind::ToolCall {
+                    call_id: format!("c-{i}"),
+                    name: "Bash".into(),
+                    status: S::Completed,
+                    output: None,
+                    detail: D::Shell {
+                        command: command.into(),
+                        cwd: None,
+                        output: Some(format!("ok: {topic} checked, 0 failures")),
+                        exit_code: Some(0),
+                    },
+                },
+            ),
+            item(
+                4,
+                0,
+                TimelineKind::AssistantMessage {
+                    text: format!(
+                        "## {title}\n\nI looked at **{topic}**. The check passes; one thing to decide:\n\n- keep the current behaviour\n- or tighten it behind a flag\n\n```bash\n{command}\n```"
+                    ),
+                },
+            ),
+            item(
+                5,
+                0,
+                TimelineKind::UserMessage {
+                    text: "Tighten it behind a flag, then stop here.".into(),
+                },
+            ),
+            item(
+                6,
+                0,
+                TimelineKind::AssistantMessage {
+                    text: format!("Done: {topic} is behind `--strict`, off by default. Stopping."),
+                },
+            ),
         ];
         for (k, it) in items.iter_mut().enumerate() {
             it.ts = Some(at(k as i64 * 4));

@@ -543,9 +543,12 @@ impl AppCore {
         before: Option<String>,
         limit: u32,
     ) -> Result<crate::history::HistoryPage, CoreError> {
-        let committee = committee.map(|c| CommitteeId::new(c)).transpose().map_err(|e| CoreError::Invalid {
-            message: e.to_string(),
-        })?;
+        let committee = committee
+            .map(|c| CommitteeId::new(c))
+            .transpose()
+            .map_err(|e| CoreError::Invalid {
+                message: e.to_string(),
+            })?;
         let request = Request::SessionHistory {
             committee,
             before,
@@ -568,9 +571,12 @@ impl AppCore {
         cursor: Option<String>,
         limit: u32,
     ) -> Result<crate::history::SearchPage, CoreError> {
-        let committee = committee.map(|c| CommitteeId::new(c)).transpose().map_err(|e| CoreError::Invalid {
-            message: e.to_string(),
-        })?;
+        let committee = committee
+            .map(|c| CommitteeId::new(c))
+            .transpose()
+            .map_err(|e| CoreError::Invalid {
+                message: e.to_string(),
+            })?;
         let request = Request::SessionSearch {
             query,
             committee,
