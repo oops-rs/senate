@@ -51,6 +51,42 @@ fn run_with_stdin(mut cmd: Command, stdin: &str) -> Output {
     child.wait_with_output().unwrap()
 }
 
+#[tokio::test]
+async fn observe_lines_cli_cannot_issue_from_a_terminal_without_app_consent() {
+    use tokio::io::AsyncReadExt;
+
+    let home = tempfile::tempdir().unwrap();
+    for policy in ["auto", "published"] {
+        let mut command = tokio::process::Command::from(bridge(home.path(), home.path()));
+        command.args([
+            "observe", "token", "create", "--name", "fixture", "--scope", "lines", "--lines",
+            policy,
+        ]);
+        command.kill_on_drop(true);
+        let (mut tty, pts) = pty_process::open().unwrap();
+        let mut child = pty_process::Command::from(command).spawn(pts).unwrap();
+        let (status, output) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut output = Vec::new();
+            match tty.read_to_end(&mut output).await {
+                // Linux PTYs report EIO after the child closes the slave.
+                Ok(_) => {}
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => {}
+                Err(error) => panic!("could not read terminal: {error}"),
+            }
+            (child.wait().await.unwrap(), output)
+        })
+        .await
+        .unwrap();
+        let output = String::from_utf8_lossy(&output);
+        assert!(!status.success(), "{output}");
+        assert!(!output.contains("obs1_"), "{output}");
+        assert!(
+            output.contains("confirmation") || output.contains("daemon is not running"),
+            "{output}"
+        );
+    }
+}
+
 fn hook_input(session: &str, cwd: &Path, event: &str) -> String {
     json!({"session_id": session, "cwd": cwd, "hook_event_name": event, "source": "startup"})
         .to_string()
