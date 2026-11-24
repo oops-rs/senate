@@ -586,9 +586,16 @@ fn paint_note(frame: &mut Frame, area: Rect, note: &str) {
 
 /// Paint one tile: its header, then its session's screen or why there is
 /// none.
-fn paint_tile(frame: &mut Frame, tile: &Tile, area: Rect, focused: bool) -> Option<(u16, u16)> {
+/// `behind`: under the finder or the help, so dimmed.
+fn paint_tile(
+    frame: &mut Frame,
+    tile: &Tile,
+    area: Rect,
+    focused: bool,
+    behind: bool,
+) -> Option<(u16, u16)> {
     let state = shown(&tile.shown);
-    let dim = tile.session.dim || state.note.is_some();
+    let dim = tile.session.dim || state.note.is_some() || behind;
     let out = frame.region(area.row, area.col);
     let style = match (focused, dim) {
         (true, _) => "\x1b[0;1;7m",
@@ -1071,6 +1078,7 @@ impl Viewer {
                                 tile,
                                 area,
                                 page * per_page + slot == self.focus,
+                                self.help || self.finder.is_some(),
                             );
                         }
                         None => paint_note(&mut frame, area, ""),
@@ -1743,6 +1751,7 @@ mod tests {
                 cols: 5,
             },
             false,
+            false,
         );
         let before = "NNNNNNNNN\r\n".repeat(6);
         let terminal = shows(7, 9, &(before + &out.changes(None, false)));
@@ -2019,6 +2028,10 @@ mod tests {
         let (rows, cols) = (24, 100);
         let terminal = shows(rows, cols, &v.paint(rows, cols));
         let lines: Vec<String> = terminal.screen().rows(0, cols).collect();
+        assert!(
+            terminal.screen().cell(1, 0).unwrap().dim(),
+            "the grid behind is dimmed"
+        );
         let header = lines
             .iter()
             .position(|l| l.contains("Find a session"))
