@@ -2273,6 +2273,13 @@ async fn a_late_claude_notice_closes_when_the_turn_ends_not_on_another_tools_res
         "notification_type": "permission_prompt",
     });
     let send = |input| claude_hook(h.dir.path(), &h, terminal.host_id(), input);
+    // The fixture paints independently of its hooks, so under load a
+    // screen-only notice can precede the native permission notice.
+    let permission_notices = || {
+        notices(&h)
+            .into_iter()
+            .filter(|notice| notice.body.contains("has a permission prompt waiting"))
+    };
 
     let stop_hook = || async {
         let mut cmd = tokio::process::Command::new(BIN);
@@ -2313,13 +2320,20 @@ async fn a_late_claude_notice_closes_when_the_turn_ends_not_on_another_tools_res
     // no result of its own (an interrupted command, say).
     send(signal("PermissionRequest", "python3 - <<'EOF'")).await;
     send(notify.clone()).await;
-    let named = next_notice(&h, 1).await;
+    let named = eventually("the first native Claude notice", WAIT, || {
+        permission_notices().next()
+    })
+    .await;
     assert!(named.body.contains("python3"), "{}", named.body);
     // A parallel tool finishing is no sign the dialog is gone.
     send(signal("PostToolUse", "ls")).await;
     // Span the grace period and multiple reconciliations without input.
     tokio::time::sleep(std::time::Duration::from_millis(2400)).await;
-    assert!(archived(&h, named.seq).is_none(), "still open");
+    let early_archive = archived(&h, named.seq);
+    assert!(
+        early_archive.is_none(),
+        "archive before first Stop: {early_archive:?}"
+    );
     assert!(waiting().await.is_some(), "still listed as waiting");
     // The turn ends: no dialog can be waiting.
     stop_hook().await;
@@ -2330,18 +2344,117 @@ async fn a_late_claude_notice_closes_when_the_turn_ends_not_on_another_tools_res
             .body
             .contains("went away unanswered")
     );
-    assert!(waiting().await.is_none());
+    if let Some(prompt) = waiting().await {
+        let db = rusqlite::Connection::open_with_flags(
+            h.paths.state_db(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let state: String = db
+            .query_row(
+                "SELECT state FROM hosted_approvals WHERE host_id = ?1",
+                [terminal.host_id()],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+        let marker = std::fs::read_to_string(terminal.socket.with_file_name("screen-prompt"));
+        panic!("pending after archive: {prompt:?}; marker: {marker:?}; state: {state}");
+    }
 
     // Answered by typing before Claude's Notification arrived: the notice
     // opens after the answer, so typing cannot close it; the turn's end does.
     send(signal("PermissionRequest", "echo late")).await;
     send_input(&terminal).await;
     send(notify.clone()).await;
-    let late = next_notice(&h, 2).await;
+    let late = eventually("the second native Claude notice", WAIT, || {
+        permission_notices().find(|notice| notice.seq > named.seq)
+    })
+    .await;
     send(signal("PostToolUse", "ls")).await;
-    assert!(archived(&h, late.seq).is_none(), "still open");
+    let early_archive = archived(&h, late.seq);
+    assert!(
+        early_archive.is_none(),
+        "archive before second Stop: {early_archive:?}"
+    );
     stop_hook().await;
     wait_archived(&h, late.seq).await;
     assert!(waiting().await.is_none());
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_claude_hooks_cannot_reopen_a_finished_turn() {
+    let (mut h, project) = fixture(false, Locale::En).await;
+    start(&mut h).await;
+    let (launch, terminal) = Terminal::spawn(&h, project, HostedRuntime::Claude).await;
+    let send = |input| claude_hook(h.dir.path(), &h, terminal.host_id(), input);
+    let request = |command: &str| {
+        json!({
+            "hook_event_name": "PermissionRequest", "session_id": launch.session_id,
+            "tool_name": "Bash", "tool_input": {"command": command},
+        })
+    };
+    let notification = json!({
+        "hook_event_name": "Notification", "session_id": launch.session_id,
+        "notification_type": "permission_prompt",
+    });
+    send(request("echo old")).await;
+    send(notification.clone()).await;
+    let first = next_notice(&h, 1).await;
+    let clock = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    let before_stop = (clock.tv_sec as u64) * 1_000_000_000 + clock.tv_nsec as u64;
+    let _: ipc::WaitingReply = ipc::request(
+        &h.socket(),
+        &Request::Waiting {
+            session_id: launch.session_id.clone(),
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    wait_archived(&h, first.seq).await;
+
+    // These hooks observed the old turn, but reached the daemon after Stop.
+    for signal in [
+        ipc::ClaudeApprovalSignal::Requested {
+            tool: "echo old".into(),
+            fingerprint: "old".into(),
+        },
+        ipc::ClaudeApprovalSignal::Pending,
+    ] {
+        let _: Value = ipc::request(
+            &h.socket(),
+            &Request::HostedClaudeApproval {
+                host_id: terminal.host_id().parse().unwrap(),
+                session_id: launch.session_id.clone(),
+                at: before_stop,
+                signal,
+            },
+            WAIT,
+            WAIT,
+        )
+        .await
+        .unwrap();
+        assert!(session_prompt(&h, &launch.session_id).await.is_none());
+    }
+    assert!(
+        !terminal
+            .socket
+            .with_file_name("approval-candidate")
+            .exists()
+    );
+
+    // A Notification can also begin late. Without a new PermissionRequest,
+    // it has no evidence of belonging to a subsequent turn.
+    send(notification.clone()).await;
+    assert!(session_prompt(&h, &launch.session_id).await.is_none());
+    assert_eq!(notices(&h).len(), 1);
+
+    send(request("echo fresh")).await;
+    send(notification).await;
+    let fresh = next_notice(&h, 2).await;
+    assert!(fresh.body.contains("echo fresh"), "{}", fresh.body);
+    terminal.stop();
     h.stop().await;
 }
