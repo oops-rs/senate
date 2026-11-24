@@ -16,6 +16,7 @@ use senate_bridge::speak;
 use senate_core::chat_sim::{SimTranscript, SimulateChat, SimulatedChat};
 use senate_core::{Address, Hub, Kind};
 use senate_speaker::{Intent, RelayKind};
+use senated::testing::Caps;
 
 fn send(text: &str) -> SimulateChat {
     SimulateChat {
@@ -331,6 +332,14 @@ async fn anyone_may_be_simulated_by_a_person_but_never_by_an_agent() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_people_agreeing_in_simulated_chat_get_a_decision_proposed() {
     let world = Setup::new()
+        // Binding schedules an announcement edit independently of the
+        // simulated conversation. Keep the platform post count strict.
+        .platform(|chat| {
+            chat.set_caps(Caps {
+                announcements: true,
+                ..Caps::PLAIN
+            });
+        })
         .speaker(|c| c.memory.agreement_quiet_secs = 1)
         .start()
         .await;

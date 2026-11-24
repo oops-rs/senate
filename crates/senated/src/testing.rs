@@ -17,7 +17,8 @@
 //!
 //! What the platform can do is switchable ([`Caps`]), like a platform app
 //! with or without a permission. By default it posts, mentions, shows and
-//! pins cards, and does not create or adopt groups ([`Caps::PLAIN`]).
+//! pins cards ([`Caps::PLAIN`]). Group creation, membership and announcement
+//! edits are opt-in.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -27,7 +28,8 @@ use tokio::time::Instant;
 
 use async_trait::async_trait;
 use senate_core::{
-    AdoptedGroup, Card, ChatSurface, CreatedGroup, NewGroup, PostTarget, Posted, SurfaceError,
+    AdoptedGroup, AnnouncementSection, Card, ChatSurface, CreatedGroup, NewGroup, PostTarget,
+    Posted, SurfaceError,
 };
 
 use crate::chat::{Addressing, ChatGateway, Delivered, GatewayError, Inbound, PlatformMention};
@@ -49,6 +51,7 @@ pub struct Caps {
     pub mentions: bool,
     pub cards: bool,
     pub pins: bool,
+    pub announcements: bool,
     /// Create groups, invite, rename.
     pub groups: bool,
     /// Add people when creating a group.
@@ -62,6 +65,7 @@ impl Caps {
         mentions: true,
         cards: true,
         pins: true,
+        announcements: true,
         groups: true,
         members: true,
         membership: true,
@@ -70,6 +74,7 @@ impl Caps {
     /// Posts, mentions, cards and pins; no group creation (an Agent group is
     /// adopted with a command) and no joining (every group's chat arrives).
     pub const PLAIN: Self = Self {
+        announcements: false,
         groups: false,
         membership: false,
         ..Self::ALL
@@ -754,6 +759,18 @@ impl ChatSurface for FakeChat {
         }
         if !state.pins.iter().any(|p| p == message_ref) {
             state.pins.push(message_ref.to_owned());
+        }
+        Ok(())
+    }
+
+    async fn set_announcement(
+        &self,
+        _group_id: &str,
+        _section: &AnnouncementSection,
+        _operation_id: &str,
+    ) -> Result<(), SurfaceError> {
+        if !self.lock().caps.announcements {
+            return unsupported("announcements");
         }
         Ok(())
     }
