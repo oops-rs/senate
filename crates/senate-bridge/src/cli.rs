@@ -817,10 +817,17 @@ enum SessionCmd {
     ///
     /// A full-screen grid of read-only views of the sessions hosted on this
     /// machine, one tile a session, in pages when they do not all fit.
-    /// Nothing typed here reaches a session. Arrows or h j k l move
-    /// between tiles, PgUp and PgDn between pages; Enter attaches to the
-    /// tile's session (detaching comes back to the grid); q or Ctrl-]
-    /// leaves.
+    /// Nothing typed here, in the grid or the finder, reaches a session.
+    ///
+    /// / or Ctrl-P finds a session by name: type to narrow the list
+    /// (fzf-style), Ctrl-N/P, Ctrl-J/K or the arrows move, Enter attaches,
+    /// Tab shows its tile, Ctrl-U clears, Ctrl-W deletes a word, Esc or
+    /// Ctrl-C closes. In the grid: arrows or h j k l move between tiles (a
+    /// count repeats: 3j), gg and G go to the first and the last (5G: the
+    /// fifth), H L, [ ] or PgUp PgDn between pages, n and N to the next
+    /// and previous match of the last find; Enter or o attaches to the
+    /// tile's session (detaching comes back to the grid); ? lists the keys;
+    /// q or Ctrl-] leaves.
     Watch {
         /// Watch hosted sessions on this paired machine.
         #[arg(long, add = ArgValueCandidates::new(remote_cli::complete_machines))]

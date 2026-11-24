@@ -28,10 +28,17 @@
 //!
 //! | key | does |
 //! | --- | --- |
-//! | arrows, `h` `j` `k` `l` | move to another tile |
-//! | PgUp / PgDn | the page before, the page after |
-//! | Enter | attach to the tile's session, as `senate attach`; detaching comes back here |
+//! | `/`, Ctrl-P | find a session by name ([`finder`]) |
+//! | arrows, `h` `j` `k` `l` | move to another tile; a count first repeats it (`3j`) |
+//! | `gg`, `G` | the first tile, the last; with a count, that tile (`5G`) |
+//! | `H` `L`, `[` `]`, PgUp / PgDn | the page before, the page after |
+//! | `n`, `N` | the next, the previous tile the last find matches |
+//! | Enter, `o` | attach to the tile's session, as `senate attach`; detaching comes back here |
+//! | `?` | the keys |
 //! | `q`, Ctrl-] | leave |
+//!
+//! Every key is the viewer's: nothing typed in the grid or the finder
+//! reaches a session.
 //!
 //! `senate attach --read-only` is the one tile, full screen, under one
 //! status line. The wheel scrolls main-screen history in the focused tile;
@@ -53,6 +60,9 @@ use super::scroll::{self, Mouse};
 use super::terminal::{RESET_DISPLAY, RawTerminal, split_input};
 use super::watch::{Mirror, SyncFrames, Watch};
 use crate::paths::Paths;
+
+mod finder;
+use finder::{Edit, Finder};
 
 /// The least a tile is given, its header row included.
 pub const MIN_TILE_COLS: u16 = 40;
@@ -398,6 +408,9 @@ struct Frame {
     size: (u16, u16),
     regions: Vec<((u16, u16), String)>,
     cursor: Option<(u16, u16)>,
+    /// The regions from this one on are painted over the others (the
+    /// finder, the help): repainted whenever one before them is.
+    overlay: Option<usize>,
 }
 
 impl Frame {
@@ -423,10 +436,13 @@ impl Frame {
         if self.cursor.is_none() && previous.is_none_or(|prev| prev.cursor.is_some()) {
             out.push_str("\x1b[?25l");
         }
+        let mut repainted = false;
         for (index, &((row, col), ref bytes)) in self.regions.iter().enumerate() {
-            if comparable.is_some_and(|prev| prev.regions[index].1 == *bytes) {
+            let over = repainted && self.overlay.is_some_and(|first| index >= first);
+            if !over && comparable.is_some_and(|prev| prev.regions[index].1 == *bytes) {
                 continue;
             }
+            repainted = true;
             at(&mut out, row, col);
             out.push_str(bytes);
         }
@@ -625,6 +641,19 @@ pub(super) enum Key {
     Scroll(isize),
     Typing,
     Open,
+    /// `/`, Ctrl-P: open the finder.
+    Find,
+    /// `?`.
+    Help,
+    /// `g` (twice: the first tile).
+    G,
+    /// `G`: the last tile.
+    Last,
+    /// `n`, `N`: the next, the previous match of the last find.
+    Next,
+    Prev,
+    /// A digit of a count.
+    Digit(u8),
     /// `q`: leaves the grid; a key like any other in a read-only attach.
     Quit,
     /// Ctrl-]: leaves either.
@@ -637,6 +666,8 @@ pub(super) fn keys(pending: &mut Vec<u8>) -> Vec<Key> {
     decode_keys(pending, None)
 }
 
+/// The keys in `pending`, up to and including [`Key::Find`]: what follows
+/// it is the finder's, so it is left in `pending`.
 fn decode_keys(pending: &mut Vec<u8>, unknown: Option<Key>) -> Vec<Key> {
     let mut out = Vec::new();
     // The detach key ends everything, wherever it stands.
@@ -667,11 +698,21 @@ fn decode_keys(pending: &mut Vec<u8>, unknown: Option<Key>) -> Vec<Key> {
         let (key, len) = match rest {
             // Ctrl-C, in raw mode a plain byte.
             [b'q' | 0x03, ..] => (Some(Key::Quit), 1),
-            [b'\r' | b'\n', ..] => (Some(Key::Open), 1),
+            [b'\r' | b'\n' | b'o', ..] => (Some(Key::Open), 1),
             [b'h', ..] => (Some(Key::Left), 1),
             [b'l', ..] => (Some(Key::Right), 1),
             [b'k', ..] => (Some(Key::Up), 1),
             [b'j', ..] => (Some(Key::Down), 1),
+            [b'H' | b'[', ..] => (Some(Key::PageUp), 1),
+            [b'L' | b']', ..] => (Some(Key::PageDown), 1),
+            [b'/' | 0x10, ..] => (Some(Key::Find), 1),
+            [b'?', ..] => (Some(Key::Help), 1),
+            [b'g', ..] => (Some(Key::G), 1),
+            [b'G', ..] => (Some(Key::Last), 1),
+            [b'n', ..] => (Some(Key::Next), 1),
+            [b'N', ..] => (Some(Key::Prev), 1),
+            [d @ b'0'..=b'9', ..] => (Some(Key::Digit(d - b'0')), 1),
+            [0x1b, b'[', b'1', b'1', b'2', b';', b'5', b'u', ..] => (Some(Key::Find), 8),
             [0x1b, b'[' | b'O', b'A', ..] => (Some(Key::Up), 3),
             [0x1b, b'[' | b'O', b'B', ..] => (Some(Key::Down), 3),
             [0x1b, b'[' | b'O', b'C', ..] => (Some(Key::Right), 3),
@@ -680,10 +721,30 @@ fn decode_keys(pending: &mut Vec<u8>, unknown: Option<Key>) -> Vec<Key> {
             [0x1b, b'[', b'6', b'~', ..] => (Some(Key::PageDown), 4),
             // The start of one of those, still arriving.
             [0x1b] | [0x1b, b'[' | b'O'] | [0x1b, b'[', b'5' | b'6'] if !detach => break,
+            // A paste is no key, whatever it holds: skipped to its end.
+            [0x1b, b'[', b'2', b'0', b'0', b'~', ..] => {
+                match rest.windows(6).position(|w| w == b"\x1b[201~") {
+                    Some(end) => (unknown, end + 6),
+                    None if !detach => break,
+                    None => (unknown, rest.len()),
+                }
+            }
+            // Any other sequence is skipped whole, so none of its bytes
+            // reads as a key of its own.
+            [0x1b, b'[', tail @ ..] => match tail.iter().position(|b| (0x40..=0x7e).contains(b)) {
+                Some(end) => (unknown, end + 3),
+                None if !detach => break,
+                None => (unknown, rest.len()),
+            },
+            [0x1b, b'O', _, ..] => (unknown, 3),
+            [0x1b, _, ..] => (unknown, 2),
             _ => (unknown, 1),
         };
         out.extend(key);
         at += len;
+        if key == Some(Key::Find) {
+            break;
+        }
     }
     if detach {
         out.push(Key::Detach);
@@ -710,9 +771,202 @@ struct Viewer {
     tiles: Vec<Tile>,
     focus: usize,
     changed: Arc<Notify>,
+    /// The finder, while it is open.
+    finder: Option<Finder>,
+    /// The help, while it is shown.
+    help: bool,
+    /// A count typed before a key (`3j`).
+    count: Option<usize>,
+    /// The first `g` of `gg`.
+    g: bool,
+    /// What the finder last found by: `n` and `N` find by it again.
+    last_find: String,
 }
 
+/// The most a count is taken to be.
+const MOST_COUNT: usize = 9999;
+
 impl Viewer {
+    fn new(mode: Mode, remote: Option<crate::remote::Client>) -> Self {
+        Self {
+            remote,
+            mode,
+            tiles: Vec::new(),
+            focus: 0,
+            changed: Arc::new(Notify::new()),
+            finder: None,
+            help: false,
+            count: None,
+            g: false,
+            last_find: String::new(),
+        }
+    }
+
+    fn titles(&self) -> Vec<&str> {
+        self.tiles
+            .iter()
+            .map(|t| t.session.title.as_str())
+            .collect()
+    }
+
+    /// The tiles the finder's query matches, best first.
+    fn found(&self) -> Vec<(usize, finder::Match)> {
+        let query = self.finder.as_ref().map_or("", |f| f.query.as_str());
+        finder::rank(query, self.titles())
+    }
+
+    /// The next tile after the focus (or before it, `back`), round the end,
+    /// that the last find matches.
+    fn find_again(&self, back: bool) -> Option<usize> {
+        let n = self.tiles.len();
+        if self.last_find.trim().is_empty() || n == 0 {
+            return None;
+        }
+        (1..=n)
+            .map(|step| {
+                if back {
+                    (self.focus + n * step - step) % n
+                } else {
+                    (self.focus + step) % n
+                }
+            })
+            .find(|&at| finder::fuzzy(&self.last_find, &self.tiles[at].session.title).is_some())
+    }
+
+    /// The keys in `pending`, on a terminal `rows` × `cols`: whether the
+    /// screen changes, and whether the viewer is left. Every key is the
+    /// viewer's own; none is sent anywhere.
+    fn input(&mut self, pending: &mut Vec<u8>, rows: u16, cols: u16) -> (bool, Option<Left>) {
+        let (across, down) = grid(self.tiles.len(), rows, cols);
+        let (across, per_page) = (usize::from(across), usize::from(across) * usize::from(down));
+        let mut dirty = false;
+        loop {
+            if self.mode == Mode::Grid
+                && let Some(finder) = self.finder.as_mut()
+            {
+                let edits = finder.keys(pending);
+                if edits.is_empty() {
+                    return (dirty, None);
+                }
+                for edit in edits {
+                    dirty = true;
+                    if let Some(left) = self.edit(edit) {
+                        return (dirty, Some(left));
+                    }
+                }
+                if self.finder.is_some() {
+                    return (dirty, None);
+                }
+                // Closed: the rest is the grid's.
+                continue;
+            }
+            let keys = decode_keys(pending, Some(Key::Typing));
+            if keys.is_empty() {
+                return (dirty, None);
+            }
+            for key in keys {
+                if let Key::Scroll(rows) = key {
+                    dirty |= self.scroll(Some(rows));
+                    continue;
+                }
+                dirty |= self.scroll(None);
+                if let Some(left) = self.key(key, across, per_page, &mut dirty) {
+                    return (dirty, Some(left));
+                }
+            }
+            if self.finder.is_none() {
+                return (dirty, None);
+            }
+        }
+    }
+
+    /// One key in the grid (or a read-only attach).
+    fn key(&mut self, key: Key, across: usize, per_page: usize, dirty: &mut bool) -> Option<Left> {
+        if key == Key::Detach {
+            return Some(Left::Quit);
+        }
+        // In a read-only attach every other key is typing, and typing goes
+        // nowhere.
+        if self.mode == Mode::One {
+            return None;
+        }
+        if std::mem::take(&mut self.help) {
+            // Any key closes the help, and does nothing else.
+            *dirty = true;
+            return None;
+        }
+        let count = match key {
+            Key::Digit(d) if d != 0 || self.count.is_some() => {
+                let count = self.count.unwrap_or(0) * 10 + usize::from(d);
+                self.count = Some(count.min(MOST_COUNT));
+                *dirty = true;
+                return None;
+            }
+            Key::G if !self.g => {
+                self.g = true;
+                return None;
+            }
+            _ => self.count.take(),
+        };
+        let gg = std::mem::take(&mut self.g) && key == Key::G;
+        *dirty = true;
+        let last = self.tiles.len().saturating_sub(1);
+        match key {
+            Key::Quit => return Some(Left::Quit),
+            Key::Open => {
+                return self
+                    .tiles
+                    .get(self.focus)
+                    .map(|tile| Left::Attach(tile.session.clone()));
+            }
+            Key::Find => self.finder = Some(Finder::new(self.focus)),
+            Key::Help => self.help = true,
+            Key::G if gg => self.focus = count.map_or(0, |n| n.saturating_sub(1)).min(last),
+            Key::Last => self.focus = count.map_or(last, |n| n.saturating_sub(1)).min(last),
+            Key::Next | Key::Prev => {
+                for _ in 0..count.unwrap_or(1) {
+                    if let Some(at) = self.find_again(key == Key::Prev) {
+                        self.focus = at;
+                    }
+                }
+            }
+            Key::Left | Key::Right | Key::Up | Key::Down | Key::PageUp | Key::PageDown => {
+                for _ in 0..count.unwrap_or(1) {
+                    self.step(key, across, per_page);
+                }
+            }
+            Key::G | Key::Digit(_) | Key::Typing | Key::Scroll(_) | Key::Detach => {}
+        }
+        None
+    }
+
+    /// One key in the finder.
+    fn edit(&mut self, edit: Edit) -> Option<Left> {
+        let found = self.found();
+        let finder = self.finder.as_mut()?;
+        match edit {
+            Edit::Up => finder.selected = finder.selected.min(found.len()).saturating_sub(1),
+            Edit::Down => {
+                finder.selected = (finder.selected + 1).min(found.len().saturating_sub(1));
+            }
+            Edit::Detach => return Some(Left::Quit),
+            Edit::Close => self.finder = None,
+            Edit::Accept | Edit::Show => {
+                let chosen = found.get(finder.selected.min(found.len().saturating_sub(1)));
+                // Nothing matches: the finder stays open.
+                let (tile, _) = chosen?;
+                self.focus = *tile;
+                self.last_find = std::mem::take(&mut finder.query);
+                self.finder = None;
+                if edit == Edit::Accept {
+                    return Some(Left::Attach(self.tiles[self.focus].session.clone()));
+                }
+            }
+            edit => finder.edit(edit),
+        }
+        None
+    }
+
     /// Keep tiles whose source is still the same, in the order listed.
     /// The focus stays on its session when it can.
     fn list(&mut self, sessions: Vec<Session>) {
@@ -823,16 +1077,40 @@ impl Viewer {
                     }
                 }
                 let paging = if pages > 1 {
-                    format!(" · page {}/{pages} (PgUp/PgDn)", page + 1)
+                    format!(" · page {}/{pages}", page + 1)
                 } else {
                     String::new()
                 };
+                let typed = match (self.count, self.g) {
+                    (Some(n), g) => format!(" · {n}{}", if g { "g" } else { "" }),
+                    (None, true) => " · g".to_owned(),
+                    (None, false) => String::new(),
+                };
                 format!(
-                    " {} sessions{paging} · arrows move · Enter attaches · q leaves",
+                    " {} sessions{paging}{typed} · / find · hjkl move · Enter attach · ? help · q quit",
                     self.tiles.len()
                 )
             }
         };
+        let status = if self.mode == Mode::Grid && self.help {
+            frame.overlay = Some(frame.regions.len());
+            finder::paint_help(
+                &mut frame,
+                finder::centred(rows, cols, finder::help_height(), 64),
+            );
+            " ? help · any key closes".to_owned()
+        } else if self.mode == Mode::Grid
+            && let Some(open) = &self.finder
+        {
+            frame.overlay = Some(frame.regions.len());
+            let area = finder::centred(rows, cols, finder::height(self.tiles.len()), 84);
+            let titles = self.titles();
+            cursor = finder::paint(&mut frame, area, open, &self.found(), &titles);
+            " find · Enter attach · Tab show · Ctrl-N/P move · Ctrl-U clear · Esc close".to_owned()
+        } else {
+            status
+        };
+        // The status line is painted over too.
         let out = frame.region(status_row, 0);
         out.push_str("\x1b[0;7m");
         erase(out, cols);
@@ -880,7 +1158,7 @@ impl Viewer {
             Key::Down => self.focus + across,
             Key::PageUp => self.focus.saturating_sub(per_page),
             Key::PageDown => self.focus + per_page,
-            Key::Open | Key::Quit | Key::Detach | Key::Scroll(_) | Key::Typing => self.focus,
+            _ => self.focus,
         }
         .min(last);
     }
@@ -971,31 +1249,8 @@ async fn stay(
                 }
                 pending.extend_from_slice(&input[..n]);
                 let (rows, cols) = terminal.window()?;
-                let (across, down) = grid(viewer.tiles.len(), rows, cols);
-                let mut leave = None;
-                let keys = decode_keys(&mut pending, Some(Key::Typing));
-                for key in keys {
-                    if let Key::Scroll(rows) = key {
-                        dirty |= viewer.scroll(Some(rows));
-                        continue;
-                    }
-                    dirty |= viewer.scroll(None);
-                    match (&viewer.mode, key) {
-                        (_, Key::Detach) | (Mode::Grid, Key::Quit) => leave = Some(Left::Quit),
-                        // In a read-only attach every other key is typing,
-                        // and typing goes nowhere.
-                        (Mode::One, _) | (Mode::Grid, Key::Typing) => {}
-                        (Mode::Grid, Key::Open) => {
-                            if let Some(tile) = viewer.tiles.get(viewer.focus) {
-                                leave = Some(Left::Attach(tile.session.clone()));
-                            }
-                        }
-                        (Mode::Grid, key) => {
-                            viewer.step(key, usize::from(across), usize::from(across) * usize::from(down));
-                            dirty = true;
-                        }
-                    }
-                }
+                let (changed, leave) = viewer.input(&mut pending, rows, cols);
+                dirty |= changed;
                 if let Some(leave) = leave {
                     break leave;
                 }
@@ -1041,13 +1296,7 @@ pub async fn watch_one(session: Session) -> anyhow::Result<()> {
         "{}",
         cannot_watch(&session.alias)
     );
-    let mut viewer = Viewer {
-        remote: None,
-        mode: Mode::One,
-        tiles: Vec::new(),
-        focus: 0,
-        changed: Arc::new(Notify::new()),
-    };
+    let mut viewer = Viewer::new(Mode::One, None);
     viewer.list(vec![session]);
     stay(&mut viewer, None).await.map(drop)
 }
@@ -1076,13 +1325,7 @@ pub(crate) async fn watch_remote_one(
     session: Session,
     client: crate::remote::Client,
 ) -> anyhow::Result<()> {
-    let mut viewer = Viewer {
-        remote: Some(client),
-        mode: Mode::One,
-        tiles: Vec::new(),
-        focus: 0,
-        changed: Arc::new(Notify::new()),
-    };
+    let mut viewer = Viewer::new(Mode::One, Some(client));
     viewer.list(vec![session]);
     stay(&mut viewer, None).await.map(drop)
 }
@@ -1104,13 +1347,7 @@ async fn watch_grid(
         println!("{HINT}");
         return Ok(());
     };
-    let mut viewer = Viewer {
-        remote,
-        mode: Mode::Grid,
-        tiles: Vec::new(),
-        focus: 0,
-        changed: Arc::new(Notify::new()),
-    };
+    let mut viewer = Viewer::new(Mode::Grid, remote);
     viewer.list(first);
     loop {
         match stay(&mut viewer, Some(&mut grid)).await? {
@@ -1316,11 +1553,9 @@ mod tests {
     #[tokio::test]
     async fn the_grid_asks_each_tile_shown_to_be_fitted_and_again_on_a_resize() {
         let viewer = Viewer {
-            remote: None,
-            mode: Mode::Grid,
             tiles: vec![tile("north", "n", false), tile("south", "s", false)],
             focus: 0,
-            changed: Arc::new(Notify::new()),
+            ..Viewer::new(Mode::Grid, None)
         };
         viewer.paint(30, 120);
         // Two tiles side by side under the status line; each body is its
@@ -1335,11 +1570,9 @@ mod tests {
         let mut one = tile("north", "n", false);
         one.fit = None;
         let viewer = Viewer {
-            remote: None,
-            mode: Mode::One,
             tiles: vec![one],
             focus: 0,
-            changed: Arc::new(Notify::new()),
+            ..Viewer::new(Mode::One, None)
         };
         viewer.paint(30, 120);
         assert!(viewer.tiles[0].fit.is_none());
@@ -1348,14 +1581,12 @@ mod tests {
     #[tokio::test]
     async fn the_grid_pages_names_each_tile_and_marks_the_focused_one() {
         let mut viewer = Viewer {
-            remote: None,
-            mode: Mode::Grid,
             tiles: ["a", "b", "c", "d", "e"]
                 .into_iter()
                 .map(|alias| tile(alias, &format!("screen of {alias}"), alias == "c"))
                 .collect(),
             focus: 1,
-            changed: Arc::new(Notify::new()),
+            ..Viewer::new(Mode::Grid, None)
         };
         // 21 x 80: two tiles across, two down, so two pages of the five.
         let (rows, cols) = (21, 80);
@@ -1444,11 +1675,9 @@ mod tests {
     #[tokio::test]
     async fn a_tile_reopens_its_source_when_paused_or_resumed() {
         let mut viewer = Viewer {
-            remote: None,
-            mode: Mode::Grid,
             tiles: Vec::new(),
             focus: 0,
-            changed: Arc::new(Notify::new()),
+            ..Viewer::new(Mode::Grid, None)
         };
         let mut session = viewer_session("north");
         viewer.list(vec![session.clone()]);
@@ -1534,11 +1763,9 @@ mod tests {
         let left = tile("north", "before", false);
         let right = tile("south", "unchanged", false);
         let viewer = Viewer {
-            remote: None,
-            mode: Mode::Grid,
             tiles: vec![left, right],
             focus: 0,
-            changed: Arc::new(Notify::new()),
+            ..Viewer::new(Mode::Grid, None)
         };
         let (rows, cols) = (24, 100);
         let first = viewer.compose(rows, cols);
@@ -1632,5 +1859,309 @@ mod tests {
         assert_eq!(fit("审阅 · x", 5), "审阅 ");
         assert_eq!(fit("审阅", 3), "审 ", "half a wide character is a blank");
         assert_eq!(fit("ab", 4), "ab  ");
+    }
+
+    /// A grid of tiles named `aliases` (`committee::alias`, the first of
+    /// each committee its chair), as `senate session watch` titles them.
+    fn named_grid(aliases: &[&str]) -> Viewer {
+        let mut seen = std::collections::BTreeSet::new();
+        Viewer {
+            tiles: aliases
+                .iter()
+                .map(|alias| {
+                    let committee = alias.split("::").next().unwrap_or_default();
+                    let chair = if seen.insert(committee) {
+                        "[chair] "
+                    } else {
+                        ""
+                    };
+                    let mut tile = tile(alias, alias, false);
+                    tile.session.title = format!("{chair}{alias} · claude · opus · running");
+                    tile
+                })
+                .collect(),
+            ..Viewer::new(Mode::Grid, None)
+        }
+    }
+
+    /// Type `bytes` into `viewer` on a 21 × 80 terminal: two tiles across,
+    /// two down.
+    fn type_in(viewer: &mut Viewer, bytes: &[u8]) -> Option<Left> {
+        let mut pending = bytes.to_vec();
+        let (_, left) = viewer.input(&mut pending, 21, 80);
+        left
+    }
+
+    fn focused(viewer: &Viewer) -> &str {
+        &viewer.tiles[viewer.focus].session.alias
+    }
+
+    fn attached(left: Option<Left>) -> Option<String> {
+        match left {
+            Some(Left::Attach(session)) => Some(session.alias),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn vim_keys_move_with_counts_pages_and_ends() {
+        let names = [
+            "s::a", "s::b", "s::c", "s::d", "s::e", "s::f", "s::g", "s::h", "s::i",
+        ];
+        let mut v = named_grid(&names);
+        type_in(&mut v, b"l");
+        assert_eq!(focused(&v), "s::b");
+        type_in(&mut v, b"3l");
+        assert_eq!(focused(&v), "s::e", "a count repeats");
+        type_in(&mut v, b"gg");
+        assert_eq!(focused(&v), "s::a");
+        type_in(&mut v, b"G");
+        assert_eq!(focused(&v), "s::i");
+        type_in(&mut v, b"5G");
+        assert_eq!(focused(&v), "s::e", "the fifth");
+        type_in(&mut v, b"2gg");
+        assert_eq!(focused(&v), "s::b");
+        // Pages of four: L, ], PgDn on; H, [, PgUp back.
+        type_in(&mut v, b"L");
+        assert_eq!(focused(&v), "s::f");
+        type_in(&mut v, b"]");
+        assert_eq!(focused(&v), "s::i", "no further than the last");
+        type_in(&mut v, b"[H");
+        assert_eq!(focused(&v), "s::a");
+        type_in(&mut v, b"2j");
+        assert_eq!(focused(&v), "s::e", "down two rows of two");
+        // A count shows while it is typed; another key forgets it.
+        type_in(&mut v, b"1");
+        assert!(
+            shows(21, 80, &v.paint(21, 80))
+                .screen()
+                .contents()
+                .contains("· 1 ·")
+        );
+        type_in(&mut v, b"x");
+        assert_eq!(v.count, None);
+        // `o` and Enter attach; `q` quits.
+        assert_eq!(attached(type_in(&mut v, b"o")).as_deref(), Some("s::e"));
+        assert_eq!(attached(type_in(&mut v, b"\r")).as_deref(), Some("s::e"));
+        assert!(matches!(type_in(&mut v, b"q"), Some(Left::Quit)));
+        // The footer says what to press.
+        let footer = shows(21, 100, &v.paint(21, 100))
+            .screen()
+            .rows(0, 100)
+            .nth(20)
+            .unwrap();
+        assert!(
+            footer.contains("/ find · hjkl move · Enter attach · ? help · q quit"),
+            "{footer:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_finder_narrows_attaches_shows_and_finds_again() {
+        let names = [
+            "payments::lead",
+            "payments::ledger",
+            "senate::main",
+            "senate::reviewer",
+            "refund::builder",
+        ];
+        let mut v = named_grid(&names);
+        // `/` and what follows in the same read: the finder's.
+        assert!(type_in(&mut v, b"/rev").is_none());
+        assert_eq!(v.found().len(), 1);
+        // Tab: focus its tile, on its page, and close.
+        type_in(&mut v, b"\t");
+        assert!(v.finder.is_none());
+        assert_eq!(focused(&v), "senate::reviewer");
+        // Ctrl-P opens it too; Ctrl-N/J and arrows move; Enter attaches.
+        type_in(&mut v, b"\x10pay led");
+        let found: Vec<&str> = v
+            .found()
+            .iter()
+            .map(|(tile, _)| v.tiles[*tile].session.alias.as_str())
+            .collect();
+        assert_eq!(found, ["payments::ledger", "payments::lead"], "best first");
+        type_in(&mut v, b"\x0e");
+        assert_eq!(
+            attached(type_in(&mut v, b"\r")).as_deref(),
+            Some("payments::lead")
+        );
+        assert!(v.finder.is_none());
+        // `n`, `N`: the next, the previous tile the last find matches.
+        v.focus = 0;
+        type_in(&mut v, b"n");
+        assert_eq!(focused(&v), "payments::ledger");
+        type_in(&mut v, b"n");
+        assert_eq!(focused(&v), "payments::lead", "round the end");
+        type_in(&mut v, b"N");
+        assert_eq!(focused(&v), "payments::ledger");
+        // Esc and Ctrl-C close without moving; nothing matched stays open.
+        type_in(&mut v, b"/zzz\r");
+        assert!(v.finder.is_some(), "Enter on nothing");
+        type_in(&mut v, b"\x1b");
+        assert!(v.finder.is_none());
+        type_in(&mut v, b"/main\x03");
+        assert!(v.finder.is_none());
+        assert_eq!(focused(&v), "payments::ledger");
+        // Ctrl-] leaves from the finder too.
+        assert!(matches!(type_in(&mut v, b"/x\x1d"), Some(Left::Quit)));
+    }
+
+    #[tokio::test]
+    async fn the_finder_is_a_centred_list_and_fits_any_terminal() {
+        let mut v = named_grid(&[
+            "payments::lead",
+            "payments::ledger",
+            "评审::审阅者",
+            "senate::main",
+        ]);
+        type_in(&mut v, b"/led");
+        let (rows, cols) = (24, 100);
+        let terminal = shows(rows, cols, &v.paint(rows, cols));
+        let lines: Vec<String> = terminal.screen().rows(0, cols).collect();
+        let header = lines
+            .iter()
+            .position(|l| l.contains("Find a session"))
+            .unwrap();
+        assert!(lines[header].contains("2/4"), "{:?}", lines[header]);
+        assert!(lines[header + 1].contains("> led"));
+        assert!(
+            lines[header + 2].contains("▸ payments::ledger · claude"),
+            "best first"
+        );
+        assert!(
+            lines[header + 3].contains("[chair] payments::lead"),
+            "the chair marked"
+        );
+        // Centred: as far from the left edge as from the right.
+        let left = lines[header].find("Find").unwrap() - 1;
+        assert_eq!(left, (100 - 84) / 2);
+        // The chosen line is inverted, a matched letter bold.
+        let chosen = header + 2;
+        let at = lines[chosen].find("ledger").unwrap();
+        let col = u16::try_from(lines[chosen][..at].chars().count()).unwrap();
+        let row = u16::try_from(chosen).unwrap();
+        assert!(terminal.screen().cell(row, col).unwrap().inverse());
+        assert!(terminal.screen().cell(row, col).unwrap().bold(), "l of led");
+        assert!(
+            !terminal.screen().cell(row, col + 3).unwrap().bold(),
+            "g is not"
+        );
+        // The cursor stands after the query.
+        assert_eq!(
+            terminal.screen().cursor_position(),
+            (row - 1, u16::try_from(left + 2 + 3).unwrap())
+        );
+        // Wide characters in the query and the list.
+        type_in(&mut v, "\x15审阅".as_bytes());
+        let terminal = shows(rows, cols, &v.paint(rows, cols));
+        assert!(
+            terminal
+                .screen()
+                .contents()
+                .contains("▸ [chair] 评审::审阅者")
+        );
+        // A narrow, short terminal: the whole width, what rows there are.
+        for (rows, cols) in [(6, 20), (3, 10), (2, 30)] {
+            let terminal = shows(rows, cols, &v.paint(rows, cols));
+            let text = terminal.screen().contents();
+            assert!(text.contains("Find") || rows < 4, "{rows}x{cols}: {text:?}");
+        }
+        // Typing changes only the finder's rows and the status line.
+        let before = v.compose(24, 100);
+        type_in(&mut v, b"\x15m");
+        let after = v.compose(24, 100);
+        let patch = after.changes(Some(&before), false);
+        assert!(!patch.contains("\x1b[2J"), "no full repaint per key");
+        let mut incremental = shows(24, 100, &before.changes(None, false));
+        incremental.process(patch.as_bytes());
+        assert_eq!(
+            incremental.screen().contents(),
+            shows(24, 100, &after.changes(None, false))
+                .screen()
+                .contents()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_help_lists_the_keys_and_any_key_closes_it() {
+        let mut v = named_grid(&["s::a", "s::b"]);
+        type_in(&mut v, b"?");
+        let text = shows(24, 100, &v.paint(24, 100)).screen().contents();
+        for line in ["find a session", "gg, G", "n, N", "Ctrl-U, Ctrl-W"] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+        type_in(&mut v, b"q");
+        assert!(!v.help, "q closed the help, and did not quit");
+        assert!(
+            !shows(24, 100, &v.paint(24, 100))
+                .screen()
+                .contents()
+                .contains("find a session")
+        );
+    }
+
+    /// Whatever is typed in the grid and in the finder, all a session's
+    /// host ever receives from the viewer is a request to fit its tile.
+    #[tokio::test]
+    async fn nothing_typed_in_the_grid_or_the_finder_reaches_a_session() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let listener =
+            tokio::net::UnixListener::bind(dir.path().join(super::super::watch::SOCKET)).unwrap();
+        let host = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // Greet, say the size, and show a prompt.
+            let mut hello = vec![1, 1, 0, 24, 0, 80, 2];
+            hello.extend_from_slice(&5u16.to_be_bytes());
+            hello.extend_from_slice(b"ready");
+            stream.write_all(&hello).await.unwrap();
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+            received
+        });
+        let mut session = viewer_session("north");
+        session.tty = dir.path().join("tty");
+        let mut v = Viewer::new(Mode::Grid, None);
+        v.list(vec![session, viewer_session("south")]);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !shown(&v.tiles[0].shown)
+                .mirror
+                .as_ref()
+                .is_some_and(|m| m.screen().contents().contains("ready"))
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let settle = || tokio::time::sleep(Duration::from_millis(50));
+        v.paint(21, 80);
+        settle().await;
+        for typed in [
+            &b"rm -rf ~\r"[..],
+            b"echo hi\x15\x17\x7f",
+            b"/rm -rf ~\x1b[200~paste\r\x1b[201~\x15north\t",
+            b"\x1b[97u\x1b[13;5u\x1b[Z\x1bOP",
+            "审阅 é \x00\x04\x1a".as_bytes(),
+            b"3jggG?x/no\x03jkhl[]HLnNo",
+        ] {
+            let mut pending = typed.to_vec();
+            let _ = v.input(&mut pending, 21, 80);
+            v.paint(21, 80);
+            settle().await;
+        }
+        v.paint(30, 100);
+        settle().await;
+        drop(v);
+        let received = tokio::time::timeout(Duration::from_secs(5), host)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!received.is_empty(), "the tile asked to be fitted");
+        assert_eq!(received.len() % 5, 0, "{received:?}");
+        for frame in received.chunks(5) {
+            assert_eq!(frame[0], 1, "only fit requests: {received:?}");
+        }
     }
 }
