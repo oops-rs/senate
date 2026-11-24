@@ -95,7 +95,7 @@ enum Snapshot {
             await shot("history-search")
             if let hit = store.history.hits.first(where: { !$0.live }) {
                 store.open(hit, query: store.history.query)
-                try? await Task.sleep(for: .seconds(2))
+                try? await Task.sleep(for: .seconds(6))
                 await shot("history-match")
             }
             store.history.query = ""

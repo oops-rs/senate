@@ -210,6 +210,7 @@ extension SmokeTests {
         XCTAssertTrue(window.waitForExistence(timeout: 10))
         let row = window.outlines.descendants(matching: .any).matching(NSPredicate(format: "label == 'History'")).firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 10), "the History row")
+        app.activate()
         row.click()
         let past = window.descendants(matching: .any).matching(NSPredicate(format: "label == 'scout-1'")).firstMatch
         XCTAssertTrue(past.waitForExistence(timeout: 10), "an ended session listed")

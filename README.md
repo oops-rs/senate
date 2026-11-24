@@ -1103,6 +1103,8 @@ Located in [`apps/macos`](apps/macos), Senate includes a native macOS menu-bar a
 - **Merged & Per-Agent Inboxes:** Filter threads across your personal agents or inspect individual feeds.
 - **Codex Approval Panel:** Approve or decline tool calls directly from a native macOS popup.
 - **Speaker's Desk Docket:** Real-time visibility into incoming crossings and escalated tasks.
+- **History:** Ended and stopped sessions by day, newest first, filtered by committee or runtime. An ended session opens read-only with Restore and Forget (Forget asks first and leaves the runtime's transcript in place). Search covers past and live conversations; a result opens its session scrolled to the match, highlighted.
+- **Your profile, locally:** A name and picture for the app, kept on this Mac; your Senate handle is unchanged.
 - **Native Localization:** Full English and Simplified Chinese support.
 
 ```sh

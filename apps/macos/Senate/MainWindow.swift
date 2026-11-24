@@ -192,6 +192,10 @@ private struct Sidebar: View {
                     } icon: {
                         Image(systemName: section.symbol).foregroundStyle(Theme.onSurfaceVariant)
                     }
+                        // With no count, the row's title would be read as
+                        // its value and it would have no name.
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(section.title)
                         .badge(store.state.online ? store.count(section) : 0)
                         .tag(CoreStore.Place.section(section))
                 }

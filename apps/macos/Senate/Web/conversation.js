@@ -677,11 +677,15 @@
   // opened), scrolled to the first match in that row, highlighted.
   async function reveal(id, q) {
     const pause = (ms) => new Promise((r) => setTimeout(r, ms));
-    const rowEl = () => main().querySelector('[data-id="' + id + '"]');
+    // A command in a group is its member ("m" + id); the group's own row
+    // shares its first command's id, so the member is looked for first.
+    const rowEl = () => main().querySelector('[data-id="m' + id + '"]') || main().querySelector('[data-id="' + id + '"]');
     for (let i = 0; i < 100 && !rowEl(); i++) await pause(20);
     let r = rowEl();
     if (!r) return;
-    if (r.classList.contains("k-tool") && !open.has(Number(id))) { toggle(Number(id)); r = rowEl(); }
+    const group = r.closest(".group-members");
+    if (group && group.hidden) { toggle(group.parentElement.dataset.id); r = rowEl(); }
+    if (r.classList.contains("k-tool") && !open.has(r.dataset.id)) { toggle(r.dataset.id); r = rowEl(); }
     for (const d of docs.values()) {
       if (!r.contains(d.el)) continue;
       for (const [bid, b] of d.blocks) if (b.state === "placeholder" || b.state === "stale") queue(d.key, bid, true);

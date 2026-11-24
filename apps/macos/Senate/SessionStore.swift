@@ -267,8 +267,9 @@ extension CoreStore {
             await loadOlder()
             pages += 1
         }
-        // Reasoning has no row of its own: the row it folded into.
-        let row = t.rows.first { $0.id >= r.seq }?.id ?? t.rows.last?.id ?? r.seq
+        // Its row: its own, a command's inside a group, or (for reasoning,
+        // which has none) the row it folded into.
+        let row = ConversationRows.rowId(for: r.seq, in: t.rows) ?? r.seq
         await page.reveal(row: row, query: r.query)
     }
 }

@@ -27,6 +27,24 @@ struct SenatesView: View {
                 .padding(.vertical, Theme.Space.xl)
                 .frame(maxWidth: .infinity)
             }
+            .toolbar {
+                ToolbarItem(placement: .navigation) {
+                    Text(verbatim: L("tab.profile"))
+                        .font(.headline)
+                        .padding(.horizontal, Theme.Space.xs)
+                        .accessibilityAddTraits(.isHeader)
+                }
+                .sharedBackgroundVisibility(.hidden)
+                ToolbarSpacer(.flexible)
+                // The page's one action: its words and icon.
+                ToolbarItem(placement: .primaryAction) {
+                    Button { editing = true } label: {
+                        Label(L("profile.edit"), systemImage: "pencil")
+                    }
+                    .help(L("profile.edit_title"))
+                    .accessibilityIdentifier("profile-edit")
+                }
+            }
             .sheet(isPresented: $editing) {
                 ProfileEditor(profile: store.profile, handle: state.person ?? "") { editing = false }
             }
@@ -38,14 +56,24 @@ struct SenatesView: View {
         return HStack(alignment: .center, spacing: Theme.Space.l) {
             Avatar(name: store.profile.name(handle), online: nil, size: 72, picture: store.profile.picture)
             VStack(alignment: .leading, spacing: 4) {
-                Text(verbatim: store.profile.name(handle))
+                let name = store.profile.name(handle)
+                Text(verbatim: name)
                     .font(.system(size: 26, weight: .semibold))
                     .foregroundStyle(Theme.onSurface)
+                    .help(name == handle ? "senator::\(handle)" : "")
                     .accessibilityAddTraits(.isHeader)
-                Text(verbatim: "[senator::\(handle)]")
-                    .font(Theme.Fonts.row)
-                    .foregroundStyle(Theme.onSurfaceVariant)
-                    .textSelection(.enabled)
+                // The handle as names are shown everywhere: the name, the
+                // full id in the tooltip and the context menu. Under a name
+                // set here; otherwise the name above is the handle.
+                if name != handle {
+                    Text(verbatim: handle)
+                        .font(Theme.Fonts.row)
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                        .help("senator::\(handle)")
+                        .contextMenu {
+                            Button(L("mention.copy", "[senator::\(handle)]")) { Mentions.copy("senator::\(handle)") }
+                        }
+                }
                 HStack(spacing: 6) {
                     StatusDot(online: state.online, size: 7)
                     Text(verbatim: state.online ? L("a11y.online") : (state.offlineReason ?? L("a11y.offline")))
@@ -53,9 +81,7 @@ struct SenatesView: View {
                         .foregroundStyle(Theme.onSurfaceVariant)
                 }
             }
-            Spacer(minLength: Theme.Space.m)
-            Button(L("profile.edit")) { editing = true }
-                .buttonStyle(.pill)
+            Spacer(minLength: 0)
         }
     }
 }

@@ -21,6 +21,7 @@ struct HistoryView: View {
             }
         }
         .task { if !h.loadedOnce { await h.reload() } }
+        .toolbar { toolbar(h) }
         .background {
             Button("") { searchFocused = true }
                 .keyboardShortcut("f")
@@ -29,13 +30,49 @@ struct HistoryView: View {
         }
     }
 
+    /// A plain title; the filters as toolbar items.
+    @ToolbarContentBuilder private func toolbar(_ h: HistoryModel) -> some ToolbarContent {
+        @Bindable var h = h
+        ToolbarItem(placement: .navigation) {
+            Text(verbatim: L("tab.history"))
+                .font(.headline)
+                .padding(.horizontal, Theme.Space.xs)
+                .accessibilityAddTraits(.isHeader)
+        }
+        .sharedBackgroundVisibility(.hidden)
+        ToolbarSpacer(.flexible)
+        ToolbarItemGroup(placement: .primaryAction) {
+            Menu {
+                Picker(L("history.filter.committee"), selection: $h.committee) {
+                    Text(verbatim: L("history.filter.all_committees")).tag(String?.none)
+                    ForEach(committees(h), id: \.self) { c in
+                        Text(verbatim: c.isEmpty ? L("sidebar.no_committee") : c).tag(String?.some(c))
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                // Filled while it narrows the list.
+                Label(L("history.filter.committee"), systemImage: h.committee == nil ? "person.3" : "person.3.fill")
+            }
+            .help(h.committee.map { $0.isEmpty ? L("sidebar.no_committee") : $0 } ?? L("history.filter.all_committees"))
+            Menu {
+                Picker(L("history.filter.runtime"), selection: $h.runtime) {
+                    Text(verbatim: L("history.filter.all_runtimes")).tag(String?.none)
+                    ForEach(["claude", "codex", "agy", "acp"], id: \.self) { r in
+                        Text(verbatim: r).tag(String?.some(r))
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Label(L("history.filter.runtime"), systemImage: h.runtime == nil ? "cpu" : "cpu.fill")
+            }
+            .help(h.runtime ?? L("history.filter.all_runtimes"))
+        }
+    }
+
     private func controls(_ h: HistoryModel) -> some View {
         @Bindable var h = h
         return VStack(alignment: .leading, spacing: Theme.Space.s) {
-            Text(verbatim: L("tab.history"))
-                .font(Theme.Fonts.title)
-                .foregroundStyle(Theme.onSurface)
-                .accessibilityAddTraits(.isHeader)
             HStack(spacing: Theme.Space.s) {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
@@ -56,27 +93,11 @@ struct HistoryView: View {
                 .padding(.horizontal, 10)
                 .frame(height: 30)
                 .background(Theme.containerHigh, in: Capsule())
-                Picker(L("history.filter.committee"), selection: $h.committee) {
-                    Text(verbatim: L("history.filter.all_committees")).tag(String?.none)
-                    ForEach(committees(h), id: \.self) { c in
-                        Text(verbatim: c.isEmpty ? L("sidebar.no_committee") : c).tag(String?.some(c))
-                    }
-                }
-                .labelsHidden()
-                .fixedSize()
-                Picker(L("history.filter.runtime"), selection: $h.runtime) {
-                    Text(verbatim: L("history.filter.all_runtimes")).tag(String?.none)
-                    ForEach(["claude", "codex", "agy", "acp"], id: \.self) { r in
-                        Text(verbatim: r).tag(String?.some(r))
-                    }
-                }
-                .labelsHidden()
-                .fixedSize()
             }
         }
         .frame(maxWidth: Theme.readingWidth, alignment: .leading)
         .padding(.horizontal, Theme.Space.xl)
-        .padding(.top, Theme.Space.xl)
+        .padding(.top, Theme.Space.m)
         .padding(.bottom, Theme.Space.m)
         .frame(maxWidth: .infinity)
     }
@@ -358,6 +379,7 @@ struct PastSessionPage: View {
             }
         }
         .task(id: sessionId) { if store.history.row(sessionId) == nil { await store.history.find(sessionId) } }
+        .toolbar { toolbar(row) }
         .confirmationDialog(L("past.forget_title", row?.name ?? sessionId), isPresented: $confirmForget) {
             Button(L("past.forget_confirm"), role: .destructive) {
                 Task {
@@ -369,59 +391,86 @@ struct PastSessionPage: View {
         }
     }
 
-    @ViewBuilder private func header(_ row: HistoryRow?) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Space.s) {
-            HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s) {
+    /// Its name as a plain title; Restore with its words, when it can be;
+    /// Forget and Copy in the menu.
+    @ToolbarContentBuilder private func toolbar(_ row: HistoryRow?) -> some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            VStack(alignment: .leading, spacing: 0) {
                 Text(verbatim: row?.name ?? sessionId)
-                    .font(Theme.Fonts.title)
-                    .foregroundStyle(Theme.onSurface)
-                    .accessibilityAddTraits(.isHeader)
-                Spacer(minLength: Theme.Space.m)
-                if let row {
-                    HStack(spacing: Theme.Space.s) {
-                        if store.isBusy("session:\(row.label)") { ProgressView().controlSize(.small) }
-                        if row.restorable {
-                            Button(L("sessions.restore")) { Task { await store.history.restore(row) } }
-                                .buttonStyle(.pill(.filled))
-                                .disabled(store.isBusy("session:\(row.label)") || !store.state.online)
-                        }
-                        Menu {
-                            Button(L("past.forget"), role: .destructive) { confirmForget = true }
-                            Divider()
-                            Button(L("mention.copy", row.sessionId)) { Mentions.copyText(row.sessionId) }
-                        } label: {
-                            Label(L("thread.more"), systemImage: "ellipsis")
-                        }
-                        .menuIndicator(.hidden)
-                        .fixedSize()
-                    }
-                }
+                    .font(.headline)
+                    .lineLimit(1)
+                Text(verbatim: L("history.ended"))
+                    .font(.caption)
+                    .foregroundStyle(Theme.onSurfaceVariant)
             }
+            .padding(.horizontal, Theme.Space.xs)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+        }
+        .sharedBackgroundVisibility(.hidden)
+        ToolbarSpacer(.flexible)
+        if let row {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if store.isBusy("session:\(row.label)") { ProgressView().controlSize(.small) }
+                if row.restorable {
+                    Button { Task { await store.history.restore(row) } } label: {
+                        Label(L("sessions.restore"), systemImage: "arrow.counterclockwise")
+                    }
+                    // The page's one decisive action: tinted.
+                    .buttonStyle(.borderedProminent)
+                    .help(L("sessions.restore_help"))
+                    .accessibilityIdentifier("past-restore")
+                    .disabled(store.isBusy("session:\(row.label)") || !store.state.online)
+                }
+                Menu {
+                    Button(role: .destructive) { confirmForget = true } label: {
+                        Label(L("past.forget"), systemImage: "trash")
+                    }
+                    Divider()
+                    Button(L("mention.copy", row.sessionId)) { Mentions.copyText(row.sessionId) }
+                } label: {
+                    Label(L("thread.more"), systemImage: "ellipsis")
+                }
+                .menuIndicator(.hidden)
+                .accessibilityIdentifier("past-more")
+            }
+        }
+    }
+
+    /// What it was: its title, where it ran, when.
+    @ViewBuilder private func header(_ row: HistoryRow?) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
             if let row {
                 if let title = row.title {
                     Text(verbatim: title).font(Theme.Fonts.text).foregroundStyle(Theme.onSurface).lineLimit(2)
                 }
-                HStack(spacing: Theme.Space.xs) {
-                    Chip(text: L("history.ended"))
+                MetaLine {
                     if let c = row.committee {
-                        Button { store.place = .committee(c) } label: { Chip(text: c) }.buttonStyle(.plain)
+                        Button { store.place = .committee(c) } label: {
+                            Text(verbatim: c).foregroundStyle(Theme.committee)
+                        }
+                        .buttonStyle(.plain)
+                        Text(verbatim: "·")
                     }
-                    Chip(text: [row.runtime, row.model].compactMap { $0 }.joined(separator: " · "))
+                    Text(verbatim: [row.runtime, row.model].compactMap { $0 }.joined(separator: " · "))
                 }
-                Text(verbatim: [row.dir, row.branch].compactMap { $0 }.joined(separator: " · "))
-                    .font(Theme.Fonts.row)
-                    .foregroundStyle(Theme.onSurfaceVariant)
-                    .textSelection(.enabled)
-                Text(verbatim: L("past.meta",
-                                 row.startedAt.formatted(date: .abbreviated, time: .shortened),
-                                 row.lastActivity.formatted(.relative(presentation: .named)),
-                                 HistoryView.ran(row)))
-                    .font(Theme.Fonts.row)
-                    .foregroundStyle(Theme.onSurfaceVariant)
+                MetaLine {
+                    Text(verbatim: row.dir).truncationMode(.middle).textSelection(.enabled)
+                    if let branch = row.branch {
+                        Text(verbatim: "·")
+                        Label(branch, systemImage: "arrow.triangle.branch").labelStyle(.titleAndIcon)
+                    }
+                }
+                MetaLine {
+                    Text(verbatim: L("past.meta",
+                                     row.startedAt.formatted(date: .abbreviated, time: .shortened),
+                                     row.lastActivity.formatted(.relative(presentation: .named)),
+                                     HistoryView.ran(row)))
+                }
             } else {
                 ProgressView().controlSize(.small)
             }
         }
-        .padding(.top, Theme.Space.xl)
+        .padding(.top, Theme.Space.m)
     }
 }
