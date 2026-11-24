@@ -4802,8 +4802,13 @@ async fn repair_a_legacy_hosted_agy_split_preserves_each_seats_authority_and_que
         to: selected.clone().into(),
     };
     let denied = ipc::request::<ipc::RebindHostReply>(&h.socket(), &change, TIMEOUT, TIMEOUT).await;
+    let reason = if cfg!(target_os = "macos") {
+        "could not verify"
+    } else {
+        "requires confirmation in the signed Senate app"
+    };
     assert!(
-        matches!(denied, Err(ipc::ClientError::Remote(error)) if error.message.contains("could not verify"))
+        matches!(denied, Err(ipc::ClientError::Remote(error)) if error.message.contains(reason))
     );
     // A reported PID is a hint. A request from outside the terminal cannot
     // use that PID as proof.
@@ -4833,6 +4838,24 @@ async fn repair_a_legacy_hosted_agy_split_preserves_each_seats_authority_and_que
             .then_some(())
     })
     .await;
+    if !cfg!(target_os = "macos") {
+        let denied =
+            ipc::request::<ipc::RebindHostReply>(&h.socket(), &change, TIMEOUT, TIMEOUT).await;
+        assert!(
+            matches!(denied, Err(ipc::ClientError::Remote(error)) if error.message.contains(reason))
+        );
+        let _: ipc::StopReply = call(
+            &h,
+            &Request::Stop {
+                session: Default::default(),
+                senator: old.senator.clone().into(),
+                force: true,
+            },
+        )
+        .await;
+        h.stop().await;
+        return;
+    }
     let item = h.server.append_silently(
         NewEvent::new(
             committee(),

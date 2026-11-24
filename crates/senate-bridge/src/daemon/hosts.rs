@@ -510,17 +510,28 @@ impl Shared {
                 "repair needs a running hosted agy and a live agy conversation",
             ));
         }
-        let child = host::child_pid(&paths, &id)
-            .filter(|pid| session::pid_alive(*pid))
+        let process = host::child_pid(&paths, &id)
+            .and_then(|pid| kernel_process::inspect(pid).ok())
+            .map(|process| process.identity)
             .ok_or_else(|| IpcError::bad_request("the hosted agy process is gone"))?;
+        let child = process.pid;
         let observed = lock(&self.agy_host_observed).get(&id).is_some_and(|proof| {
-            proof.pid == child
+            proof.process == process
                 && proof.session_id == next.session_id
                 && proof.at.elapsed() <= AGY_HOST_PROOF_TTL
         });
         if !observed && !session::agy_owned_presence(child, &next.session_id).await {
             return Err(IpcError::bad_request(
                 "could not verify that conversation in this terminal. Send a prompt in the new conversation, then retry rebind",
+            ));
+        }
+        if kernel_process::inspect(child)
+            .map(|current| current.identity)
+            .ok()
+            != Some(process)
+        {
+            return Err(IpcError::bad_request(
+                "the hosted agy process changed during rebind",
             ));
         }
         let committee = next

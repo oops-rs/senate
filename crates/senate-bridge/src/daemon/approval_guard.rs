@@ -36,9 +36,17 @@ use crate::host;
 
 /// The most ancestors walked; a deeper chain is refused.
 const DEPTH: usize = 64;
-const PS_TIMEOUT: Duration = Duration::from_secs(2);
 /// Executable names of the coding runtimes.
 const RUNTIMES: [&str; 3] = ["claude", "codex", "agy"];
+
+pub(super) fn advisory_notice(locale: Locale) -> Option<&'static str> {
+    cfg!(target_os = "linux").then(|| {
+        locale.pick(
+            "此机器的人员专用守卫仅为提示。托管代理脱离进程树后可能通过检查。",
+            "The person-only guard is advisory on this machine. A hosted agent that detaches can pass the check.",
+        )
+    })
+}
 
 /// The requests that answer a permission prompt.
 pub(super) fn answers_a_prompt(request: &Request) -> bool {
@@ -46,6 +54,16 @@ pub(super) fn answers_a_prompt(request: &Request) -> bool {
         request,
         Request::Approve { .. } | Request::ApproveSession { .. }
     )
+}
+
+fn needs_app_confirmation(request: &Request) -> bool {
+    matches!(request, Request::RebindHost { .. })
+        || matches!(
+            request,
+            Request::ObserveAdmin {
+                command: senate_observe::AdminRequest::Create { grant },
+            } if grant.scope == senate_observe::Scope::Lines
+        )
 }
 
 /// What only the person does, and what to tell an agent that asks: `None`
@@ -97,9 +115,44 @@ pub(super) fn person_only(request: &Request) -> Option<&'static str> {
 }
 
 impl Front {
+    /// Accept process metadata from the kernel's view of the hook caller.
+    pub(super) async fn bind_hook_process_claims(
+        &self,
+        peer: Option<u32>,
+        report: &mut HookReport,
+    ) -> Result<(), IpcError> {
+        if report.runtime == Runtime::Agy && report.host.is_some() {
+            return self.verify_agy_host_hook(peer, report).await;
+        }
+        let peer = peer.ok_or_else(|| IpcError::bad_request("cannot identify the hook caller"))?;
+        // In-process clients already share the daemon's authority.
+        if peer == std::process::id() {
+            return Ok(());
+        }
+        if report.runtime != Runtime::Claude {
+            report.claude_pid = report
+                .claude_pid
+                .filter(|pid| report.runtime == Runtime::Acp && *pid == peer);
+            report.ancestor_pids.clear();
+            return Ok(());
+        }
+        let _permit = self
+            .process_checks
+            .acquire()
+            .await
+            .expect("process check budget is never closed");
+        let ancestors = kernel_process::ancestors(peer, DEPTH)
+            .map_err(|_| IpcError::bad_request("cannot verify the hook caller's ancestry"))?;
+        report.claude_pid = report
+            .claude_pid
+            .filter(|pid| ancestors.iter().any(|process| process.pid == *pid));
+        report.ancestor_pids = ancestors.iter().map(|process| process.pid).collect();
+        Ok(())
+    }
+
     /// Replace the hook's claimed ancestry with the Unix peer's actual
     /// process path before letting it name or rebind a hosted agy.
-    pub(super) async fn verify_agy_host_hook(
+    async fn verify_agy_host_hook(
         &self,
         peer: Option<u32>,
         report: &mut HookReport,
@@ -120,17 +173,20 @@ impl Front {
             .acquire()
             .await
             .expect("process check budget is never closed");
-        let ancestors = session::ancestor_pids(peer, 16, Duration::from_millis(250)).await;
-        if !ancestors.contains(&child) {
-            return Err(wrong_host());
-        }
-        report.ancestor_pids = ancestors.into_iter().skip(1).collect();
+        let ancestors = kernel_process::ancestors(peer, 15).map_err(|_| wrong_host())?;
+        let process = ancestors
+            .iter()
+            .copied()
+            .find(|process| process.pid == child)
+            .ok_or_else(wrong_host)?;
+        report.claude_pid = None;
+        report.ancestor_pids = ancestors.iter().map(|process| process.pid).collect();
         let mut observed = lock(&self.primary().agy_host_observed);
         observed.retain(|_, proof| proof.at.elapsed() <= AGY_HOST_PROOF_TTL);
         observed.insert(
             host.clone(),
             AgyHostObservation {
-                pid: child,
+                process,
                 session_id: report.session_id.clone(),
                 at: Instant::now(),
             },
@@ -181,6 +237,11 @@ impl Front {
         guidance: &str,
         request: Request,
     ) -> Reply {
+        if !cfg!(target_os = "macos") && needs_app_confirmation(&request) {
+            return Reply::err(refusal(
+                "This operation requires confirmation in the signed Senate app on the machine hosting this Senate",
+            ));
+        }
         match self.refuse_agent_caller(peer, guidance).await {
             Ok(()) => self.dispatch(request).await,
             Err(refused) => Reply::err(refused),
@@ -316,33 +377,10 @@ fn fd_refusal(peer: u32) -> IpcError {
     )
 }
 
-/// A process's parent and the name of its executable (the last part of
-/// its first argument), by `ps`, portable across macOS and Linux.
+/// Read the parent PID and executable name from the kernel's process table.
 async fn process(pid: u32) -> Result<(u32, String), ProcessLookup> {
-    let child = tokio::process::Command::new("ps")
-        .args(["-o", "ppid=", "-o", "args=", "-p", &pid.to_string()])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(PS_TIMEOUT, child)
-        .await
-        .map_err(|_| ProcessLookup::Unreadable)??;
-    if !output.status.success() {
-        return Err(ProcessLookup::Unreadable);
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut words = text.split_whitespace();
-    let parent = words
-        .next()
-        .and_then(|p| p.parse().ok())
-        .ok_or(ProcessLookup::Unreadable)?;
-    let name = words
-        .next()
-        .and_then(|program| program.rsplit('/').next())
-        .unwrap_or_default()
-        .to_owned();
-    Ok((parent, name))
+    let process = kernel_process::inspect(pid)?;
+    Ok((process.parent_pid, process.name))
 }
 
 /// `start` and every process above it up to pid 1, each with its name, or

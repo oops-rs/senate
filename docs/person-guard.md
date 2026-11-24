@@ -35,8 +35,12 @@ and command allowlist.
   and restricts migration into and out of the protected subtree. A regular
   same-user systemd scope alone cannot establish that invariant. Verify the
   peer's membership against that protected subtree using a stable peer process
-  handle. Refuse uncontained hosting if the kernel or supervisor is unavailable.
-  WSL needs these same primitives. SSH itself adds no lineage exemptions.
+  handle. Without these primitives, Linux and WSL continue to host with the
+  existing advisory checks. The daemon logs that mode at startup and reports
+  it in `senate status` and `senate setup doctor`. `senate setup guard` is an
+  explicit, sudo-run provisioning step for the root-owned supervisor, its
+  cgroup v2 subtree and its limited launch interface. It is never automatic.
+  SSH adds no lineage exemptions.
 
 Scope and coalition checks identify processes born inside the hosted lineage.
 A scheduler or service that independently launches a process in another lineage
@@ -45,6 +49,26 @@ process detaches from a person's terminal. Such callers may pass the routine
 check. Separate containment of those broker interfaces is required if their
 use must be prohibited. Runtime ancestry still catches known native agents
 while the original process chain remains readable.
+
+The table describes the target behavior once the proposed controls are in place.
+
+| Platform | Hosted descendants | Native agents | App confirmation | Hooks |
+| --- | --- | --- | --- | --- |
+| macOS, signed app available | Enforced by coalition | Advisory for routine requests | Enforced for lines and rebind | Enforced process binding and role reauthorization |
+| macOS, headless or without a trusted app | Enforced by coalition | Advisory for routine requests | Refused for lines and rebind | Enforced process binding and role reauthorization |
+| Linux or WSL, provisioned scope and stable process handles | Enforced by cgroup | Advisory for routine requests | Refused for lines and rebind | Enforced process binding and role reauthorization |
+| Linux or WSL, without a protected scope | Advisory for routine requests | Advisory for routine requests | Refused for lines and rebind | Enforced for privileged hooks with stable process proof, otherwise refused |
+
+Hosted Codex needs a protected app-server as well as a protected TUI. Each
+host owns its backend for the lifetime of the session, including while no viewer
+is attached. Native sessions keep the configured `codex.listen`. On enforced
+platforms hosted sessions warn when they bypass that shared endpoint. Existing
+shared hosts remain running and advisory until restore, and the explicit
+`[codex] hosted_app_server = "shared"` opt-out keeps them advisory. Doctor,
+status and session list surface that mode. Restore must verify that the hosted
+backend can load the existing conversation before claiming migration support.
+Measure backend memory per hosted session and verify approvals, delivery,
+timelines and Observe against the dedicated connection.
 
 ## Operations that need the app
 

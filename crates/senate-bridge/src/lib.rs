@@ -82,6 +82,7 @@ pub mod init;
 pub mod install;
 pub mod ipc;
 pub mod joinname;
+mod kernel_process;
 pub mod mcp;
 pub mod notify;
 pub mod paths;

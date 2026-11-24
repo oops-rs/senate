@@ -340,6 +340,9 @@ pub fn live(live: &Live, l: Locale) -> Vec<Check> {
                     format!("running (pid {}, {})", status.pid, status.version),
                 ),
             ));
+            if let Some(notice) = &status.person_guard_advisory {
+                checks.push(Check::warn("daemon.person_guard", notice, None::<String>));
+            }
             if let Some(fd) = &status.descriptors {
                 let used = fd
                     .open

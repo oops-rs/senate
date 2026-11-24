@@ -884,7 +884,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn observer_credentials_are_only_accepted_on_the_machine_observe_routes()
     -> anyhow::Result<()> {
-        use senate_bridge::ipc::{IpcClient, Request};
+        use senate_bridge::ipc::{self, IpcClient, Request};
         use senate_observe::{AdminRequest, CreateGrant, IssuedGrant, LinePolicy, Preview, Scope};
         use senate_observe_protocol::{Event, Snapshot};
         use std::time::Duration;
@@ -963,7 +963,15 @@ mod tests {
             grant.auto_confirmed = true;
             grant.topology = true;
         }
-        let auto: IssuedGrant = ipc.call(&auto, wait).await?;
+        let auto = ipc.call::<IssuedGrant>(&auto, wait).await;
+        let auto = if cfg!(target_os = "macos") {
+            Some(auto?)
+        } else {
+            assert!(
+                matches!(auto, Err(ipc::ClientError::Remote(error)) if error.message.contains("requires confirmation in the signed Senate app"))
+            );
+            None
+        };
         let issued: IssuedGrant = ipc.call(&issue("first scene"), wait).await?;
         let other: IssuedGrant = ipc.call(&issue("second scene"), wait).await?;
         let http = reqwest::Client::builder()
@@ -986,28 +994,34 @@ mod tests {
         assert_eq!(snapshot.committees.len(), 1);
         assert_eq!(snapshot.committees[0].id, "visible");
         let events = format!("{}/v1/observe/events", top.url);
-        let auto_state: Snapshot = http
-            .get(&state)
-            .bearer_auth(&auto.token)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert!(
-            auto_state
-                .capabilities
-                .iter()
-                .any(|capability| capability == "lines_auto")
-        );
-        assert_eq!(
-            auto_state
-                .senate
-                .person
-                .and_then(|person| person.card)
-                .and_then(|card| card.value.get("fixture").cloned()),
-            Some(serde_json::json!({"palette":2}))
-        );
+        let auto_state = if let Some(auto) = &auto {
+            let auto_state: Snapshot = http
+                .get(&state)
+                .bearer_auth(&auto.token)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            assert!(
+                auto_state
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "lines_auto")
+            );
+            assert_eq!(
+                auto_state
+                    .senate
+                    .person
+                    .as_ref()
+                    .and_then(|person| person.card.as_ref())
+                    .and_then(|card| card.value.get("fixture").cloned()),
+                Some(serde_json::json!({"palette":2}))
+            );
+            Some(auto_state)
+        } else {
+            None
+        };
         let resume = |bearer: &str| {
             http.get(&events)
                 .bearer_auth(bearer)
@@ -1037,19 +1051,21 @@ mod tests {
             )
             .await?;
         assert_eq!(candidate.line, "first-line-canary");
-        let mut auto_stream = http
-            .get(&events)
-            .bearer_auth(&auto.token)
-            .header("last-event-id", auto_state.cursor.as_str())
-            .send()
-            .await?
-            .error_for_status()?;
-        let frame = first_observed_event(&mut auto_stream, committed.event.seq, true).await?;
-        let Event::MessagePosted(data) = frame.event else {
-            anyhow::bail!("expected public filing");
-        };
-        assert_eq!(data.line.as_deref(), Some(candidate.line.as_str()));
-        drop(auto_stream);
+        if let (Some(auto), Some(auto_state)) = (auto, auto_state) {
+            let mut auto_stream = http
+                .get(&events)
+                .bearer_auth(&auto.token)
+                .header("last-event-id", auto_state.cursor.as_str())
+                .send()
+                .await?
+                .error_for_status()?;
+            let frame = first_observed_event(&mut auto_stream, committed.event.seq, true).await?;
+            let Event::MessagePosted(data) = frame.event else {
+                anyhow::bail!("expected public filing");
+            };
+            assert_eq!(data.line.as_deref(), Some(candidate.line.as_str()));
+            drop(auto_stream);
+        }
         let expected = committed.event.seq;
         let pong = first_observed_event(&mut stream, expected, false).await?;
         let Event::MessagePosted(message) = pong.event else {

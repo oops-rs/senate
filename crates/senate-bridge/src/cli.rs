@@ -4097,6 +4097,9 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                 ),
             };
             print!("{text}");
+            if let Some(notice) = view.person_guard_advisory {
+                println!("{notice}");
+            }
             if let Some(note) = crate::remote::experimental_notice(&paths) {
                 println!("{note}");
             }

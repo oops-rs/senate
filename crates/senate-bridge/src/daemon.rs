@@ -160,6 +160,7 @@ use crate::ipc::{
     IpcError, JoinReply, Pong, Posted, Reply, Request, SayKind, SearchReply, SessionSelector,
     StatusReply, ThreadReply, ThreadSeen, WatchEvent, codes,
 };
+use crate::kernel_process;
 use crate::notify::{News, Notifications, NotifyConfig};
 use crate::paths::Paths;
 use crate::routing;
@@ -415,7 +416,7 @@ type Rebind = (Option<String>, Option<CommitteeId>);
 
 const AGY_HOST_PROOF_TTL: Duration = Duration::from_secs(60);
 struct AgyHostObservation {
-    pid: u32,
+    process: kernel_process::ProcessIdentity,
     session_id: String,
     at: Instant,
 }
@@ -750,6 +751,9 @@ async fn start_bridge(
         desktop,
     } = options;
     config.validate().map_err(anyhow::Error::msg)?;
+    if let Some(notice) = approval_guard::advisory_notice(config.locale) {
+        tracing::warn!("{notice}");
+    }
     paths.check_socket(config.locale)?;
     paths
         .ensure_home()
@@ -3856,6 +3860,7 @@ impl Shared {
         let dropped_hooks = self.hook_drop_status(&sessions, &host_status.hosted)?;
         Ok(StatusReply {
             descriptors: Some(crate::fd::snapshot()),
+            person_guard_advisory: approval_guard::advisory_notice(self.locale).map(str::to_owned),
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             person: self.config.person.clone(),
@@ -3914,6 +3919,15 @@ impl Shared {
         } else {
             (hint.clone(), source)
         };
+        let people = self.people();
+        if [&hint, &agent]
+            .into_iter()
+            .any(|name| name == &self.config.person || people.is_person(name))
+        {
+            return Err(IpcError::bad_request(
+                "a session cannot register under a person's senator name",
+            ));
+        }
         let mut upsert = SessionUpsert {
             session_id: report.session_id.clone(),
             cwd: report.cwd.clone(),
@@ -6431,6 +6445,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
         .as_ref()
         .is_some_and(|cred| cred.uid() == rustix::process::geteuid().as_raw());
     let peer = credentials
+        .filter(|_| same_owner)
         .and_then(|cred| cred.pid())
         .and_then(|pid| u32::try_from(pid).ok());
     let (read, mut write) = stream.into_split();
@@ -6533,11 +6548,21 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     }
                         return;
                     }
-                    Ok(Request::SessionHook(mut report))
-                        if report.runtime == Runtime::Agy && report.host.is_some() =>
-                    {
-                        let reply = match shared.verify_agy_host_hook(peer, &mut report).await {
-                            Ok(()) => Box::pin(shared.dispatch(Request::SessionHook(report))).await,
+                    Ok(request @ (Request::Hook(_) | Request::SessionHook(_))) => {
+                        let (mut report, native) = match request {
+                            Request::Hook(report) => (report, false),
+                            Request::SessionHook(report) => (report, true),
+                            _ => unreachable!(),
+                        };
+                        let reply = match shared.bind_hook_process_claims(peer, &mut report).await {
+                            Ok(()) => {
+                                let verified = if native {
+                                    Request::SessionHook(report)
+                                } else {
+                                    Request::Hook(report)
+                                };
+                                Box::pin(shared.dispatch(verified)).await
+                            }
                             Err(error) => Reply::err(error),
                         };
                         (reply, false)
