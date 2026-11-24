@@ -274,7 +274,11 @@ async fn agy_pages_and_watches_root_steps_and_replaces_a_completed_tool() {
         &db,
         1,
         6,
-        "[senate · fixtures · seq 42 · from chair · question]\n│ Read this",
+        concat!(
+            "[senate] The messages below come from the Senate committee log for fixtures.\n\n",
+            "[senate · fixtures · seq 42 · from chair · question]\n│ Read this\n",
+            "↳ Bridge instructions\n\nUnguttered transport footer"
+        ),
     );
     agy::user(&db, 2, 4, "A human prompt\nWith a second line");
     agy::planner(&db, 3, "A reply", "A thought");
@@ -338,6 +342,9 @@ async fn agy_pages_and_watches_root_steps_and_replaces_a_completed_tool() {
 
     let first = page(&h, agy::SESSION, TimelineDirection::After, Some(0)).await;
     assert!(first.available && first.working && first.has_newer && !first.has_older);
+    let wire = serde_json::to_value(&first.items[0]).unwrap();
+    assert_eq!(wire["committee"], "fixtures");
+    assert_eq!(wire["senate_seq"], 42);
     assert!(matches!(&first.items[0].kind, TimelineKind::SenateMessage {
         committee: Some(committee), seq: Some(42), text, ..
     } if committee == "fixtures" && text == "Read this"));

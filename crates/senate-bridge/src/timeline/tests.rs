@@ -9,6 +9,92 @@ fn append(file: &mut tempfile::NamedTempFile, line: &str) {
     writeln!(file, "{line}").unwrap();
 }
 
+// Shape from Claude's peer delivery: the enqueue record and its consumed
+// turn both contain the message. The identity, notes and metadata are synthetic.
+const PEER_DELIVERY: &str = concat!(
+    "Another Claude session sent a message:\n",
+    "[senate] The messages below come from the Senate committee log for demo.\n\n",
+    "[senate · demo · seq 41 · from [senator::alex] (your user) · note]\n",
+    "│ First note\n│\n│ Second paragraph\n",
+    "↳ Bridge instructions\n\n",
+    "[senate · demo · seq 42 · from [senator::helper] · answer in thread 37]\n",
+    "refs: path test.txt\n│ Reply text\n\n",
+    "This is a synthetic runtime trailer.",
+);
+
+#[test]
+fn claude_delivered_peer_turn_is_two_cards_and_never_a_title() {
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    for row in [
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": PEER_DELIVERY}),
+        serde_json::json!({"type": "user", "isMeta": true, "message": {"content": "Unrelated meta prompt"}}),
+        serde_json::json!({
+            "type": "user", "isMeta": true, "isSidechain": false,
+            "origin": {"kind": "peer"}, "promptSource": "system", "turnOrigin": "peer",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "message": {"role": "user", "content": PEER_DELIVERY}
+        }),
+        serde_json::json!({"type": "user", "message": {"content": "A real prompt"}}),
+    ] {
+        append(&mut file, &row.to_string());
+    }
+    let mut reader = Transcript::open(file.path().into(), Runtime::Claude).unwrap();
+    let page = reader.page(TimelineDirection::Tail, None, 60).unwrap();
+    assert_eq!(page.items.len(), 3);
+    assert!(matches!(&page.items[0].kind, TimelineKind::SenateMessage {
+        committee: Some(committee), seq: Some(41), thread: Some(41), from: Some(from),
+        kind: Some(kind), text,
+    } if committee == "demo" && from == "[senator::alex]" && kind == "note"
+        && text == "First note\n\nSecond paragraph"));
+    assert!(matches!(&page.items[1].kind, TimelineKind::SenateMessage {
+        seq: Some(42), thread: Some(37), kind: Some(kind), text, ..
+    } if kind == "answer" && text == "Reply text"));
+    for (item, senate_seq) in page.items.iter().zip([41, 42]) {
+        let wire = serde_json::to_value(item).unwrap();
+        assert_eq!(wire["committee"], "demo");
+        assert_eq!(wire["senate_seq"], senate_seq);
+    }
+    assert!(page.items[0].ts.is_some());
+    assert_eq!(page.items[0].ts, page.items[1].ts);
+
+    let titles =
+        TitleCache::default().refresh(vec![("peer".into(), Runtime::Claude, file.path().into())]);
+    assert_eq!(titles["peer"].title.as_deref(), Some("A real prompt"));
+}
+
+#[test]
+fn codex_delivered_notes_keep_a_real_prompt_and_strip_unfenced_transport_text() {
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    let text = concat!(
+        "A real prompt\n\n",
+        "[senate] 下面的消息来自 Senate 委员会 demo 的日志。\n\n",
+        "[senate · demo · seq 41 · 来自 [senator::alex]（你的用户） · note]\n",
+        "│ Text of the note\n↳ Bridge instructions\nUnguttered transport footer"
+    );
+    append(
+        &mut file,
+        &serde_json::json!({
+            "type": "response_item", "payload": {
+                "type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]
+            }
+        })
+        .to_string(),
+    );
+    let mut reader = Transcript::open(file.path().into(), Runtime::Codex).unwrap();
+    let page = reader.page(TimelineDirection::Tail, None, 60).unwrap();
+    assert_eq!(page.items.len(), 2);
+    assert!(
+        matches!(&page.items[0].kind, TimelineKind::UserMessage { text }
+        if text == "A real prompt")
+    );
+    let wire = serde_json::to_value(&page.items[1]).unwrap();
+    assert_eq!(wire["committee"], "demo");
+    assert_eq!(wire["senate_seq"], 41);
+    assert!(matches!(&page.items[1].kind, TimelineKind::SenateMessage {
+        seq: Some(41), from: Some(from), text, ..
+    } if from == "[senator::alex]" && text == "Text of the note"));
+}
+
 #[test]
 fn claude_folds_tool_results_and_keeps_only_the_main_conversation() {
     let mut file = tempfile::Builder::new()
