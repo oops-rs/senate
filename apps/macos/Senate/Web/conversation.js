@@ -387,7 +387,9 @@
         head.appendChild(el("span", "from", s.from || ""));
         head.appendChild(el("span", "meta", "  " + (s.kindLabel || "") + "  " + (s.committee || "") + (s.thread ? " · #" + s.thread : "")));
         d.appendChild(head);
-        d.appendChild(el("div", "typed", s.text));
+        const content = el("div", "senate-body");
+        content.appendChild(body(row.md));
+        d.appendChild(content);
         if (s.committee && s.thread) {
           d.dataset.committee = s.committee; d.dataset.thread = String(s.thread);
           d.setAttribute("role", "link");

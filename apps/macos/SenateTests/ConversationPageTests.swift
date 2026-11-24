@@ -439,3 +439,31 @@ extension ConversationPageTests {
         }
     }
 }
+
+extension ConversationPageTests {
+    /// A Senate card's body is Markdown, as every other message: inline
+    /// code, a fenced block and a list, not literal backticks.
+    @Test func aSenateCardsBodyIsMarkdown() async throws {
+        let page = ConversationPage(store: nil)
+        for _ in 0..<500 where !page.isReady { try await Task.sleep(for: .milliseconds(20)) }
+        let text = "Ping `ibot` about it:\n\n- first\n- second\n\n```sh\ncargo test -p ibot\n```"
+        let rows = ConversationRows.rows([
+            TimelineEntry(seq: 1, at: nil, truncated: false, body: .senate(message: SenateLine(
+                committee: "senate", seq: 140, thread: 140, from: "wendell", kind: "note",
+                kindLabel: "note", text: text))),
+        ])
+        ConversationPage.fixtureRows["card"] = rows
+        page.show(.fixtureRows("card"))
+        for _ in 0..<200 {
+            if await page.evaluate("return document.querySelectorAll('.senate').length") as? Int == 1 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        _ = await page.evaluate("await window.senate.renderAll(); return true")
+        let shape = await page.evaluate("""
+            const b = document.querySelector('.senate .senate-body');
+            return [b.querySelectorAll(':not(pre) > code').length, b.querySelectorAll('li').length,
+                    b.querySelectorAll('pre').length, b.textContent.includes('`')].join(',')
+            """) as? String
+        #expect(shape == "1,2,1,false", "inline code, two items, a block, no backticks: \(shape ?? "nil")")
+    }
+}

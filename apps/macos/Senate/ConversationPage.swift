@@ -317,7 +317,10 @@ final class ConversationPage: NSObject {
         case let .notice(level, text): out["kind"] = "notice"; out["text"] = text; out["level"] = level
         case let .senate(m):
             out["kind"] = "senate"
-            var s: [String: Any] = ["text": names(m.text)]
+            // Its body as Markdown, as every other message: the same
+            // blocks, rendered lazily, links only through the page's handler.
+            var s: [String: Any] = [:]
+            out["md"] = markdown("s/\(session)/\(row.id)", names(m.text))
             if let f = m.from { s["from"] = names(f) }
             if let k = m.kindLabel { s["kindLabel"] = k }
             if let c = m.committee { s["committee"] = c }
