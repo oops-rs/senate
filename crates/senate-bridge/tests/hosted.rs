@@ -3324,7 +3324,8 @@ async fn watch_all_shows_every_session_and_enter_attaches_to_one() {
         wait_terminal_output(&mut output, b"\x1b[c").await;
         input.write_all(b"\x1b[?62;22c").await.unwrap();
         wait_terminal_output(&mut output, b"resized to 30 120").await;
-        input.write_all(b"from the grid\rpaint\r").await.unwrap();
+        input.write_all(b"from the grid \x1b[1;").await.unwrap();
+        input.write_all(b"2:1D\rpaint\r").await.unwrap();
         wait_terminal_output(&mut output, b"fixture TUI").await;
         // Detaching comes back to the grid.
         input.write_all(b"\x1d").await.unwrap();
@@ -3333,7 +3334,10 @@ async fn watch_all_shows_every_session_and_enter_attaches_to_one() {
     .await
     .expect("attached from the grid, and back");
     let reached = std::fs::read_to_string(&typed).unwrap_or_default();
-    assert_eq!(reached, "from the grid\n", "only what the attach typed");
+    assert_eq!(
+        reached, "from the grid \x1b[1;2:1D\n",
+        "only what the attach typed"
+    );
 
     let draining = tokio::spawn(async move {
         let mut buf = [0; 4096];

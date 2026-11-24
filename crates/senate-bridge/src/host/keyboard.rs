@@ -6,13 +6,6 @@ const STACK_LIMIT: usize = 32;
 pub(super) const RESET_MODIFY_OTHER_KEYS: &[u8] = b"\x1b[>4;0m";
 pub(super) const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
 pub(super) const XTERM_SHIFT_ENTER: &[u8] = b"\x1b[27;2;13~";
-pub(super) const MODIFIED_ENTER: &[&[u8]] = &[
-    SHIFT_ENTER,
-    b"\x1b[13;2:1u",
-    b"\x1b[13;2:2u",
-    b"\x1b[13;2:3u",
-    XTERM_SHIFT_ENTER,
-];
 
 #[derive(Default)]
 struct Screen {
@@ -25,8 +18,7 @@ pub(super) struct Keyboard {
     main: Screen,
     alternate: Screen,
     in_alternate: bool,
-    used_flags: bool,
-    modify_other_keys: Option<u16>,
+    modify_other_keys: u16,
 }
 
 impl Keyboard {
@@ -53,10 +45,12 @@ impl Keyboard {
     pub(super) fn select_screen(&mut self, alternate: bool, out: &mut Vec<u8>) {
         if self.in_alternate != alternate {
             self.in_alternate = alternate;
-            if self.used_flags {
-                set_flags(out, self.flags());
-            }
+            set_flags(out, self.flags());
         }
+    }
+
+    pub(super) fn in_alternate(&self) -> bool {
+        self.in_alternate
     }
 
     pub(super) fn change(&mut self, prefix: u8, params: &[u8], out: &mut Vec<u8>) -> bool {
@@ -95,7 +89,6 @@ impl Keyboard {
         // A bare pop is part of several runtimes' startup reset. It must
         // not pop the viewer's stack or emit a spurious mode change.
         if prefix != b'<' || previous != self.flags() {
-            self.used_flags = true;
             set_flags(out, self.flags());
         }
         true
@@ -105,18 +98,14 @@ impl Keyboard {
         if let Some((Some(4), mode)) = parameters(params)
             && mode.unwrap_or(0) <= 2
         {
-            self.modify_other_keys = Some(mode.unwrap_or(0));
+            self.modify_other_keys = mode.unwrap_or(0);
         }
     }
 
     pub(super) fn preamble(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        if self.used_flags {
-            set_flags(&mut bytes, self.flags());
-        }
-        if let Some(mode) = self.modify_other_keys {
-            bytes.extend_from_slice(format!("\x1b[>4;{mode}m").as_bytes());
-        }
+        set_flags(&mut bytes, self.flags());
+        bytes.extend_from_slice(format!("\x1b[>4;{}m", self.modify_other_keys).as_bytes());
         bytes
     }
 }

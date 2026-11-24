@@ -31,12 +31,9 @@ pub(super) struct Pastes {
 
 impl Pastes {
     pub(super) fn waiting_for_key(&self) -> bool {
-        self.state == State::Plain
-            && !self.pending.is_empty()
-            && !(self.pending.len() > 2
-                && super::keyboard::MODIFIED_ENTER
-                    .iter()
-                    .any(|key| key.starts_with(&self.pending)))
+        // A bare ESC, Alt-[ or Alt-O can be a key by itself. With parameter
+        // bytes already in hand, wait for the rest of the escape sequence.
+        self.state == State::Plain && (1..=2).contains(&self.pending.len())
     }
 
     pub(super) fn flush_key(&mut self) -> Vec<u8> {
@@ -442,6 +439,41 @@ pub(crate) fn store(drops: &Path, name: &OsStr, input: &mut impl Read) -> io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn navigation_keys_are_forwarded_whole_at_every_read_boundary() {
+        let mut keys = Vec::new();
+        for direction in ['A', 'B', 'C', 'D', 'H', 'F'] {
+            keys.push(format!("\x1b[{direction}"));
+            keys.push(format!("\x1bO{direction}"));
+            for modifier in [1, 2, 3, 5] {
+                keys.push(format!("\x1b[1;{modifier}{direction}"));
+                keys.push(format!("\x1b[1;{modifier}:2{direction}"));
+            }
+        }
+        for key in [5, 6] {
+            keys.push(format!("\x1b[{key}~"));
+            for modifier in [1, 2, 3, 5] {
+                keys.push(format!("\x1b[{key};{modifier}~"));
+                keys.push(format!("\x1b[{key};{modifier}:3~"));
+            }
+        }
+        for code in [57348, 57349, 57350, 57351, 57352, 57353, 57354, 57355] {
+            keys.push(format!("\x1b[{code};5:2u"));
+        }
+        for key in keys {
+            let key = key.as_bytes();
+            for split in 1..key.len() {
+                let mut pastes = Pastes::default();
+                assert_eq!(pastes.feed(&key[..split], None).await, (vec![], false));
+                assert_eq!(pastes.waiting_for_key(), split <= 2);
+                assert_eq!(
+                    pastes.feed(&key[split..], None).await,
+                    (key.to_vec(), false)
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn modified_enter_survives_split_reads_and_only_keys_are_translated() {

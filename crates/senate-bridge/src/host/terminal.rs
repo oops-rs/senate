@@ -15,7 +15,7 @@ use tokio::net::UnixStream;
 use tokio::signal::unix::{SignalKind, signal};
 
 use super::emulation::{Colors, Scheme};
-use super::keyboard::{self, MODIFIED_ENTER};
+use super::keyboard;
 use super::paste::Pastes;
 use super::{ATTACHED, ATTACHED_NATIVE, ATTACHED_PLAIN, BUSY, COLORS, IO_CHUNK, KEYS, RESIZE};
 use crate::paths::Paths;
@@ -29,7 +29,7 @@ pub(super) const RESET_DISPLAY: &[u8] =
 // Leave the shell at the bottom of the primary screen. Exit the TUI's
 // alternate screen first, then reset cursor, margins and input modes there.
 // End a synchronized update even when a dropped socket cut it in half.
-const RESET_NATIVE_DISPLAY: &[u8] = b"\x1b[?2026l\x1b[?1049;1047;47l\x1b[?6;1l\x1b[r\x1b>\x1b[?7h\x1b[0 q\x1b[0m\x1b[?2004;1004;2031;9;1000;1001;1002;1003;1005;1006;1015;1016l\x1b[?25h\x1b[9999;1H\r\n";
+const RESET_NATIVE_DISPLAY: &[u8] = b"\x1b[?2026l\x1b[=0u\x1b[?1049;1047;47l\x1b[?6;1l\x1b[r\x1b>\x1b[?7h\x1b[0 q\x1b[0m\x1b[?2004;1004;2031;9;1000;1001;1002;1003;1005;1006;1015;1016l\x1b[?25h\x1b[9999;1H\r\n";
 
 fn attach_separator(label: &str, width: u16) -> String {
     let time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z");
@@ -49,30 +49,40 @@ pub(super) fn split_input(bytes: &[u8]) -> (usize, bool) {
     {
         return (detach, true);
     }
-    // Keep the prefix of a detach or modified Enter if it spans reads.
-    let sequences = || DETACH.iter().chain(MODIFIED_ENTER);
-    let max_prefix = sequences()
-        .map(|key| key.len() - 1)
-        .max()
-        .unwrap_or(0)
-        .min(bytes.len());
-    let suffix = (1..=max_prefix)
-        .rev()
-        .find(|&len| {
-            sequences().any(|key| key.len() > len && key.starts_with(&bytes[bytes.len() - len..]))
-        })
-        .unwrap_or(0);
-    (bytes.len() - suffix, false)
+    // Navigation keys can be CSI or SS3, with parameters for modifiers
+    // and Kitty event types. Wait for the final byte before writing them.
+    const MAX_KEY_PREFIX: usize = 32;
+    let tail = bytes.len().saturating_sub(MAX_KEY_PREFIX);
+    if let Some(start) = bytes[tail..].iter().rposition(|&byte| byte == 0x1b) {
+        let start = tail + start;
+        match &bytes[start + 1..] {
+            [] => return (start, false),
+            [b'[' | b'O', params @ ..] if params.iter().all(|b| (0x30..=0x3f).contains(b)) => {
+                return (start, false);
+            }
+            _ => {}
+        }
+    }
+    (bytes.len(), false)
 }
 
-// Foreground, background, light-or-dark and keyboard flags, then DA.
+// Foreground, background, light-or-dark and input modes, then DA.
 // Every terminal answers the last one, so its answer ends the wait whether
 // or not the terminal knew the others.
-const ASK_COLORS: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n\x1b[?u\x1b[c";
+const ASK_COLORS: &[u8] =
+    b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n\x1b[?u\x1b[?1$p\x1b[?66$p\x1b[c";
+
+#[derive(Default)]
+struct TerminalProbe {
+    colors: Colors,
+    application_cursor: bool,
+    application_keypad: bool,
+}
 
 /// The length of the control sequence at the start of `bytes` (an ESC) if
 /// it is a terminal's report, and what it reports when that is a colour.
-fn report(bytes: &[u8], colors: &mut Colors) -> Option<usize> {
+fn report(bytes: &[u8], terminal: &mut TerminalProbe) -> Option<usize> {
+    let colors = &mut terminal.colors;
     match *bytes.get(1)? {
         b']' => {
             // A colour answer is short. Without a nearby end this is a key
@@ -115,6 +125,15 @@ fn report(bytes: &[u8], colors: &mut Colors) -> Option<usize> {
                 }
                 (attributes, b'c') if !attributes.is_empty() => colors.device_attributes = true,
                 (_, b'n') => {}
+                (params, b'$') if bytes.get(4 + params.len()) == Some(&b'y') => {
+                    match params {
+                        b"1;1" | b"1;3" => terminal.application_cursor = true,
+                        b"66;1" | b"66;3" => terminal.application_keypad = true,
+                        b"1;0" | b"1;2" | b"1;4" | b"66;0" | b"66;2" | b"66;4" => {}
+                        _ => return None,
+                    }
+                    return Some(5 + params.len());
+                }
                 _ => return None,
             }
             Some(3 + params + 1)
@@ -126,14 +145,14 @@ fn report(bytes: &[u8], colors: &mut Colors) -> Option<usize> {
 /// Split what arrived after [`ASK_COLORS`] into the terminal's answers and
 /// anything the person typed meanwhile. The flag says whether the device
 /// attributes, the last answer, are in.
-fn read_colors(bytes: &[u8]) -> (Colors, Vec<u8>, bool) {
-    let mut colors = Colors::default();
+fn read_colors(bytes: &[u8]) -> (TerminalProbe, Vec<u8>, bool) {
+    let mut terminal = TerminalProbe::default();
     let mut typed = Vec::new();
     let mut complete = false;
     let mut at = 0;
     while at < bytes.len() {
         let known = (bytes[at] == 0x1b)
-            .then(|| report(&bytes[at..], &mut colors))
+            .then(|| report(&bytes[at..], &mut terminal))
             .flatten();
         match known {
             Some(len) => {
@@ -146,7 +165,8 @@ fn read_colors(bytes: &[u8]) -> (Colors, Vec<u8>, bool) {
             }
         }
     }
-    (colors.checked(), typed, complete)
+    terminal.colors = terminal.colors.checked();
+    (terminal, typed, complete)
 }
 
 async fn send_keys(out: &mut (impl AsyncWrite + Unpin), bytes: &[u8]) -> anyhow::Result<()> {
@@ -228,7 +248,7 @@ impl RawTerminal {
 
     /// What this terminal says its colours are, and what the person typed
     /// while it was being asked.
-    async fn colors(&self) -> (Colors, Vec<u8>) {
+    async fn colors(&self) -> (TerminalProbe, Vec<u8>) {
         let mut answers = Vec::new();
         if self.draw(ASK_COLORS).await.is_ok() {
             let mut chunk = [0u8; 256];
@@ -383,8 +403,8 @@ where
             .draw(attach_separator(label, cols).as_bytes())
             .await?;
     }
-    let (mut colors, typed) = terminal.colors().await;
-    colors.tty = own_tty();
+    let (mut probe, typed) = terminal.colors().await;
+    probe.colors.tty = own_tty();
     // The terminal's title names the session while it is attached.
     let _ = terminal.draw(&super::title::set(label)).await;
     let (mut screen, mut keys) = split(stream);
@@ -394,7 +414,7 @@ where
             terminal.size(&mut keys).await?;
         }
         if takes_colors {
-            let colors = serde_json::to_vec(&colors)?;
+            let colors = serde_json::to_vec(&probe.colors)?;
             keys.write_u8(COLORS).await?;
             keys.write_u16(u16::try_from(colors.len())?).await?;
             keys.write_all(&colors).await?;
@@ -464,13 +484,13 @@ where
     };
     // draw handles partial writes and waits for writable readiness. Bound
     // cleanup in case the attached terminal has disappeared.
-    let mut reset = reset_display(native, colors.keyboard_flags);
+    let mut reset = reset_display(native, &probe);
     reset.extend_from_slice(super::title::RESTORE);
     let _ = tokio::time::timeout(Duration::from_millis(250), terminal.draw(&reset)).await;
     result
 }
 
-fn reset_display(native: bool, inherited_keyboard_flags: Option<u16>) -> Vec<u8> {
+fn reset_display(native: bool, probe: &TerminalProbe) -> Vec<u8> {
     let mut reset = if native {
         RESET_NATIVE_DISPLAY
     } else {
@@ -479,8 +499,16 @@ fn reset_display(native: bool, inherited_keyboard_flags: Option<u16>) -> Vec<u8>
     .to_vec();
     // Native attach probes the person's screen before the TUI paints.
     // The display reset returns to that screen before restoring its flags.
-    if native && let Some(flags) = inherited_keyboard_flags {
-        keyboard::set_flags(&mut reset, flags);
+    if native {
+        if let Some(flags) = probe.colors.keyboard_flags {
+            keyboard::set_flags(&mut reset, flags);
+        }
+        if probe.application_cursor {
+            reset.extend_from_slice(b"\x1b[?1h");
+        }
+        if probe.application_keypad {
+            reset.extend_from_slice(b"\x1b=");
+        }
     }
     reset.extend_from_slice(keyboard::RESET_MODIFY_OTHER_KEYS);
     reset
@@ -492,20 +520,24 @@ mod tests {
 
     #[test]
     fn keyboard_probe_is_not_input_and_detach_restores_inherited_flags() {
-        let (colors, typed, done) = read_colors(b"\x1b[?9u\x1b[13;2u\x1b[?62;22c");
+        let (probe, typed, done) =
+            read_colors(b"\x1b[?9u\x1b[?1;1$y\x1b[13;2u\x1b[?66;1$y\x1b[?62;22c");
         assert!(done);
-        assert_eq!(colors.keyboard_flags, Some(9));
+        assert_eq!(probe.colors.keyboard_flags, Some(9));
         assert_eq!(typed, b"\x1b[13;2u");
-        assert!(reset_display(true, colors.keyboard_flags).ends_with(b"\x1b[=9u\x1b[>4;0m"));
-        assert!(reset_display(false, Some(9)).ends_with(b"\x1b[>4;0m"));
+        let reset = reset_display(true, &probe);
+        assert!(reset.starts_with(b"\x1b[?2026l\x1b[=0u\x1b[?1049;1047;47l"));
+        assert!(reset.ends_with(b"\x1b[=9u\x1b[?1h\x1b=\x1b[>4;0m"));
+        assert!(reset_display(false, &probe).ends_with(b"\x1b[?1049l\x1b[>4;0m"));
     }
 
     #[test]
     fn a_terminals_answers_are_told_apart_from_what_was_typed() {
         // Ghostty, light theme, with a key pressed while it was being asked.
-        let (colors, typed, complete) = read_colors(
+        let (probe, typed, complete) = read_colors(
             b"\x1b]10;rgb:4c4c/4f4f/6969\x1b\\q\x1b]11;rgb:efef/f1f1/f5f5\x07\x1b[?997;2n\x1b[A\x1b[?62;22c",
         );
+        let colors = probe.colors;
         assert_eq!(colors.foreground.as_deref(), Some("rgb:4c4c/4f4f/6969"));
         assert_eq!(colors.background.as_deref(), Some("rgb:efef/f1f1/f5f5"));
         assert_eq!(colors.scheme, Some(Scheme::Light));
@@ -513,9 +545,9 @@ mod tests {
         assert!(complete && colors.device_attributes && colors.scheme_reporting);
 
         // A terminal that knows none of the colour questions still ends the wait.
-        let (colors, typed, complete) = read_colors(b"\x1b[?1;2c");
+        let (probe, typed, complete) = read_colors(b"\x1b[?1;2c");
         assert_eq!(
-            colors,
+            probe.colors,
             Colors {
                 device_attributes: true,
                 ..Colors::default()
@@ -524,13 +556,16 @@ mod tests {
         assert!(typed.is_empty() && complete);
 
         // Alt+] is a key, even with an answer right behind it.
-        let (colors, typed, _) = read_colors(b"\x1b]\x1b]10;rgb:4c4c/4f4f/6969\x1b\\\x1b[?62c");
-        assert_eq!(colors.foreground.as_deref(), Some("rgb:4c4c/4f4f/6969"));
+        let (probe, typed, _) = read_colors(b"\x1b]\x1b]10;rgb:4c4c/4f4f/6969\x1b\\\x1b[?62c");
+        assert_eq!(
+            probe.colors.foreground.as_deref(),
+            Some("rgb:4c4c/4f4f/6969")
+        );
         assert_eq!(typed, b"\x1b]");
 
         // Cut short: nothing is claimed and the wait goes on.
-        let (colors, _, complete) = read_colors(b"\x1b]11;rgb:1e1e/1e1e/2e2e");
-        assert_eq!(colors, Colors::default());
+        let (probe, _, complete) = read_colors(b"\x1b]11;rgb:1e1e/1e1e/2e2e");
+        assert_eq!(probe.colors, Colors::default());
         assert!(!complete);
     }
 

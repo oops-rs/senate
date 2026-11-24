@@ -230,14 +230,14 @@ async fn terminal(client: &Harness, args: &[&str], attach: bool) {
     let (mut output, mut input) = pty.into_split();
     if attach {
         until(&mut output, b"\x1b[c").await;
-        input.write_all(b"\x1b[?62;22c").await.unwrap();
-    }
-    until(&mut output, b"terminal fixture").await;
-    if attach {
-        input.write_all(b"remote keys\r").await.unwrap();
-        until(&mut output, b"got:remote keys").await;
+        input.write_all(b"\x1b[?0u\x1b[?62;22c").await.unwrap();
+        until(&mut output, b"\x1b[=7u").await;
+        input.write_all(b"remote keys \x1b[1;").await.unwrap();
+        input.write_all(b"5:2A\r").await.unwrap();
+        until(&mut output, b"got:remote keys \x1b[1;5:2A").await;
         input.write_all(b"\x1d").await.unwrap();
     } else {
+        until(&mut output, b"terminal fixture").await;
         input.write_all(b"q").await.unwrap();
     }
     assert!(
@@ -263,7 +263,7 @@ async fn remote_test_child() {
     std::fs::write(
         &program,
         format!(
-            "#!/bin/sh\nprintf 'terminal fixture\\r\\n'\n\
+            "#!/bin/sh\nprintf '\\033[>7uterminal fixture\\r\\n'\n\
         while IFS= read -r line; do\n\
         if [ \"$line\" = guard ]; then\n\
           {test:?} --exact remote_agent_child --ignored > guard-result 2>&1 && touch guard-passed\n\
