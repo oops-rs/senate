@@ -187,8 +187,19 @@ final class LinkRouter {
             else { return .unavailable }
             return .shown(.thread("\(committee):\(root)"))
         case let .session(selector):
+            if let (committee, id) = observed(selector) {
+                guard let name = await seat(id, committee: committee, store: store),
+                      let line = live(name, committee: committee, store: store)
+                else { return .unavailable }
+                return .shown(.session(line))
+            }
             return session(selector, store: store).map { .shown(.session($0)) } ?? .unavailable
         case let .senator(name):
+            if let (committee, id) = observed(name) {
+                guard let seat = await seat(id, committee: committee, store: store) else { return .unavailable }
+                if let line = live(seat, committee: committee, store: store) { return .shown(.session(line)) }
+                return await knownCommittee(committee, store: store) ? .shown(.committee(committee)) : .unavailable
+            }
             return senator(name, store: store)
         case let .deskItem(committee, seq):
             guard let entry = store.docketEntries.first(where: { $0.committee == committee && $0.seq == seq })
@@ -206,6 +217,29 @@ final class LinkRouter {
             if store.history.row(native) == nil { await store.history.find(native) }
             return store.history.row(native) != nil ? .shown(.past(native)) : .unavailable
         }
+    }
+
+    /// An Observe seat selector, `<committee>::obs-…`, split. One without
+    /// a committee cannot be resolved (the lookup is per committee), and
+    /// is reported as `("", id)`, which no committee matches.
+    private func observed(_ selector: String) -> (String, String)? {
+        if selector.hasPrefix("obs-") { return ("", selector) }
+        guard let range = selector.range(of: "::"),
+              selector[range.upperBound...].hasPrefix("obs-") else { return nil }
+        return (String(selector[..<range.lowerBound]), String(selector[range.upperBound...]))
+    }
+
+    /// The person's own senator behind an Observe seat selector, by the
+    /// daemon's person-guarded lookup; never a guess from the id.
+    private func seat(_ id: String, committee: String, store: CoreStore) async -> String? {
+        guard !committee.isEmpty, let core = store.core else { return nil }
+        return (try? await core.observeSeatIdentity(id: id, committee: committee)) ?? nil
+    }
+
+    /// The session speaking as `senator`, on `committee` first.
+    private func live(_ senator: String, committee: String, store: CoreStore) -> String? {
+        let lines = ordered(store).filter { Mentions.id($0.mention) == senator }
+        return (lines.first { $0.committee == committee } ?? lines.first)?.sessionId
     }
 
     /// A committee the person can read here: in the roster, or archived.

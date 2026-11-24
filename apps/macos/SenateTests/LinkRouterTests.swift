@@ -39,7 +39,9 @@ import SenateCore
         state.docket = docket([docketEntry(40, "who signs off?", committee: "payments")])
         core.archived = ["old-api"]
         core.missingThreads = [404]
-        core.historyIds = ["obs-abc": "past-2"]
+        core.historyIds = [Self.obs("1"): "past-2"]
+        // `lead` on refund-v2, and `auditor` (no session here) on payments.
+        core.seats = ["refund-v2::\(Self.obs("2"))": "lead", "payments::\(Self.obs("3"))": "auditor"]
         core.push(state)
         for _ in 0..<200 where store.state.senates.count < 2 {
             try await Task.sleep(for: .milliseconds(5))
@@ -48,6 +50,11 @@ import SenateCore
         store.links.windowVisible = { true }
         store.links.activate = {}
         return store
+    }
+
+    /// An Observe selector, by the grammar: `obs-<12 hex>-<32 hex>`.
+    static func obs(_ digit: String) -> String {
+        "obs-0123456789ab-" + String(repeating: digit, count: 32)
     }
 
     func resolve(_ store: CoreStore, _ route: String) async -> LinkRouter.Outcome {
@@ -124,7 +131,11 @@ import SenateCore
             ("senator/refund-v2%3A%3Aledger", .shown(.committee("refund-v2"))),
             ("desk/payments/40", .shown(.desk(entry))),
             ("history/past-3", .shown(.past("past-3"))),
-            ("history/obs-abc", .shown(.past("past-2"))),
+            ("history/\(Self.obs("1"))", .shown(.past("past-2"))),
+            // Observe's opaque seat selectors, resolved by the daemon.
+            ("senator/refund-v2%3A%3A\(Self.obs("2"))", .shown(.session("s-lead"))),
+            ("session/refund-v2%3A%3A\(Self.obs("2"))", .shown(.session("s-lead"))),
+            ("senator/payments%3A%3A\(Self.obs("3"))", .shown(.committee("payments"))),
             ("inbox?senate=id%3Athis-mac", .shown(.section(.inbox))),
             ("committee/payments?senate=%2Falice-desk", .shown(.committee("payments"))),
         ]
@@ -144,7 +155,13 @@ import SenateCore
             "senator/nobody",
             "senator/payments%3A%3Anobody",
             "desk/payments/41",
-            "history/obs-unknown",
+            "history/\(Self.obs("9"))",
+            // A selector the daemon does not know, one for another
+            // committee, one with no committee, and a seat with no session.
+            "senator/refund-v2%3A%3A\(Self.obs("9"))",
+            "senator/payments%3A%3A\(Self.obs("2"))",
+            "session/\(Self.obs("2"))",
+            "session/payments%3A%3A\(Self.obs("3"))",
             "history/never-was",
             // Another machine's Senate, or one not configured here.
             "inbox?senate=id%3Asomeone-else",
@@ -252,7 +269,7 @@ import SenateCore
         let store = try await store()
         let routes = [
             "inbox", "approvals", "desk", "desk/payments/40", "history", "history/past-3",
-            "history/obs-abc", "profile", "committee/payments", "committee/old-api",
+            "history/\(Self.obs("1"))", "senator/refund-v2%3A%3A\(Self.obs("2"))", "profile", "committee/payments", "committee/old-api",
             "thread/refund-v2/7", "thread/payments/12", "session/s-lead",
             "session/refund-v2%3A%3Alead", "senator/lead", "senator/auditor",
             "committee/payments?senate=%2Fteam%2Flocal", "inbox?senate=id%3Athis-mac",

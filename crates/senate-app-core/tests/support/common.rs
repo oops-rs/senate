@@ -1227,12 +1227,18 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 .find(|row| row.session_id == native)
                 .map(|row| row.session_id.clone())
         })),
+        // One seat selector, for `claude` on refund-v2.
+        Request::ObserveAdmin {
+            command: senate_observe::AdminRequest::SeatIdentity { id, committee: c },
+        } => Reply::ok(&(id == FAKE_SEAT && c == committee()).then(|| path("claude"))),
         other => Reply::err(IpcError::bad_request(format!("fake: {other:?}"))),
     }
 }
 
 /// The fake daemon's Observe installation id: `?senate=id:fake-installation`.
 pub const FAKE_INSTALLATION: &str = "fake-installation";
+/// The fake daemon's one Observe seat selector: `claude` on refund-v2.
+pub const FAKE_SEAT: &str = "obs-0123456789ab-0123456789abcdef0123456789abcdef";
 
 /// Two hosted terminals: `claude` (alias `lead`) running with a permission
 /// prompt waiting, and a stopped Codex `reviewer`.

@@ -14,19 +14,33 @@ use crate::ffi::{AppCore, CoreError};
 /// Where a link asks the app to go.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum AppRoute {
-    Committee { name: String },
+    Committee {
+        name: String,
+    },
     /// A local session id, or `committee::alias`.
-    Session { selector: String },
-    Thread { committee: String, root: u64 },
+    Session {
+        selector: String,
+    },
+    Thread {
+        committee: String,
+        root: u64,
+    },
     /// A senator's name, or `committee::alias`.
-    Senator { name: String },
+    Senator {
+        name: String,
+    },
     Desk,
-    DeskItem { committee: String, seq: u64 },
+    DeskItem {
+        committee: String,
+        seq: u64,
+    },
     Approvals,
     Inbox,
     History,
     /// A local session id, or an Observe History `obs-…` id.
-    HistoryEntry { id: String },
+    HistoryEntry {
+        id: String,
+    },
     Profile,
 }
 
@@ -92,6 +106,24 @@ impl AppCore {
         Ok(installation.id)
     }
 
+    /// The senator behind an Observe seat selector (`obs-…`) on
+    /// `committee`, if it names one of the person's own seats there: its
+    /// session name (`claude-…`), never an attachment or a launch.
+    pub async fn observe_seat_identity(
+        &self,
+        id: String,
+        committee: String,
+    ) -> Result<Option<String>, CoreError> {
+        let committee = self.committee_id(&committee)?;
+        let request = Request::ObserveAdmin {
+            command: AdminRequest::SeatIdentity { id, committee },
+        };
+        let seat: Option<senate_core::SenatorName> = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        Ok(seat.map(|name| name.to_string()))
+    }
+
     /// The local session behind an Observe History id (`obs-…`), if it is
     /// an ended session of this machine's primary Senate.
     pub async fn observe_history_session(&self, id: String) -> Result<Option<String>, CoreError> {
@@ -115,10 +147,9 @@ mod tests {
 
     #[test]
     fn the_public_fixtures_parse_the_same_through_the_facade() {
-        let cases: Cases = serde_json::from_str(include_str!(
-            "../../../docs/observe/v1/fixtures/links.json"
-        ))
-        .unwrap();
+        let cases: Cases =
+            serde_json::from_str(include_str!("../../../docs/observe/v1/fixtures/links.json"))
+                .unwrap();
         for (input, canonical) in cases.valid {
             let parsed = parse_app_link(format!("senate://open/v1/{input}")).unwrap();
             assert_eq!(parsed.canonical, format!("senate://open/v1/{canonical}"));
@@ -131,9 +162,10 @@ mod tests {
 
     #[test]
     fn routes_carry_their_decoded_values() {
-        let parsed =
-            parse_app_link("senate://open/v1/session/senate%3A%3Aagent?senate=%2Fteam%2Flocal".into())
-                .unwrap();
+        let parsed = parse_app_link(
+            "senate://open/v1/session/senate%3A%3Aagent?senate=%2Fteam%2Flocal".into(),
+        )
+        .unwrap();
         assert_eq!(
             parsed.route,
             AppRoute::Session {

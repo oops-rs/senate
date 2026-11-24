@@ -34,9 +34,7 @@ pub(super) fn run(args: Open) -> anyhow::Result<()> {
     if cfg!(target_os = "macos") {
         launch(Path::new(OPEN), &link)
     } else {
-        bail!(
-            "opening Senate links needs the Senate app, which is for macOS; the link is {link}"
-        )
+        bail!("opening Senate links needs the Senate app, which is for macOS; the link is {link}")
     }
 }
 

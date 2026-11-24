@@ -1056,7 +1056,7 @@ impl AppCore {
         }
     }
 
-    fn committee_id(&self, committee: &str) -> Result<CommitteeId, CoreError> {
+    pub(crate) fn committee_id(&self, committee: &str) -> Result<CommitteeId, CoreError> {
         CommitteeId::new(committee).map_err(|e| CoreError::Invalid {
             message: match self.locale() {
                 Locale::Zh => format!("committee {committee:?} 无效：{e}"),

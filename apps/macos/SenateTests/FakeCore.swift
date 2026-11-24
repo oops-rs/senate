@@ -295,6 +295,13 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
         guard let installationId else { throw CoreError.Failed(message: "Observe requires a machine-hosted Senate") }
         return installationId
     }
+    /// Observe seat selectors, by `committee::selector`, and the senators
+    /// they mean.
+    var seats: [String: String] = [:]
+    func observeSeatIdentity(id: String, committee: String) async throws -> String? {
+        try record("observe-seat \(committee) \(id)")
+        return seats["\(committee)::\(id)"]
+    }
     /// Observe History ids (`obs-…`) and the local sessions they mean.
     var historyIds: [String: String] = [:]
     func observeHistorySession(id: String) async throws -> String? {

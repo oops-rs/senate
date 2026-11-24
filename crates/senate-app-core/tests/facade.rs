@@ -974,6 +974,19 @@ async fn app_links_read_the_installation_and_resolve_history_ids_without_acting(
             .unwrap(),
         None
     );
+    assert_eq!(
+        core.observe_seat_identity(common::FAKE_SEAT.into(), "refund-v2".into())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("claude")
+    );
+    assert_eq!(
+        core.observe_seat_identity(common::FAKE_SEAT.into(), "payments".into())
+            .await
+            .unwrap(),
+        None
+    );
     // Reads only: no request that sends, approves, attaches, stops or edits.
     for request in daemon.requests() {
         assert!(
