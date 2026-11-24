@@ -970,16 +970,37 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(u64::MAX);
             let limit = limit.unwrap_or(40).clamp(1, 100);
-            let mut samples = vec![
-                (
-                    419,
-                    430,
-                    "Cross-committee refund policy",
-                    "active",
-                    Some(CommitteeId::new("payments").unwrap()),
-                ),
-                (400, 410, "Confirm refund copy", "archived", None),
-            ];
+            // Each committee its own threads; a crossing is in both logs.
+            let mut samples = match committee.as_str() {
+                "payments" => vec![
+                    (
+                        77,
+                        431,
+                        "Cross-committee refund policy",
+                        "active",
+                        Some(CommitteeId::new("refund-v2").unwrap()),
+                    ),
+                    (
+                        60,
+                        429,
+                        "Ledger migration freeze window",
+                        "processing",
+                        None,
+                    ),
+                ],
+                "infra" => vec![(31, 300, "Flaky watch test on CI", "active", None)],
+                "docs" => Vec::new(),
+                _ => vec![
+                    (
+                        419,
+                        430,
+                        "Cross-committee refund policy",
+                        "active",
+                        Some(CommitteeId::new("payments").unwrap()),
+                    ),
+                    (400, 410, "Confirm refund copy", "archived", None),
+                ],
+            };
             if committee == crate::common::committee() && w.activity_seq >= 502 {
                 let state = match w.activity_seq {
                     502 => "processing",
