@@ -2623,11 +2623,13 @@ dependencies = [
 name = "senate-app-core"
 version = "0.12.3"
 dependencies = [
+ "axum",
  "cc",
  "chrono",
  "senate-bridge",
  "senate-core",
  "senate-markdown",
+ "senate-observe",
  "serde",
  "serde_json",
  "tempfile",

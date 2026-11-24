@@ -456,6 +456,31 @@ impl Drop for FakeDaemon {
     }
 }
 
+/// A grant from the fake: the real Observe router (the same HTTP, auth, CORS
+/// and SSE a Senate serves) on a loopback port, playing a recording
+/// (`FAKE_OBSERVE_RECORDING=<file>`, else the protocol's synthetic demo).
+/// Its grant registry lives under `$SENATE_HOME/observe-fake`.
+async fn observe_serve(
+    grant: senate_observe::CreateGrant,
+) -> Result<senate_observe::IssuedGrant, Box<dyn std::error::Error + Send + Sync>> {
+    use senate_observe::Recording;
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+    let home = senate_bridge::Paths::from_env()?.home().join("observe-fake");
+    std::fs::create_dir_all(&home)?;
+    let registry = senate_observe::Registry::open(&home, listener.local_addr()?)?;
+    let recording = match std::env::var("FAKE_OBSERVE_RECORDING") {
+        Ok(file) => Recording::read(Path::new(&file))?,
+        Err(_) => Recording::demo()?,
+    };
+    recording.attach(&registry);
+    let issued = registry.create(grant, Default::default())?;
+    let app = senate_observe::router(registry).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Ok(issued)
+}
+
 async fn serve(conn: UnixStream, world: Arc<Mutex<World>>, events: broadcast::Sender<WatchEvent>) {
     let (r, mut w) = conn.into_split();
     let mut lines = BufReader::new(r).lines();
@@ -607,6 +632,19 @@ async fn serve(conn: UnixStream, world: Arc<Mutex<World>>, events: broadcast::Se
             }
             let _ = lines.next_line().await;
             return;
+        }
+        if let Request::ObserveAdmin {
+            command: senate_observe::AdminRequest::Create { grant },
+        } = &request
+        {
+            world.lock().unwrap().requests.push(request.clone());
+            let reply = match observe_serve(grant.clone()).await {
+                Ok(issued) => Reply::ok(&issued),
+                Err(error) => Reply::err(IpcError::bad_request(format!("fake observe: {error}"))),
+            };
+            let l = serde_json::to_string(&reply).unwrap();
+            w.write_all(format!("{l}\n").as_bytes()).await.unwrap();
+            continue;
         }
         if let Request::TimelineWatch { session_id, after } = &request {
             world.lock().unwrap().requests.push(request.clone());
