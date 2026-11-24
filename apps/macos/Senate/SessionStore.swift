@@ -103,9 +103,25 @@ extension CoreStore {
         guard timeline?.sessionId != open else { return }
         if let old = timeline {
             core?.stopTimeline(sessionId: old.sessionId)
+            // Still on the window's stack: kept, to come back to as it was
+            // (older pages read included), no longer followed meanwhile.
+            parked[old.sessionId] = old
         }
+        // Only what the stack can go back to.
+        let onStack = Set(([root] + path).compactMap { p -> String? in
+            if case let .session(id) = p { return id }
+            if case let .past(id) = p { return id }
+            return nil
+        })
+        parked = parked.filter { onStack.contains($0.key) }
         guard let open else {
             timeline = nil
+            return
+        }
+        if let back = parked.removeValue(forKey: open) {
+            timeline = back
+            // Followed again from where it was left.
+            if back.available { follow(back) } else { Task { await readTail(back) } }
             return
         }
         let t = SessionTimeline(sessionId: open)

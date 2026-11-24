@@ -12,29 +12,41 @@ struct MainWindow: View {
             Sidebar(store: store)
                 .navigationSplitViewColumnWidth(min: 220, ideal: Theme.sidebarWidth, max: 340)
         } detail: {
-            content
-                // Wide enough that nothing in it wraps into a tall column.
-                .frame(minWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
-                .background(Theme.surface.ignoresSafeArea())
-                .safeAreaInset(edge: .top, spacing: 0) {
-                    if store.state.online, let error = store.shownError {
-                        ErrorBanner(message: error) { store.actionError = nil }
-                    }
+            // One stack for every page: a link inside a page pushes, the
+            // sidebar starts it again, and the system draws Back.
+            NavigationStack(path: $store.path) {
+                framed(store.root)
+                    .navigationDestination(for: CoreStore.Place.self) { framed($0) }
+            }
+            // Wide enough that nothing in it wraps into a tall column.
+            .frame(minWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if store.state.online, let error = store.shownError {
+                    ErrorBanner(message: error) { store.actionError = nil }
                 }
-                .navigationTitle(title)
-                .toolbar(removing: .title)
-                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+            }
+            .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         }
         .background { Shortcuts(store: store) }
     }
 
+    /// A page with what every page has: the window's ground, and its name
+    /// for Mission Control and VoiceOver (not drawn).
+    private func framed(_ place: CoreStore.Place) -> some View {
+        page(place)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.surface.ignoresSafeArea())
+            .navigationTitle(title(place))
+            .toolbar(removing: .title)
+    }
+
     /// The window's name, for Mission Control and VoiceOver; it is not drawn.
-    private var title: String {
-        switch store.place {
-        case .thread:
-            if let row = store.selectedRow { return Mentions.shared.plain(row.title, committee: row.committee) }
-        case .session:
-            if let s = store.selectedSession { return s.displayName }
+    private func title(_ place: CoreStore.Place) -> String {
+        switch place {
+        case let .thread(key):
+            if let row = store.row(key) { return Mentions.shared.plain(row.title, committee: row.committee) }
+        case let .session(id):
+            if let s = store.session(id) { return s.displayName }
         case let .committee(name):
             return name.isEmpty ? L("sidebar.no_committee") : name
         case .section(.senates):
@@ -53,23 +65,24 @@ struct MainWindow: View {
 
     private typealias Section = CoreStore.Section
 
-    @ViewBuilder private var content: some View {
+    /// A page of the window, for the stack's root or a page pushed on it.
+    @ViewBuilder private func page(_ place: CoreStore.Place) -> some View {
         if let problem = store.setupError {
             SetupProblemView(store: store, message: problem)
         } else if !store.state.online {
             OfflineView(store: store)
         } else {
-            switch store.place {
-            case .thread:
-                if let row = store.selectedRow {
+            switch place {
+            case let .thread(key):
+                if let row = store.row(key) {
                     ThreadPage(store: store, row: row)
                 } else if let error = store.threadError {
                     EmptyState(text: L("inbox.thread_failed"), detail: error)
                 } else {
                     ProgressView().controlSize(.small)
                 }
-            case .session:
-                if let session = store.selectedSession {
+            case let .session(id):
+                if let session = store.session(id) {
                     SessionPage(store: store, session: session)
                 } else {
                     EmptyState(text: L("session.gone"))
@@ -101,9 +114,12 @@ private struct Shortcuts: View {
             // while Senate is in the Dock; these buttons' in the menu bar only.
             if !store.showInDock {
                 ForEach(Array(CoreStore.Section.allCases.enumerated()), id: \.element) { index, section in
-                    Button(section.title) { store.place = .section(section) }
+                    Button(section.title) { store.select(.section(section)) }
                         .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
                 }
+                Button(L("nav.back")) { store.back() }
+                    .keyboardShortcut("[")
+                    .disabled(!store.canGoBack)
                 Button(L("toolbar.refresh")) {
                     if store.state.online { store.refresh() } else { store.reconnect() }
                 }
@@ -267,10 +283,13 @@ private struct Sidebar: View {
         searching = false
     }
 
+    /// The sidebar shows the stack's root (what was chosen in it; a page
+    /// pushed above does not move it, which would start the stack again);
+    /// choosing in it starts the window's navigation from there.
     private var place: Binding<CoreStore.Place?> {
         Binding(
-            get: { store.place },
-            set: { if let place = $0 { store.place = place } }
+            get: { store.root },
+            set: { if let place = $0 { store.select(place) } }
         )
     }
 }
@@ -527,7 +546,7 @@ private struct AccountPopover: View {
         let state = store.state
         return [
             Action(title: L("account.profile"), symbol: "person.crop.circle", shortcut: "⌘3", enabled: state.online) {
-                store.place = .section(.senates)
+                store.select(.section(.senates))
             },
             Action(title: L("sessions.watch"), symbol: "rectangle.split.3x1", shortcut: nil,
                    enabled: state.online && state.sessions.contains { $0.running }) {
