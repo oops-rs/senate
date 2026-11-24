@@ -249,6 +249,13 @@ pub(crate) fn config() -> SpeakerConfig {
 pub(crate) fn config_in(locale: Locale) -> SpeakerConfig {
     let mut config = SpeakerConfig::new("/nonexistent/senate-speaker-tests");
     config.locale = locale;
+    // The daily digest is armed from the wall clock (in the machine's zone,
+    // 18:00 by default), which paused tokio time does not move. A test that
+    // advances time would meet it whenever it runs just before 18:00: put it
+    // half a day away. Tests of the daily digest send it themselves.
+    config.memory.digest_at = (chrono::Local::now() + chrono::Duration::hours(12))
+        .format("%H:%M")
+        .to_string();
     config
 }
 
