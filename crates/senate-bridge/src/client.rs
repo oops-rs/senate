@@ -207,10 +207,36 @@ impl ApiClient {
         committee: Option<&CommitteeId>,
         initial: bool,
     ) -> Result<SenatorName, ApiClientError> {
+        self.put_alias(primary, alias, committee, initial, None)
+            .await
+    }
+
+    /// [`Self::set_alias`] for the Speaker's office, as `acted_by`: the
+    /// agent keeps its owner.
+    pub(crate) async fn set_alias_for_office(
+        &self,
+        primary: &SenatorName,
+        alias: &SenatorName,
+        committee: &CommitteeId,
+        acted_by: &SenatorName,
+    ) -> Result<SenatorName, ApiClientError> {
+        self.put_alias(primary, alias, Some(committee), false, Some(acted_by))
+            .await
+    }
+
+    async fn put_alias(
+        &self,
+        primary: &SenatorName,
+        alias: &SenatorName,
+        committee: Option<&CommitteeId>,
+        initial: bool,
+        acted_by: Option<&SenatorName>,
+    ) -> Result<SenatorName, ApiClientError> {
         let request = senate_core::api::SetAlias {
             alias: alias.clone(),
             initial,
             committee: committee.cloned(),
+            acted_by: acted_by.cloned(),
         };
         let response = self
             .authed(self.http.put(self.url(&format!("/v1/aliases/{primary}"))))

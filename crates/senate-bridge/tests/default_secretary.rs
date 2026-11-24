@@ -664,3 +664,116 @@ async fn the_person_names_a_chair_and_an_agent_cannot_in_their_name() {
     );
     h.stop().await;
 }
+
+/// The desk carries out "make X the chair, alias it main, drop the old
+/// chair" with its own tools: speaker_chair, speaker_alias,
+/// speaker_unseat. A member cannot; nor can an agent typing the person's
+/// commands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_desk_names_and_unseats_with_its_own_tools() {
+    let mut h = machine().await;
+    let secretary: DefaultSecretary = call(&h, &Request::EnsureSecretary).await;
+    let secretary = secretary.senator.unwrap();
+    let spawn = |alias: &str, dir: std::path::PathBuf| Request::Spawn {
+        attempt_id: None,
+        session: Default::default(),
+        runtime: Some(HostedRuntime::Claude),
+        profile: None,
+        committee: common::committee(),
+        alias: Some(path(alias)),
+        cwd: dir,
+        chair: false,
+        secretary: false,
+        prompt: None,
+        model: Default::default(),
+    };
+    let old_chair: SpawnReply = call(&h, &spawn("old", h.dir.path().to_path_buf())).await;
+    let next: SpawnReply = call(&h, &spawn("agy", h.dir.path().to_path_buf())).await;
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    let desk = as_session(&rows, &secretary);
+
+    let named: serde_json::Value = call(
+        &h,
+        &Request::SpeakerAlias {
+            session: desk.clone(),
+            committee: common::committee(),
+            senator: next.senator.clone(),
+            alias: path("main"),
+        },
+    )
+    .await;
+    assert_eq!(named["alias"], "main");
+    assert_eq!(
+        h.server
+            .state
+            .inner
+            .lock()
+            .unwrap()
+            .aliases
+            .get(&common::committee(), &path("main")),
+        Some(&next.senator)
+    );
+    let unseated: senate_core::api::CommitteeSeatInfo = call(
+        &h,
+        &Request::SpeakerUnseat {
+            session: desk,
+            committee: common::committee(),
+            senator: path("old"),
+            id: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        unseated.senator, old_chair.senator,
+        "the alias named its senator"
+    );
+    assert_eq!(unseated.action, senate_core::CommitteeSeatAction::Unseat);
+
+    // A member is not the desk.
+    let member = as_session(&rows, &next.senator);
+    match ipc::request::<serde_json::Value>(
+        &h.socket(),
+        &Request::SpeakerAlias {
+            session: member,
+            committee: common::committee(),
+            senator: next.senator.clone(),
+            alias: path("boss"),
+        },
+        TIMEOUT,
+        TIMEOUT,
+    )
+    .await
+    {
+        Err(ipc::ClientError::Remote(error)) => {
+            assert_eq!(error.code, ipc::codes::NOT_PRESIDING, "{error:?}")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+
+    // An agent typing the person's alias command is refused.
+    let agent_dir = h.dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        h.dir.path().join("fixture-claude"),
+        format!(
+            "#!/bin/sh\n{RECORD_HOSTED_ARGV}\n\
+             while [ ! -e .go ]; do sleep 0.05; done\n\
+             {BIN:?} alias {} boss --committee refund-v2 > .guard.tmp 2>&1; echo \"exit $?\" >> .guard.tmp; mv .guard.tmp .guard\n\
+             while IFS= read -r line; do :; done\n",
+            next.senator
+        ),
+    )
+    .unwrap();
+    let _: SpawnReply = call(&h, &spawn("typist", agent_dir.clone())).await;
+    std::fs::write(agent_dir.join(".go"), "").unwrap();
+    let out = common::eventually("the TUI's alias command came back", TIMEOUT, || {
+        std::fs::read_to_string(agent_dir.join(".guard")).ok()
+    })
+    .await;
+    assert!(out.contains("exit 1"), "{out}");
+    assert!(
+        out.contains("inside the process tree of") && out.contains("speaker_alias"),
+        "{out}"
+    );
+    h.stop().await;
+}

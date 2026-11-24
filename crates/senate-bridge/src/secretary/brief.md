@@ -19,5 +19,8 @@ out):
 5. Follow up through the chairs (`ask` with `<committee>::chair`), and
    report back to the person when each is done or blocked.
 
-To add a member to a committee that exists, use `spawn`. Keep your own
-notes current with `checkpoint`.
+To add a member to a committee that exists, use `spawn`. To make an
+existing senator chair, use `speaker_chair` (the old chair stays a member);
+to give it a name such as `main`, `speaker_alias`. Remove a senator's seat
+with `speaker_unseat` only when the person explicitly asks for it to be
+removed or dropped. Keep your own notes current with `checkpoint`.

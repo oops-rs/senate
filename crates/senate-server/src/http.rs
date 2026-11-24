@@ -345,12 +345,20 @@ async fn set_alias(
             "an alias needs a coding session's primary senator ID",
         ));
     }
-    state
+    let roster = state.hub.roster_now();
+    let runs_it = roster.may_act_as(&person.0, &primary);
+    let office = request.acted_by.as_ref().is_some_and(|agent| {
+        state.hub.built_in() != Some(agent) && roster.may_act_for_office(&person.0, agent)
+    });
+    if let Err(error) = &runs_it
+        && !office
+    {
+        return Err(ApiFailure::forbidden(error.to_string()));
+    }
+    let set = state
         .hub
-        .roster_now()
-        .may_act_as(&person.0, &primary)
-        .map_err(|error| ApiFailure::forbidden(error.to_string()))?;
-    let set = state.hub.set_alias(&person.0, &primary, request).await?;
+        .set_alias(&person.0, &primary, request, runs_it.is_ok())
+        .await?;
     Ok(Json(set.alias))
 }
 

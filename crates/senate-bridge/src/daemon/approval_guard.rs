@@ -48,7 +48,55 @@ pub(super) fn answers_a_prompt(request: &Request) -> bool {
     )
 }
 
+/// What only the person does, and what to tell an agent that asks: `None`
+/// for any other request.
+pub(super) fn person_only(request: &Request) -> Option<&'static str> {
+    Some(match request {
+        Request::Timeline { .. }
+        | Request::SessionHistory { .. }
+        | Request::SessionSearch { .. }
+        | Request::SessionForget { .. } => {
+            "Read session transcripts from your own terminal or the Senate app"
+        }
+        // As the person (no session). With a session it is the Speaker's
+        // office's, checked by the front and the server.
+        Request::SetChair { session, .. }
+            if session.session_id.is_none() && session.claude_pid.is_none() =>
+        {
+            "Naming a chair as the person is the person's to do: run `senate senator chair` from your own terminal"
+        }
+        // An agent names its own session with `join`, and the desk acts for
+        // the office with its own tools.
+        Request::SetAlias { .. }
+        | Request::RemoveAlias { .. }
+        | Request::SetCommitteeSeat { .. } => {
+            "Aliases and seats set as the person are the person's to change: run the command from your own terminal (a session names itself with `join`; the Speaker's desk has speaker_alias and speaker_unseat)"
+        }
+        Request::EnsureSecretary => {
+            "Only the person starts the default secretary: ask it from your own terminal or the Senate app"
+        }
+        request if answers_a_prompt(request) => {
+            "A permission prompt is a person's decision: answer it from your own terminal or the Senate app"
+        }
+        _ => return None,
+    })
+}
+
 impl Front {
+    /// Serve `request` unless its caller is inside a coding session's
+    /// process tree ([`person_only`]).
+    pub(super) async fn guarded_dispatch(
+        self: &Arc<Self>,
+        peer: Option<u32>,
+        guidance: &str,
+        request: Request,
+    ) -> Reply {
+        match self.refuse_agent_caller(peer, guidance).await {
+            Ok(()) => self.dispatch(request).await,
+            Err(refused) => Reply::err(refused),
+        }
+    }
+
     /// Refuse a caller inside a coding session's process tree.
     pub(super) async fn refuse_agent_caller(
         &self,
@@ -191,6 +239,65 @@ fn refusal(message: &str) -> IpcError {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_persons_own_acts_are_guarded_and_a_sessions_are_not() {
+        use senate_core::CommitteeSeatAction;
+        let person = SessionSelector::default();
+        let session = SessionSelector {
+            session_id: Some("s".into()),
+            claude_pid: None,
+        };
+        let chair = |session| Request::SetChair {
+            session,
+            committee: None,
+            senator: "codex-1".parse().unwrap(),
+        };
+        assert!(person_only(&chair(person)).is_some_and(|g| g.contains("senate senator chair")));
+        assert_eq!(
+            person_only(&chair(session.clone())),
+            None,
+            "the desk's speaker_chair"
+        );
+        for request in [
+            Request::SetAlias {
+                senator: senate_core::alias::AliasName::bare("codex-1".parse().unwrap()),
+                alias: "main".parse().unwrap(),
+                committee: None,
+            },
+            Request::RemoveAlias {
+                primary: "codex-1".parse().unwrap(),
+                alias: "main".parse().unwrap(),
+                committee: None,
+            },
+            Request::SetCommitteeSeat {
+                committee: senate_core::CommitteeId::new("ibot").unwrap(),
+                request: senate_core::api::SetCommitteeSeat {
+                    senator: "codex-1".parse().unwrap(),
+                    action: CommitteeSeatAction::Unseat,
+                    id: Default::default(),
+                    acted_by: None,
+                },
+            },
+        ] {
+            assert!(
+                person_only(&request).is_some_and(|g| g.contains("speaker_alias")),
+                "{request:?}"
+            );
+        }
+        // A session naming itself is the session's own act.
+        assert_eq!(
+            person_only(&Request::JoinAs {
+                session,
+                committee: senate_core::CommitteeId::new("ibot").unwrap(),
+                senator: "main".parse().unwrap(),
+            }),
+            None
+        );
+        assert!(person_only(&Request::EnsureSecretary).is_some());
+        assert_eq!(person_only(&Request::Ping), None);
+    }
+
     use super::*;
 
     #[tokio::test]

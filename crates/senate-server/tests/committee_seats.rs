@@ -103,6 +103,7 @@ async fn unseating_an_alias_retires_one_seat_until_an_explicit_join() {
         alias: path("reviewer"),
         initial: false,
         committee: Some(committee.clone()),
+        acted_by: None,
     };
     let response = server
         .request(Method::PUT, &format!("/v1/aliases/{primary}"), ALICE)
@@ -342,5 +343,81 @@ async fn changing_someone_elses_seat_requires_the_speakers_authority() {
         "forbidden",
     )
     .await;
+    server.running.shutdown().await.unwrap();
+}
+
+/// The Speaker's office names another person's agent: only as a desk worker
+/// the authenticated person runs (acted_by), and the agent keeps its owner.
+#[tokio::test]
+async fn the_speakers_office_aliases_an_agent_it_does_not_run_without_taking_it() {
+    let server = TestServer::start_configured(Arc::new(MemoryStore::new()), |config| {
+        config.roster.speaker = Some("senator::carol".parse().unwrap());
+    })
+    .await;
+    assert_eq!(
+        server.heartbeat(ALICE, PRIMARY).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    // carol's desk worker, seated as carol's by appointing it.
+    let desk = "claude-desk-test";
+    let appointed = server
+        .request(
+            Method::POST,
+            &api::secretaries_of_path(&path("carol")),
+            CAROL,
+        )
+        .json(&api::SetSecretaries {
+            secretaries: vec![path(desk)],
+            acted_by: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(appointed.status(), StatusCode::OK);
+    let alias = |acted_by: Option<&str>| api::SetAlias {
+        alias: path("main"),
+        initial: false,
+        committee: Some(committee()),
+        acted_by: acted_by.map(path),
+    };
+    let put = |token: &'static str, body: api::SetAlias| {
+        server
+            .request(Method::PUT, &format!("/v1/aliases/{PRIMARY}"), token)
+            .json(&body)
+            .send()
+    };
+    // Not carol's agent, and no office named: refused.
+    api_error(
+        put(CAROL, alias(None)).await.unwrap(),
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+    // bob cannot act as carol's desk worker.
+    api_error(
+        put(BOB, alias(Some(desk))).await.unwrap(),
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+    // carol, as her desk worker: set, and alice still runs it.
+    let set = put(CAROL, alias(Some(desk))).await.unwrap();
+    assert_eq!(set.status(), StatusCode::OK);
+    let aliases: senate_core::alias::CommitteeAliases = server
+        .request(Method::GET, "/v1/committee-aliases", ALICE)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        aliases.get(&committee(), &path("main")),
+        Some(&path(PRIMARY))
+    );
+    assert_eq!(
+        server.running.hub.roster_now().owner_of(&path(PRIMARY)),
+        Some(&name("alice"))
+    );
     server.running.shutdown().await.unwrap();
 }
