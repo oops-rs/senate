@@ -84,6 +84,30 @@ enum TownSnapshot {
             print("snapshot: holding the quiet town \(hold) s app=\(ProcessInfo.processInfo.processIdentifier) web=\(web)")
             try? await Task.sleep(for: .seconds(hold))
         }
+        // SENATE_APP_TOWN_ABLATE=<s>: where the cost goes, in front, `<s>` seconds a step,
+        // each step drawing less than the one before: everything, the canvas at
+        // 1x, back at full resolution without people, without houses, without the
+        // ground, nothing at all.
+        if let each = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_ABLATE"].flatMap(Double.init) {
+            let web = (page.web.value(forKey: "_webProcessIdentifier") as? Int) ?? 0
+            let ids = "app=\(ProcessInfo.processInfo.processIdentifier) web=\(web)"
+            page.web.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            let dpr = page.web.window?.backingScaleFactor ?? 2
+            let steps: [(String, String)] = [
+                ("full", ""), ("res1x", "window.town.resolution(1)"), ("nopeople", "window.town.resolution(\(dpr)); window.town.ablate('people')"),
+                ("nohouses", "window.town.ablate('houses')"), ("noground", "window.town.ablate('ground')"), ("empty", "window.town.ablate('all')"),
+            ]
+            for (name, js) in steps {
+                if !js.isEmpty { _ = await page.evaluate(js + "; return true") }
+                try? await Task.sleep(for: .seconds(1))
+                print("snapshot: phase \(name) \(ids)")
+                await shot("ablate-\(name)")
+                try? await Task.sleep(for: .seconds(each))
+            }
+            print("snapshot: phase done")
+            return
+        }
         // SENATE_APP_TOWN_PHASES=<s>: what the town costs in each state, `<s>` seconds each:
         // in front (key), visible behind another window, on another page, minimised.
         if let each = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_PHASES"].flatMap(Double.init) {
