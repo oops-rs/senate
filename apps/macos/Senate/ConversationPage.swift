@@ -53,6 +53,14 @@ final class ConversationPage: NSObject {
     let web: PageWebView
     /// The view showing the web view now.
     weak var host: PageHost?
+    /// The hosts on screen, the newest last: a page pushed on the window's
+    /// stack takes the web view; popped, it goes back to the one below.
+    private var hosts: [WeakHost] = []
+    /// Where the reader was in each conversation left (its row at the top
+    /// and how far down the window, or the foot), to come back to it.
+    private var anchors: [ConversationSource: [String: Any]] = [:]
+    /// The conversation just shown, still to be put back where it was.
+    private var restoring: ConversationSource?
     private let bridge = WKContentWorld.world(name: "senate")
     private weak var store: CoreStore?
     private(set) var source: ConversationSource?
@@ -136,6 +144,14 @@ final class ConversationPage: NSObject {
     /// Show `source`: the page starts again when it changes.
     func show(_ source: ConversationSource) {
         guard source != self.source else { return }
+        // Where the reader is in the one left: read before the next is
+        // sent (the page runs calls in the order they are made).
+        if let old = self.source, ready {
+            web.callAsyncJavaScript("return window.senate.anchor()", arguments: [:], in: nil, in: bridge) { [weak self] result in
+                if case let .success(value) = result, let a = value as? [String: Any] { self?.anchors[old] = a }
+            }
+        }
+        restoring = anchors[source] != nil ? source : nil
         self.source = source
         sent = [:]
         order = []
@@ -160,6 +176,7 @@ final class ConversationPage: NSObject {
         recentSources.append(source)
         while recentSources.count > 4 {
             let old = recentSources.removeFirst()
+            anchors[old] = nil
             if let gone = keysBySource.removeValue(forKey: old) { Self.markdown.forget(keys: Array(gone)) }
         }
     }
@@ -177,6 +194,7 @@ final class ConversationPage: NSObject {
                 if let t = store.timeline, t.sessionId == id {
                     _ = (t.rows, t.loading, t.hasOlder, t.loadingOlder, t.working, t.available)
                 }
+                _ = store.sentNotes[id]
             case .thread:
                 _ = (store.thread, store.threadError)
             #if DEBUG
@@ -204,9 +222,25 @@ final class ConversationPage: NSObject {
         guard let source else { return nil }
         switch source {
         case let .session(id):
-            guard let t = store?.timeline, t.sessionId == id else { return ([], [:]) }
+            guard let store, let t = store.timeline, t.sessionId == id else { return ([], [:]) }
             let rows = t.loading ? [] : t.rows
-            return (rows.map { row in Row(id: row.id, value: row) { [unowned self] in encode(row, session: id, committee: t.committee) } },
+            // Notes sent from the composer and not delivered yet, at the
+            // foot, until the session's own card for each arrives.
+            let me = store.state.person.map { "[senator::\($0)]" }
+            let sent = t.loading ? [] : store.unconfirmed(id, in: t.items)
+            let pending = sent.enumerated().map { i, note in
+                let queued = note.queued(now: Clock.shared.now)
+                return Row(id: UInt64.max - UInt64(sent.count - i), value: "\(note.committee)#\(note.seq)#\(queued)") { [unowned self] in
+                    [
+                        "id": UInt64.max - UInt64(sent.count - i), "kind": "senate", "thinking": [String](),
+                        "pending": queued ? L("session.note_queued") : L("session.note_sending"),
+                        "senate": ["from": me.map { Mentions.shared.plain($0, committee: note.committee) } ?? "",
+                                   "kindLabel": L("session.note_kind"), "committee": note.committee] as [String: Any],
+                        "md": markdown("p/\(id)/\(note.committee)/\(note.seq)", Mentions.shared.plain(note.text, committee: note.committee)),
+                    ]
+                }
+            }
+            return (rows.map { row in Row(id: row.id, value: row) { [unowned self] in encode(row, session: id, committee: t.committee) } } + pending,
                     ["hasOlder": t.hasOlder, "loadingOlder": t.loadingOlder, "working": t.working])
         case let .thread(committee, root):
             guard let view = store?.thread, view.committee == committee, view.root == root else { return ([], [:]) }
@@ -262,6 +296,45 @@ final class ConversationPage: NSObject {
         order = ids
         sentState = state
         call("window.senate.apply(op)", ["op": op])
+        restore()
+    }
+
+    /// Back to a conversation left: put it where the reader was, once its
+    /// row is on the page.
+    private func restore() {
+        guard let source, restoring == source, let a = anchors[source], ready else { return }
+        web.callAsyncJavaScript("return window.senate.restore(a)", arguments: ["a": a], in: nil, in: bridge) { [weak self] result in
+            if case let .success(done) = result, done as? Bool == true, self?.restoring == source {
+                self?.restoring = nil
+            }
+        }
+    }
+
+    // MARK: Hosts
+
+    /// A host came on screen: it shows the page.
+    func adopt(_ host: PageHost) {
+        hosts.removeAll { $0.host == nil || $0.host === host }
+        hosts.append(WeakHost(host: host))
+        attach(to: host)
+    }
+
+    /// A host left the screen: the page goes back to the newest one still
+    /// on it, showing what that one shows.
+    func release(_ host: PageHost) {
+        hosts.removeAll { $0.host == nil || $0.host === host }
+        guard self.host === host || self.host == nil else { return }
+        self.host = nil
+        if let back = hosts.last(where: { $0.host?.window != nil })?.host { attach(to: back) }
+    }
+
+    private func attach(to host: PageHost) {
+        self.host = host
+        web.translatesAutoresizingMaskIntoConstraints = true
+        web.autoresizingMask = [.width, .height]
+        web.frame = host.bounds
+        host.addSubview(web)
+        if let source = host.source { show(source) }
     }
 
     /// Whether `ids` is `order` with rows read above it: the page's rows
@@ -794,24 +867,25 @@ struct ConversationView: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ host: PageHost, coordinator: ()) {
-        if host.page?.host === host { host.page?.host = nil }
+        host.page?.release(host)
     }
 }
 
+/// Where the window's one web page is shown: a page on the navigation
+/// stack holds one; the newest on screen has the web view.
 final class PageHost: NSView {
     weak var page: ConversationPage?
     var source: ConversationSource?
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard window != nil, let page, let source else { return }
-        page.host = self
-        page.web.translatesAutoresizingMaskIntoConstraints = true
-        page.web.autoresizingMask = [.width, .height]
-        page.web.frame = bounds
-        addSubview(page.web)
-        page.show(source)
+        guard let page else { return }
+        if window != nil, source != nil { page.adopt(self) } else { page.release(self) }
     }
+}
+
+struct WeakHost {
+    weak var host: PageHost?
 }
 
 /// The page's message handler, holding the page weakly (the user content

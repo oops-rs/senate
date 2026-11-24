@@ -427,6 +427,8 @@
         const head = el("div", "senate-head");
         head.appendChild(el("span", "from", s.from || ""));
         head.appendChild(el("span", "meta", "  " + (s.kindLabel || "") + "  " + (s.committee || "") + (s.thread ? " · #" + s.thread : "")));
+        // Sent from here, not in the session's conversation yet.
+        if (row.pending) { d.classList.add("pending"); head.appendChild(el("span", "pending-mark", "  " + row.pending)); }
         d.appendChild(head);
         const content = el("div", "senate-body");
         content.appendChild(body(row.md));
@@ -860,6 +862,28 @@
         at === "middle" ? box.top + box.height / 2 - window.innerHeight / 2 : box.top - window.innerHeight / 2;
       scroller().scrollTop += y;
       stuck = measureBottom();
+    },
+    // Where the reader is: the row at the top of the window and how far
+    // down it sits, or the foot.
+    // What was open (commands, groups, thinking) comes back with it.
+    anchor() {
+      const opened = Array.from(open);
+      if (stuck) return { bottom: true, open: opened };
+      const a = firstVisible();
+      let r = a && a.el.closest(".row");
+      while (r && r.parentElement !== main()) r = r.parentElement.closest(".row");
+      if (!r) return { bottom: true, open: opened };
+      return { id: r.dataset.id, top: r.getBoundingClientRect().top, open: opened };
+    },
+    // Back where the reader was; false while that row is not on the page.
+    restore(a) {
+      if (!a.bottom && !main().querySelector(':scope > [data-id="' + a.id + '"]')) return false;
+      for (const k of a.open || []) if (!open.has(k) && rows.has(k)) toggle(k);
+      if (a.bottom) { toBottom(); stuck = true; return true; }
+      const r = main().querySelector(':scope > [data-id="' + a.id + '"]');
+      scroller().scrollTop += r.getBoundingClientRect().top - a.top;
+      stuck = measureBottom();
+      return true;
     },
     scrollToTop() { scroller().scrollTop = 0; stuck = measureBottom(); nearTop(); },
     // Every group of commands and every command open.

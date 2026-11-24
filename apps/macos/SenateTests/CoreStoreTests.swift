@@ -806,3 +806,79 @@ extension CoreStoreTests {
         #expect(Mentions.id("[senator::claude-f6d10eaa-48f6]") == "claude-f6d10eaa-48f6")
     }
 }
+
+extension CoreStoreTests {
+    /// The window's navigation: a page opened from another is pushed, Back
+    /// pops it (past what no longer exists), the sidebar starts again.
+    @Test func pagesArePushedAndBackPopsThem() async throws {
+        let store = store()
+        store.select(.section(.inbox))
+        #expect(store.path.isEmpty && !store.canGoBack)
+
+        store.place = .committee("refund-v2")
+        store.openThread(committee: "refund-v2", root: 118)
+        #expect(store.path == [.committee("refund-v2"), .thread("refund-v2:118")])
+        #expect(store.place == .thread("refund-v2:118"))
+
+        #expect(store.back())
+        #expect(store.place == .committee("refund-v2"))
+        #expect(store.path == [.committee("refund-v2")])
+
+        // A new page after going back replaces what was ahead.
+        store.place = .section(.approvals)
+        #expect(store.path == [.committee("refund-v2"), .section(.approvals)])
+
+        // A session no longer on this machine is passed over.
+        store.place = .session("gone")
+        store.place = .committee("docs")
+        #expect(store.back())
+        #expect(store.place == .section(.approvals), "past the session that is gone")
+
+        // The system's Back sets the path: the page shown follows.
+        store.path = [.committee("refund-v2")]
+        #expect(store.place == .committee("refund-v2"))
+
+        // The sidebar: a new root, nothing to go back to.
+        store.select(.section(.history))
+        #expect(store.path.isEmpty && store.root == .section(.history) && store.place == .section(.history))
+        #expect(!store.back())
+    }
+}
+
+extension CoreStoreTests {
+    /// A note sent from a session's composer shows at once, until the
+    /// session's own card for it (same committee and seq) arrives; a
+    /// failed send leaves no row and keeps the draft.
+    @Test func aSentNoteShowsUntilTheSessionCarriesIt() async throws {
+        let store = store()
+        let session = sessionLine("claude")
+
+        store.sessionDrafts["s-claude"] = "Ship it."
+        await store.say(to: session)
+        #expect(store.sessionDrafts["s-claude"] == nil)
+        #expect(store.unconfirmed("s-claude", in: []).map(\.seq) == [300])
+
+        // The session's conversation carries it: no longer pending.
+        let card = TimelineEntry(seq: 9, at: nil, truncated: false, body: .senate(message: SenateLine(
+            committee: "refund-v2", seq: 300, thread: 300, from: "[senator::alice]", kind: "note",
+            kindLabel: "note", text: "Ship it.")))
+        #expect(store.unconfirmed("s-claude", in: [card]).isEmpty)
+        try await until(store) { $0.sentNotes["s-claude"] == nil }
+
+        // Not delivered: still shown, and after a while as queued.
+        store.sessionDrafts["s-claude"] = "Later."
+        core.nextSent = SentNote(committee: "refund-v2", seq: 301)
+        await store.say(to: session)
+        let left = store.unconfirmed("s-claude", in: [card])
+        #expect(left.map(\.seq) == [301])
+        #expect(left[0].queued(now: Date().addingTimeInterval(60)))
+        #expect(!left[0].queued(now: Date()))
+
+        // Refused: no row, the draft stays.
+        store.sessionDrafts["s-claude"] = "No."
+        core.failNext = .Failed(message: "The session is not hosted here.")
+        await store.say(to: session)
+        #expect(store.sessionDrafts["s-claude"] == "No.")
+        #expect(store.unconfirmed("s-claude", in: [card]).map(\.seq) == [301])
+    }
+}

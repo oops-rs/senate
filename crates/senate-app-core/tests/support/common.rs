@@ -330,6 +330,9 @@ pub struct World {
     pub secretary: senate_bridge::ipc::DefaultSecretaryState,
     /// The archived committees, as `archived_committees` reads them.
     pub archived: Vec<senate_core::CommitteeId>,
+    /// Notes said to a session are taken but not delivered (it is not
+    /// taking them now): the app shows them as queued.
+    pub hold_says: bool,
     /// Roots of threads that are settled: readable, in no inbox.
     pub settled: Vec<u64>,
 }
@@ -379,6 +382,7 @@ impl World {
             secretary: senate_bridge::ipc::DefaultSecretaryState::NotRecorded,
             history: Vec::new(),
             archived: Vec::new(),
+            hold_says: false,
             settled: Vec::new(),
         }
     }
@@ -764,6 +768,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
             ..
         } => {
             // Delivered to the session it names: its timeline shows it.
+            let hold = w.hold_says;
             let ids: Vec<String> = w
                 .sessions
                 .rows
@@ -778,7 +783,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 .filter(|(_, p)| to.iter().any(|a| a.as_senator() == Some(p)))
                 .map(|(id, _)| id)
                 .collect();
-            for id in ids {
+            for id in ids.into_iter().filter(|_| !hold) {
                 let items = w.timelines.entry(id).or_default();
                 let seq = items.last().map_or(1, |i| i.seq + 1);
                 items.push(item(
@@ -863,6 +868,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 None => Reply::err(IpcError::bad_request(format!("no session {label}"))),
             }
         }
+        Request::Stats { from, to, tz } => Reply::ok(&sample_stats(from, to, tz)),
         Request::SessionHistory {
             committee,
             before,
@@ -2864,5 +2870,101 @@ pub fn history(w: &mut World, n: usize) {
             it.ts = Some(at(k as i64 * 4));
         }
         w.timelines.insert(id, items);
+    }
+}
+
+fn sample_stats(
+    from: chrono::NaiveDate,
+    to: chrono::NaiveDate,
+    tz: String,
+) -> senate_bridge::stats::StatsReply {
+    use senate_bridge::stats::{
+        Counts, Progress, Rank, SessionCounts, StatsDay, StatsReply, Tokens,
+    };
+    let breakdown = SessionCounts {
+        sessions_started: 1,
+        sessions_active: 2,
+        active_seconds: 2340,
+    };
+    let counts = Counts {
+        sessions_started: 1,
+        sessions_active: 2,
+        active_seconds: 2340,
+        prompts: 5,
+        agent_turns: 6,
+        tool_calls: 12,
+        commands: 4,
+        edits: 5,
+        mcp_calls: 2,
+        sent: [("note".into(), 3), ("answer".into(), 1)].into(),
+        received: [("question".into(), 2)].into(),
+        threads_opened: 2,
+        threads_closed: 1,
+        threads_answered: 1,
+        approvals_decided: 1,
+        tokens: [(
+            "claude".into(),
+            Tokens {
+                input: 16900,
+                output: 3300,
+            },
+        )]
+        .into(),
+        ..Counts::default()
+    };
+    let mut hours = [0; 24];
+    hours[10] = 8;
+    hours[14] = 15;
+    let day = StatsDay {
+        date: to,
+        counts: counts.clone(),
+        hours,
+        by_runtime: [
+            (
+                "claude".into(),
+                SessionCounts {
+                    sessions_started: 1,
+                    sessions_active: 1,
+                    active_seconds: 1600,
+                },
+            ),
+            (
+                "codex".into(),
+                SessionCounts {
+                    sessions_started: 0,
+                    sessions_active: 1,
+                    active_seconds: 740,
+                },
+            ),
+        ]
+        .into(),
+        by_committee: [(committee().to_string(), breakdown)].into(),
+        repositories: [("refund-service".into(), 2340)].into(),
+    };
+    StatsReply {
+        from,
+        to,
+        tz,
+        days: vec![day],
+        totals: counts,
+        hours,
+        current_streak: 1,
+        longest_streak: 1,
+        top_committees: vec![Rank {
+            name: committee().to_string(),
+            active_seconds: 2340,
+        }],
+        top_repositories: vec![Rank {
+            name: "refund-service".into(),
+            active_seconds: 2340,
+        }],
+        indexing: false,
+        progress: Progress {
+            days_cached: 1,
+            days_total: 1,
+            sessions: None,
+            logs_current: true,
+        },
+        notes: vec!["Fixture uses recorded activity.".into()],
     }
 }

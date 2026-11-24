@@ -54,9 +54,31 @@ final class CoreStore {
     /// `lastError` covers what reached the daemon.
     var actionError: String?
     /// What the window shows.
+    /// The page shown. Set from within a page (a link, a card, a button)
+    /// it is pushed on the window's navigation stack; the sidebar sets the
+    /// stack's root instead (`select`), and Back pops (`back`).
     var place: Place = .section(.inbox) {
-        didSet { placeChanged(from: oldValue) }
+        didSet {
+            if !navigating, place != oldValue {
+                navigating = true
+                path.append(place)
+                navigating = false
+            }
+            placeChanged(from: oldValue)
+        }
     }
+    /// The stack's root: what the sidebar chose.
+    private(set) var root: Place = .section(.inbox)
+    /// The pages pushed above the root, the shown one last: the detail
+    /// column's NavigationStack path.
+    var path: [Place] = [] {
+        didSet {
+            guard !navigating, path != oldValue else { return }
+            // The system's Back (or a pop to the root): show the new top.
+            show(path.last ?? root)
+        }
+    }
+    @ObservationIgnored private var navigating = false
     /// Show only the threads for (or escalated past) this agent's path;
     /// `nil` is every agent.
     var agentFilter: String?
@@ -67,6 +89,14 @@ final class CoreStore {
     private(set) var threadError: String?
     /// The open session's conversation, as read and followed.
     var timeline: SessionTimeline?
+    /// Notes sent to a session from its composer, by session id, not yet
+    /// in its conversation: shown at its foot until the session's own card
+    /// for them (the same committee and seq) arrives. Kept across pages,
+    /// not across a restart.
+    private(set) var sentNotes: [String: [SentLocal]] = [:]
+    /// Sessions' conversations left for a page pushed above them, by
+    /// session id: Back shows them as they were.
+    @ObservationIgnored var parked: [String: SessionTimeline] = [:]
     var deskSelection: DocketEntry?
     /// What the person is writing to each session, by session id.
     var sessionDrafts: [String: String] = [:]
@@ -283,12 +313,59 @@ final class CoreStore {
     }
 
     /// Open an item that is not a thread where it is answered.
+    /// Choose from the sidebar: a new root, nothing above it.
+    func select(_ p: Place) {
+        navigating = true
+        defer { navigating = false }
+        root = p
+        path = []
+        place = p
+    }
+
+    /// Back one page; past entries for what no longer exists. False when
+    /// there is nowhere to go back to.
+    @discardableResult
+    func back() -> Bool {
+        guard !path.isEmpty else { return false }
+        navigating = true
+        path.removeLast()
+        while let top = path.last, !exists(top) { path.removeLast() }
+        navigating = false
+        show(path.last ?? root)
+        return true
+    }
+
+    var canGoBack: Bool { !path.isEmpty }
+
+    private func show(_ p: Place) {
+        navigating = true
+        defer { navigating = false }
+        place = p
+    }
+
+    /// Whether a page still has something to show (a session gone from
+    /// this machine and from History, say, has not).
+    func exists(_ p: Place) -> Bool {
+        switch p {
+        case let .session(id): session(id) != nil
+        case let .past(id): history.row(id) != nil || session(id) != nil
+        case .item: false
+        default: true
+        }
+    }
+
     private func placeChanged(from old: Place) {
         if case let .item(id) = place {
+            // A waiting item is not a page: it opens where it is answered,
+            // and is not kept on the stack.
+            navigating = true
+            path.removeAll { if case .item = $0 { true } else { false } }
+            if root == place { root = old }
+            navigating = false
             if let item = waiting.first(where: { $0.id == id }) {
                 open(item)
             } else {
-                place = old
+                show(old)
             }
             return
         }
@@ -310,7 +387,12 @@ final class CoreStore {
     /// The selected thread's row: its inbox row, else one made from what
     /// was read of it (a thread no longer, or never, in the inbox).
     var selectedRow: InboxThread? {
-        guard let key = selectedThread else { return nil }
+        selectedThread.flatMap(row)
+    }
+
+    /// A thread's row by its key: its inbox row, else one made from what
+    /// was read of it.
+    func row(_ key: String) -> InboxThread? {
         if let row = state.inbox.first(where: { $0.key == key }) { return row }
         guard let thread, "\(thread.committee):\(thread.root)" == key else { return nil }
         return InboxThread(read: thread)
@@ -718,11 +800,38 @@ final class CoreStore {
             actionError = L("error.empty_reply")
             return
         }
+        var sent: SentNote?
         if await run("say:\(session.sessionId)", { core in
-            try await core.say(sessionId: session.sessionId, body: body)
-        }) {
+            sent = try await core.say(sessionId: session.sessionId, body: body)
+        }), let sent {
             sessionDrafts[session.sessionId] = nil
+            let id = session.sessionId
+            sentNotes[id, default: []].append(
+                SentLocal(committee: sent.committee, seq: sent.seq, text: body, at: Date())
+            )
+            // Not delivered by then: shown as queued.
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(21))
+                if let notes = self?.sentNotes[id] { self?.sentNotes[id] = notes }
+            }
         }
+    }
+
+    /// The notes sent to a session still to show: those its conversation
+    /// does not carry yet (as a card with the same committee and seq).
+    /// What it carries is dropped.
+    func unconfirmed(_ sessionId: String, in items: [TimelineEntry]) -> [SentLocal] {
+        guard let notes = sentNotes[sessionId], !notes.isEmpty else { return [] }
+        let carried = Set(items.compactMap { item -> String? in
+            guard case let .senate(m) = item.body, let c = m.committee, let seq = m.seq else { return nil }
+            return "\(c)#\(seq)"
+        })
+        let left = notes.filter { !carried.contains("\($0.committee)#\($0.seq)") }
+        if left.count != notes.count {
+            // Not during the view update that asked: on the next turn.
+            Task { @MainActor in self.sentNotes[sessionId] = left.isEmpty ? nil : left }
+        }
+        return left
     }
 
     func restore(_ session: HostedSession) async {
@@ -918,4 +1027,16 @@ extension RosterMember: @retroactive Identifiable {
 
 extension SeatLine: @retroactive Identifiable {
     public var id: String { agent }
+}
+
+/// A note sent to a session from the app, until its conversation shows it.
+struct SentLocal: Equatable {
+    let committee: String
+    let seq: UInt64
+    let text: String
+    let at: Date
+
+    /// Not delivered after a little while: the session is not taking it
+    /// now (stopped, busy); it waits in its queue.
+    func queued(now: Date) -> Bool { now.timeIntervalSince(at) > 20 }
 }

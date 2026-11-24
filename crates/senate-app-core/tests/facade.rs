@@ -59,6 +59,25 @@ async fn until(listener: &Listener, what: &str, ok: impl Fn(&AppState) -> bool) 
 }
 
 #[tokio::test]
+async fn personal_stats_round_trip_through_the_core() {
+    let (dir, socket, world) = setup();
+    let _daemon = FakeDaemon::start(&socket, world);
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en".into())).unwrap();
+    core.start(Arc::new(Listener::default())).unwrap();
+    let report = core
+        .stats(
+            "2026-11-01".into(),
+            "2026-11-14".into(),
+            "Asia/Taipei".into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.days[0].prompts, 5);
+    assert_eq!(report.days[0].date, "2026-11-14");
+    assert_eq!(report.top_repos[0].name, "refund-service");
+}
+
+#[tokio::test]
 async fn session_drop_uses_the_upload_wire_and_preserves_refusals() {
     let (dir, socket, world) = setup();
     let daemon = FakeDaemon::start(&socket, world);
@@ -542,9 +561,14 @@ async fn sessions_by_committee_their_timelines_and_the_composer() {
     assert!(!deltas[3].working);
 
     // The composer: a note to lead on refund-v2, as alice.
-    core.say("s-claude".into(), "Ship it.".into())
+    // It comes back as the log took it: the card that will show it in the
+    // session's conversation carries the same committee and seq.
+    let sent = core
+        .say("s-claude".into(), "Ship it.".into())
         .await
         .unwrap();
+    assert_eq!(sent.committee, "refund-v2");
+    assert_eq!(sent.seq, 300);
     let said = world
         .lock()
         .unwrap()

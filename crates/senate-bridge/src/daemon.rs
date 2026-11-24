@@ -177,6 +177,8 @@ mod hosted_approvals;
 mod hosts;
 mod model_catalog;
 mod pause;
+#[path = "daemon/stats.rs"]
+mod personal_stats;
 mod preside;
 mod remote_approve;
 mod replace;
@@ -552,6 +554,7 @@ pub(crate) struct Shared {
     history_titles: Mutex<crate::timeline::TitleCache>,
     history_index: Mutex<()>,
     history_background: session_history::Background,
+    stats: personal_stats::Background,
     /// Each agent's latest checkpoint it wrote itself (the tool, not an
     /// automatic one) this run: when, and its seq. `session pause` waits
     /// for one newer than its request.
@@ -831,6 +834,10 @@ async fn start_bridge(
             rx.clone(),
         )));
     }
+    tasks.push(tokio::spawn(personal_stats::warm(
+        front.primary().clone(),
+        rx.clone(),
+    )));
     tasks.push(tokio::spawn(session_history::warm(
         front.primary().clone(),
         rx.clone(),
@@ -984,6 +991,7 @@ impl Shared {
             history_titles: Mutex::default(),
             history_index: Mutex::default(),
             history_background: session_history::Background::default(),
+            stats: personal_stats::Background::default(),
             tool_checkpoints: Mutex::new(HashMap::new()),
             companion_config: common.companion_config.clone(),
             companion: Mutex::new(None),
@@ -3193,6 +3201,7 @@ impl Shared {
             Request::RemoteControl { .. } => Reply::err(IpcError::bad_request("local device management only")),
             Request::Profiles => wrap(Ok(&self.config.profiles)),
             Request::Sessions => wrap(self.on_sessions(false).await),
+            Request::Stats { from, to, tz } => wrap(self.on_stats(from, to, &tz).await),
             Request::SessionHistory { committee, before, limit } =>
                 wrap(self.on_history(committee, before, limit).await),
             Request::SessionSearch { query, committee, limit, cursor } =>

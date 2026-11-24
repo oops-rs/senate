@@ -374,3 +374,73 @@ fn tool(idx: i64, status: i64, meta: &Fields<'_>, step: &Fields<'_>) -> Result<K
         detail,
     })
 }
+
+pub(super) struct GenerationUsage {
+    pub key: String,
+    pub at: Option<i64>,
+    pub step: Option<i64>,
+    pub tokens: crate::stats::Tokens,
+}
+
+/// Counts from the known Google Gemini ModelUsageStats stored in a
+/// generation. Unknown providers or inconsistent counters are omitted.
+pub(super) fn usage(raw: &[u8]) -> Result<Option<GenerationUsage>> {
+    let generation = Fields::read(raw)?;
+    let chat = generation.sub(1)?;
+    let fields = chat.sub(4)?;
+    if fields.number(6)? != Some(24) {
+        return Ok(None);
+    }
+    let Some(id) = fields
+        .text(11)?
+        .filter(|id| !id.is_empty() && id.len() <= 500)
+    else {
+        return Ok(None);
+    };
+    let n = |field| -> Result<u64> { Ok(fields.number(field)?.unwrap_or(0)) };
+    let (output, thinking, response) = (n(3)?, n(9)?, n(10)?);
+    if (thinking != 0 || response != 0) && thinking.checked_add(response) != Some(output) {
+        return Ok(None);
+    }
+    let input = n(2)?
+        .checked_add(n(4)?)
+        .and_then(|i| i.checked_add(n(5).ok()?))
+        .ok_or(Unsupported)?;
+    let at = match chat.sub(9)?.one(4)? {
+        Some(Wire::Int(value)) => i64::try_from(if value >= 1_000_000_000_000 {
+            value / 1000
+        } else {
+            value
+        })
+        .ok(),
+        Some(Wire::Bytes(raw)) => Fields::read(raw)
+            .and_then(|data| data.number(1))
+            .ok()
+            .flatten()
+            .and_then(|seconds| i64::try_from(seconds).ok())
+            .or_else(|| {
+                std::str::from_utf8(raw)
+                    .ok()?
+                    .parse::<DateTime<Utc>>()
+                    .ok()
+                    .map(|ts| ts.timestamp())
+            }),
+        _ => None,
+    }
+    .filter(|at| *at > 0);
+    let step = generation
+        .at(2)
+        .next()
+        .and_then(|field| match field {
+            Wire::Int(value) => Some(value),
+            Wire::Bytes(mut bytes) => varint(&mut bytes).ok(),
+            _ => None,
+        })
+        .and_then(|index| i64::try_from(index).ok());
+    Ok(Some(GenerationUsage {
+        key: format!("a{id}"),
+        at,
+        step,
+        tokens: crate::stats::Tokens { input, output },
+    }))
+}

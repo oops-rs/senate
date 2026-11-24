@@ -95,6 +95,7 @@ pub mod session;
 pub mod sessions;
 pub mod speak;
 pub mod state;
+pub mod stats;
 pub mod status;
 mod stream;
 pub mod terminal;

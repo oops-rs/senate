@@ -148,6 +148,15 @@ enum MemoryCmd {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Show your recorded local Senate activity by day.
+    Stats {
+        /// Number of local calendar days ending today (1d to 366d).
+        #[arg(long, default_value = "30d")]
+        since: String,
+        /// Include daily breakdowns and indexing progress as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Bind this worktree to a committee, and suggest a session alias.
     ///
     /// Writes `.senate/committee` (untracked, kept per branch: switching
@@ -808,6 +817,13 @@ enum SessionCmd {
         /// Include stopped sessions and those with an interactive viewer attached.
         #[arg(long)]
         all: bool,
+        /// Watch only these committees' sessions (repeat for several).
+        #[arg(
+            long,
+            conflicts_with = "machine",
+            add = ArgValueCandidates::new(completion::committees)
+        )]
+        committee: Vec<CommitteeId>,
     },
     /// End hosted sessions' terminals (`senate session restore` reopens one).
     ///
@@ -1502,19 +1518,29 @@ fn settings_here() -> (Paths, Settings) {
 async fn hosted_sessions(
     paths: &Paths,
     all: bool,
+    committees: &[CommitteeId],
     verbose: bool,
     locale: Locale,
 ) -> anyhow::Result<Vec<crate::host::view::Session>> {
     let reply: crate::ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
-    Ok(watch_tiles(reply.rows, all, verbose, locale))
+    Ok(watch_tiles(reply.rows, all, committees, verbose, locale))
 }
 
 fn watch_tiles(
     mut rows: Vec<crate::ipc::SessionRow>,
     all: bool,
+    committees: &[CommitteeId],
     verbose: bool,
     locale: Locale,
 ) -> Vec<crate::host::view::Session> {
+    // `--committee` narrows the grid to those committees' sessions.
+    if !committees.is_empty() {
+        rows.retain(|row| {
+            row.committee
+                .as_ref()
+                .is_some_and(|c| committees.contains(c))
+        });
+    }
     // Only a running host has a terminal to watch. A paused or stopped one
     // is left out unless `--all` asks for it, and is then shown greyed out.
     // Group by committee and put its chair first, keeping the daemon order
@@ -1579,6 +1605,7 @@ fn watch_tiles_group_each_committee_with_its_chair_first() {
             row("east", "lead", true),
         ],
         false,
+        &[],
         false,
         Locale::En,
     );
@@ -1590,6 +1617,24 @@ fn watch_tiles_group_each_committee_with_its_chair_first() {
     assert!(tiles[0].title.starts_with("[chair] "));
     assert!(tiles[2].title.starts_with("[chair] "));
     assert!(!tiles[1].title.starts_with("[chair] "));
+
+    // `--committee west` leaves the other committees out.
+    let west = [CommitteeId::new("west").expect("committee")];
+    let only: Vec<_> = watch_tiles(
+        vec![
+            row("west", "builder", false),
+            row("east", "builder", false),
+            row("west", "lead", true),
+        ],
+        false,
+        &west,
+        false,
+        Locale::En,
+    )
+    .into_iter()
+    .map(|tile| tile.alias)
+    .collect();
+    assert_eq!(only, ["west::lead", "west::builder"]);
 }
 
 #[test]
@@ -1617,7 +1662,7 @@ fn watch_leaves_out_paused_and_stopped_sessions_unless_all() {
         ]
     };
     let labels = |all| -> Vec<String> {
-        watch_tiles(rows(), all, false, Locale::En)
+        watch_tiles(rows(), all, &[], false, Locale::En)
             .into_iter()
             .map(|tile| tile.alias)
             .collect()
@@ -1627,7 +1672,7 @@ fn watch_leaves_out_paused_and_stopped_sessions_unless_all() {
         labels(true),
         ["west::running", "west::paused", "west::stopped"]
     );
-    let all = watch_tiles(rows(), true, false, Locale::En);
+    let all = watch_tiles(rows(), true, &[], false, Locale::En);
     assert!(all[1].dim && all[1].title.ends_with("paused"));
 }
 
@@ -3827,6 +3872,34 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             println!("{alias}");
             Ok(())
         }
+        Cmd::Stats { since, json } => {
+            let days = since
+                .strip_suffix('d')
+                .and_then(|n| n.parse::<i64>().ok())
+                .filter(|days| (1..=crate::stats::MAX_DAYS).contains(days))
+                .context("--since must be 1d through 366d")?;
+            let zone = iana_time_zone::get_timezone()
+                .ok()
+                .and_then(|tz| tz.parse::<chrono_tz::Tz>().ok())
+                .unwrap_or(chrono_tz::UTC);
+            let to = chrono::Utc::now().with_timezone(&zone).date_naive();
+            let from = to - chrono::Duration::days(days - 1);
+            let paths = Paths::from_env()?;
+            let reply: crate::stats::StatsReply = runtime(false)?.block_on(daemon_call(
+                &paths,
+                &Request::Stats {
+                    from,
+                    to,
+                    tz: zone.name().into(),
+                },
+            ))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&reply)?);
+            } else {
+                print!("{}", crate::stats::summary(&reply));
+            }
+            Ok(())
+        }
         Cmd::Status {
             scope,
             full_ids,
@@ -3972,7 +4045,11 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        SessionCmd::Watch { all, machine } => {
+        SessionCmd::Watch {
+            all,
+            machine,
+            committee,
+        } => {
             let paths = Paths::from_env()?;
             if let Some(machine) = machine {
                 return runtime(false)?.block_on(remote_cli::watch(&paths, machine, all));
@@ -3980,7 +4057,10 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             let locale = BridgeConfig::locale_at(&paths.config());
             runtime(false)?.block_on(crate::host::view::watch_all(&paths, all, || {
                 let paths = paths.clone();
-                Box::pin(async move { hosted_sessions(&paths, all, output.verbose, locale).await })
+                let committee = committee.clone();
+                Box::pin(async move {
+                    hosted_sessions(&paths, all, &committee, output.verbose, locale).await
+                })
             }))
         }
         SessionCmd::Stop {

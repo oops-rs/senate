@@ -22,11 +22,13 @@ use crate::session::{Runtime, Session};
 
 const DB: &str = "session-search.sqlite";
 // A parser change can shift timeline ordinals without changing the file.
-const PARSER_REVISION: u32 = 1;
+const PARSER_REVISION: u32 = 2;
 const TOOL_OUTPUT: usize = 512;
 const SNIPPET: usize = 320;
 
-pub(crate) struct Index(Connection);
+pub(crate) struct Index(pub(crate) Connection);
+
+use crate::stats;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 struct Stamp {
@@ -141,6 +143,7 @@ impl Index {
             END;
             COMMIT;
         ")?;
+        conn.execute_batch(stats::SCHEMA)?;
         if meta.len() == 0 {
             conn.execute(
                 "INSERT INTO terms(terms, rank) VALUES ('secure-delete', 1)",
@@ -177,6 +180,7 @@ impl Index {
         let mut changed = false;
         for id in ids {
             changed |= clear(&tx, id)?;
+            stats::forget(&tx, id)?;
         }
         if changed {
             bump(&tx)?;
@@ -187,7 +191,9 @@ impl Index {
 
     pub(crate) fn retain(&mut self, ids: &HashSet<&str>) -> anyhow::Result<()> {
         let removed = {
-            let mut stmt = self.0.prepare("SELECT session_id FROM sources")?;
+            let mut stmt = self
+                .0
+                .prepare("SELECT session_id FROM sources UNION SELECT id FROM stat_sessions")?;
             stmt.query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
                 .into_iter()
@@ -198,9 +204,15 @@ impl Index {
     }
 
     pub(crate) fn refresh_one(&mut self, session: &Session) -> anyhow::Result<(bool, bool)> {
+        let tx = self.0.transaction()?;
+        stats::session(&tx, session)?;
         let Some(path) = super::path(session) else {
-            self.remove(std::slice::from_ref(&session.session_id))?;
-            return Ok((false, false));
+            let changed = clear(&tx, &session.session_id)?;
+            if changed {
+                bump(&tx)?;
+            }
+            tx.commit()?;
+            return Ok((changed, false));
         };
         let mut stamp = match Stamp::read(path, session.runtime) {
             Ok(stamp) => stamp,
@@ -210,12 +222,18 @@ impl Index {
                     io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
                 ) =>
             {
-                self.remove(std::slice::from_ref(&session.session_id))?;
+                let changed = clear(&tx, &session.session_id)?;
+                if changed {
+                    bump(&tx)?;
+                }
+                tx.commit()?;
+                return Ok((changed, false));
+            }
+            Err(_) => {
+                tx.commit()?;
                 return Ok((false, false));
             }
-            Err(_) => return Ok((false, false)),
         };
-        let tx = self.0.transaction()?;
         let (changed, more) = index_source(&tx, &session.session_id, &mut stamp)?;
         if changed {
             bump(&tx)?;
@@ -335,6 +353,7 @@ fn bump(tx: &Transaction<'_>) -> anyhow::Result<()> {
 fn clear(tx: &Transaction<'_>, id: &str) -> anyhow::Result<bool> {
     let deleted = tx.execute("DELETE FROM documents WHERE session_id=?1", [id])?;
     let source = tx.execute("DELETE FROM sources WHERE session_id=?1", [id])?;
+    stats::invalidate_source(tx, id)?;
     Ok(deleted != 0 || source != 0)
 }
 
@@ -387,6 +406,16 @@ fn index_source(tx: &Transaction<'_>, id: &str, stamp: &mut Stamp) -> anyhow::Re
         }
         Ok(())
     };
+    let state: Option<Vec<u8>> = tx
+        .query_row("SELECT state FROM stat_scans WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    let mut scan: stats::Scan = state
+        .as_deref()
+        .map(serde_json::from_slice)
+        .transpose()?
+        .unwrap_or_default();
     let mut reset = false;
     let mut more = false;
     if stamp.runtime == Runtime::Agy {
@@ -400,6 +429,7 @@ fn index_source(tx: &Transaction<'_>, id: &str, stamp: &mut Stamp) -> anyhow::Re
                     return Ok((clear(tx, id)?, false));
                 };
                 reset = clear(tx, id)?;
+                scan = stats::Scan::default();
                 watch
             }
         };
@@ -410,6 +440,7 @@ fn index_source(tx: &Transaction<'_>, id: &str, stamp: &mut Stamp) -> anyhow::Re
                 Err(agy::Error::Reset) if retry_reset => {
                     retry_reset = false;
                     reset |= clear(tx, id)?;
+                    scan = stats::Scan::default();
                     let Ok(new) = agy::Watch::open(stamp.path.clone(), 0) else {
                         return Ok((reset, false));
                     };
@@ -420,6 +451,7 @@ fn index_source(tx: &Transaction<'_>, id: &str, stamp: &mut Stamp) -> anyhow::Re
                 Err(_) => return Ok((clear(tx, id)?, false)),
             };
             for item in items {
+                scan.timeline(tx, id, &item)?;
                 put(item)?;
             }
             more = continuing;
@@ -427,6 +459,12 @@ fn index_source(tx: &Transaction<'_>, id: &str, stamp: &mut Stamp) -> anyhow::Re
         }
         let checkpoint = serde_json::to_vec(&watch)?;
         if reset || previous.as_ref().is_none_or(|(_, old)| *old != checkpoint) {
+            if let Ok(usage) = agy::stats_usage(&stamp.path, &mut scan.generation_high) {
+                for usage in usage {
+                    scan.usage(tx, id, usage)?;
+                }
+            }
+
             tx.execute(
                 "INSERT OR REPLACE INTO sources VALUES (?1,?2,?3)",
                 params![id, serde_json::to_vec(stamp)?, checkpoint],
@@ -449,7 +487,9 @@ fn index_source(tx: &Transaction<'_>, id: &str, stamp: &mut Stamp) -> anyhow::Re
             });
         if cursor.is_none_or(|cursor| !transcript.resume_search(cursor).unwrap_or(false)) {
             reset = clear(tx, id)?;
+            scan = stats::Scan::default();
         }
+        transcript.usage = Some(Vec::new());
         // Publish a giant JSONL in chunks. If a physical record spans the
         // boundary, extend just far enough to make progress on that record.
         const CHUNK: u64 = 4 * 1024 * 1024;
@@ -458,7 +498,13 @@ fn index_source(tx: &Transaction<'_>, id: &str, stamp: &mut Stamp) -> anyhow::Re
         let mut end = length.min(start + CHUNK);
         loop {
             while let Some(change) = transcript.next(end)? {
+                scan.timeline(tx, id, &change.item)?;
                 put(change.item)?;
+            }
+            if let Some(usage) = transcript.usage.as_mut() {
+                for usage in usage.drain(..) {
+                    scan.usage(tx, id, usage)?;
+                }
             }
             if end == length || transcript.offset - transcript.record.len() as u64 > start {
                 break;
@@ -469,6 +515,10 @@ fn index_source(tx: &Transaction<'_>, id: &str, stamp: &mut Stamp) -> anyhow::Re
         stamp.incomplete = more;
         remember(tx, id, stamp, &transcript.search_checkpoint()?)?;
     }
+    tx.execute(
+        "INSERT INTO stat_scans VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET state=excluded.state WHERE state IS NOT excluded.state",
+        params![id, serde_json::to_vec(&scan)?],
+    )?;
     Ok((changed || reset, more))
 }
 

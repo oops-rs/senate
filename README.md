@@ -579,6 +579,7 @@ senate session history --search "build error"  # search local conversations
 senate session show <session-id>               # read one past conversation
 senate session watch                   # read-only grid of terminals without an interactive viewer
 senate session watch --all             # include attached, paused and stopped sessions
+senate session watch --committee ibot  # only that committee's sessions (repeat for several)
 senate session approve reviewer        # answer its permission prompt (--always, --deny)
 senate session approve --once          # the one prompt waiting, whoever's it is
 senate session stop reviewer           # end its terminal...
@@ -829,6 +830,15 @@ record and index entries while leaving the runtime transcript in place.
 History shows the last recorded activity time. To rebuild the derived index,
 remove `history/session-search.sqlite` and its SQLite sidecars while the
 daemon is stopped, then start it again.
+
+
+### Personal activity statistics
+
+`senate stats --since 14d` shows recorded activity for the last 14 local calendar days. Add `--json` for daily runtime and committee breakdowns, usage that the runtimes recorded, and indexing progress. The daemon builds the daily counts in the background using the existing local history index and readable committee logs.
+
+Sessions use their current or last known committee. The active-time estimate sums intervals between recorded events within a turn, discards gaps longer than five minutes, and splits time at local midnight. Concurrent sessions add together. A timezone change re-buckets the same facts. Repository names come from the basename of the recorded Git root. Approval counts cover explicit decisions preserved in the audit log, and token counts cover recognizable usage records.
+
+The stats reply contains dates, counts, and committee and repository names. The stats collector sends only the existing read requests for committee logs.
 
 ## Remote machines
 

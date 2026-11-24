@@ -81,11 +81,15 @@ struct SenateCommands: Commands {
         CommandGroup(before: .sidebar) {
             ForEach(Array(CoreStore.Section.allCases.enumerated()), id: \.element) { index, section in
                 Button(section.title) {
-                    store.place = .section(section)
+                    store.select(.section(section))
                     store.showWindow()
                 }
                 .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
             }
+            Divider()
+            Button(L("nav.back")) { store.back() }
+                .keyboardShortcut("[")
+                .disabled(!store.canGoBack)
             Divider()
             Button(L("toolbar.refresh")) {
                 if store.state.online { store.refresh() } else { store.reconnect() }
