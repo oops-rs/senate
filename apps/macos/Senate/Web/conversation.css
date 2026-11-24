@@ -46,6 +46,19 @@ main { max-width: 700px; margin: 0 auto; padding: 8px 24px 24px; }
 .md th, .md td { overflow-wrap: normal; word-break: normal; }
 /* A thread's events: others' under who said it, yours in a bubble. */
 .k-event .event-head { font: 12px -apple-system, sans-serif; color: var(--dim); margin-bottom: 4px; }
+/* A task status: one quiet activity line, its checklist and links under it. */
+.k-status { font: 12.5px -apple-system, sans-serif; color: var(--dim); }
+.k-status .status-line { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.k-status .by { color: var(--fg); font-weight: 600; }
+.k-status .what { color: var(--fg); }
+.k-status.st-suspended .what { color: var(--attention); }
+.k-status .status-steps { list-style: none; margin: 4px 0 0 0; padding: 0 0 0 2px; }
+.k-status .status-steps li { display: flex; gap: 6px; }
+.k-status .status-steps li.done { color: var(--dim); }
+.k-status .status-steps .tick { width: 12px; text-align: center; }
+.k-status .status-steps li.done .tick { color: var(--success); }
+.k-status .status-links { display: flex; gap: 12px; margin-top: 4px; }
+.k-status .status-links a { color: var(--accent); text-decoration: none; }
 .k-event .event-head .by { color: var(--fg); font-weight: 600; font-size: 13px; margin-right: 8px; }
 .k-event.mine { display: flex; flex-direction: column; align-items: flex-end; }
 .k-event.mine .event-body { background: var(--container); border-radius: 18px; padding: 10px 16px; margin-left: 96px; max-width: calc(100% - 96px); box-sizing: border-box; }

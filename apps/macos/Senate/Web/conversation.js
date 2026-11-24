@@ -297,6 +297,37 @@
         if (row.mine) { r.appendChild(content); r.appendChild(head); } else { r.appendChild(head); r.appendChild(content); }
         break;
       }
+      case "status": {
+        // A task status: who, what it is doing now, when; its checklist
+        // and links under it, when it gives them.
+        const s = row.status;
+        const line = el("div", "status-line");
+        line.appendChild(el("span", "by", row.by));
+        line.appendChild(el("span", "what", s.line));
+        line.appendChild(el("span", "meta", row.when));
+        r.classList.add("st-" + s.state);
+        r.appendChild(line);
+        if (s.steps.length) {
+          const list = el("ul", "status-steps");
+          for (const st of s.steps) {
+            const li = el("li", st.done ? "done" : "");
+            li.appendChild(el("span", "tick", st.done ? "✓" : "○"));
+            li.appendChild(el("span", "", st.label));
+            list.appendChild(li);
+          }
+          r.appendChild(list);
+        }
+        if (s.links.length) {
+          const links = el("div", "status-links");
+          for (const l of s.links) {
+            const a = el("a", "", l.label);
+            a.setAttribute("href", l.url);
+            links.appendChild(a);
+          }
+          r.appendChild(links);
+        }
+        break;
+      }
       case "group": {
         // Commands back to back: a count and the running (else the last)
         // one; open, each as its own row. The members are always here,

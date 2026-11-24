@@ -359,3 +359,25 @@ extension ConversationPageTests {
         #expect(ConversationPage.prepended([10, 11, 12, 13], [1, 13]) == nil, "more than two: start again")
     }
 }
+
+extension ConversationPageTests {
+    /// A task status is one activity line (never a bare "status"), with
+    /// its checklist ticked as done and its links.
+    @Test func aStatusIsAnActivityLine() async throws {
+        let page = try await page(["latest"])
+        _ = await page.evaluate("""
+            window.senate.apply({ type: "reset", state: {}, rows: [
+              { id: 2, kind: "status", by: "announceseats", when: "2 days ago", status: {
+                state: "processing", line: "working on it — Cover the uplink reconnect cycle",
+                steps: [{ label: "Reproduce", done: true }, { label: "Fix", done: false }],
+                links: [{ label: "PR", url: "https://example.test/pr/1" }] } } ] });
+            return true
+            """)
+        let line = await page.evaluate("return document.querySelector('.k-status .status-line').textContent") as? String ?? ""
+        #expect(line.contains("announceseats") && line.contains("working on it — Cover the uplink reconnect cycle"))
+        let done = await page.evaluate("return document.querySelectorAll('.k-status .status-steps li.done').length") as? Int
+        #expect(done == 1)
+        let link = await page.evaluate("return document.querySelector('.k-status .status-links a').getAttribute('href')") as? String
+        #expect(link == "https://example.test/pr/1")
+    }
+}

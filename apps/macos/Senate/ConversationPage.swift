@@ -331,7 +331,20 @@ final class ConversationPage: NSObject {
     }
 
     private func encode(_ event: ThreadEvent, committee: String, root: UInt64) -> [String: Any] {
-        [
+        // A task status: one activity line, its checklist and links.
+        if let s = event.status {
+            return [
+                "id": event.seq, "kind": "status",
+                "by": Mentions.shared.plain(event.by, committee: committee),
+                "when": event.at.formatted(.relative(presentation: .named)),
+                "status": [
+                    "state": s.state, "line": s.line,
+                    "steps": s.steps.map { ["label": $0.label, "done": $0.done] },
+                    "links": s.links.map { ["label": $0.label, "url": $0.url] },
+                ] as [String: Any],
+            ]
+        }
+        return [
             "id": event.seq, "kind": "event", "mine": event.mine,
             "by": Mentions.shared.plain(event.by, committee: committee),
             "kindLabel": event.kindLabel,
