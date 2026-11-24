@@ -2621,7 +2621,7 @@ dependencies = [
 
 [[package]]
 name = "senate-app-core"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "cc",
  "chrono",
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "senate-bridge"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2689,7 +2689,7 @@ dependencies = [
 
 [[package]]
 name = "senate-core"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2702,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "senate-e2e"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "chrono",
  "ractor",
@@ -2723,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "senate-log"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2740,7 +2740,7 @@ dependencies = [
 
 [[package]]
 name = "senate-markdown"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "comrak",
  "senate-core",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "senate-remote-admin"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "senate-server"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2795,7 +2795,7 @@ dependencies = [
 
 [[package]]
 name = "senate-speaker"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "async-trait",
  "basis",
@@ -2817,7 +2817,7 @@ dependencies = [
 
 [[package]]
 name = "senate-work"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "async-trait",
  "senate-core",
@@ -2832,7 +2832,7 @@ dependencies = [
 
 [[package]]
 name = "senated"
-version = "0.12.2"
+version = "0.12.3"
 dependencies = [
  "anyhow",
  "async-trait",
