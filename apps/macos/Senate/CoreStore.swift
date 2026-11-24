@@ -98,6 +98,8 @@ final class CoreStore {
     var deskSelection: DocketEntry?
     /// What the person is writing to each session, by session id.
     var sessionDrafts: [String: String] = [:]
+    /// Files and pictures to send with it, by session id.
+    var sessionAttachments: [String: [Attachment]] = [:]
     /// Committees folded in the sidebar.
     var folded: Set<String> = [] {
         didSet { defaults.set(Array(folded), forKey: Self.foldedKey) }
@@ -793,17 +795,29 @@ final class CoreStore {
     /// Say what the person wrote to a session's senator, as them: a note in
     /// its committee's log, delivered to the session.
     func say(to session: SessionLine) async {
-        let body = sessionDrafts[session.sessionId] ?? ""
-        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let id = session.sessionId
+        let text = sessionDrafts[id] ?? ""
+        let files = sessionAttachments[id] ?? []
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty else {
             actionError = L("error.empty_reply")
             return
         }
         var sent: SentNote?
-        if await run("say:\(session.sessionId)", { core in
-            sent = try await core.say(sessionId: session.sessionId, body: body)
+        var body = text
+        if await run("say:\(id)", { core in
+            // Each file staged in the session's drops, one after another;
+            // the note names where the agent reads them.
+            var paths: [String] = []
+            for file in files {
+                let path = try await core.sessionDrop(sessionId: id, name: file.name, bytes: file.data)
+                if file.thumbnail != nil { await MainActor.run { Thumbnails.remember(path: path, data: file.data) } }
+                paths.append(path)
+            }
+            body = Attachment.noteBody(text, paths: paths)
+            sent = try await core.say(sessionId: id, body: body)
         }), let sent {
-            sessionDrafts[session.sessionId] = nil
-            let id = session.sessionId
+            sessionDrafts[id] = nil
+            sessionAttachments[id] = nil
             sentNotes[id, default: []].append(
                 SentLocal(committee: sent.committee, seq: sent.seq, text: body, at: Date())
             )

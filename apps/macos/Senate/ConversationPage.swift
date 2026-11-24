@@ -235,7 +235,8 @@ final class ConversationPage: NSObject {
                         "id": UInt64.max - UInt64(sent.count - i), "kind": "senate", "thinking": [String](),
                         "pending": queued ? L("session.note_queued") : L("session.note_sending"),
                         "senate": ["from": me.map { Mentions.shared.plain($0, committee: note.committee) } ?? "",
-                                   "kindLabel": L("session.note_kind"), "committee": note.committee] as [String: Any],
+                                   "kindLabel": L("session.note_kind"), "committee": note.committee,
+                                   "images": thumbnails(note.text)] as [String: Any],
                         "md": markdown("p/\(id)/\(note.committee)/\(note.seq)", Mentions.shared.plain(note.text, committee: note.committee)),
                     ]
                 }
@@ -398,6 +399,8 @@ final class ConversationPage: NSObject {
             if let f = m.from { s["from"] = names(f) }
             if let k = m.kindLabel { s["kindLabel"] = k }
             if let c = m.committee { s["committee"] = c }
+            let images = thumbnails(m.text)
+            if !images.isEmpty { s["images"] = images }
             if let th = m.thread {
                 s["thread"] = th
                 if let c = m.committee { cards.insert("\(c)#\(th)") }
@@ -405,6 +408,12 @@ final class ConversationPage: NSObject {
             out["senate"] = s
         }
         return out
+    }
+
+    /// Small pictures of the images a note names that were sent to a
+    /// session (by this app, or in its drops): the page's URLs for them.
+    private func thumbnails(_ text: String) -> [String] {
+        Attachment.imagePaths(in: text).compactMap { Thumbnails.url(for: $0, home: store?.senateHome) }
     }
 
     private func encode(_ event: ThreadEvent, committee: String, root: UInt64) -> [String: Any] {
@@ -911,7 +920,9 @@ private final class BundleScheme: NSObject, WKURLSchemeHandler {
     /// The page's world runs no script; styles only from here; nothing
     /// else at all. The one HTML sink goes through the "senate" policy.
     static let policy = [
-        "default-src 'none'", "script-src 'none'", "style-src senate-app:", "img-src 'none'",
+        "default-src 'none'", "script-src 'none'", "style-src senate-app:",
+        // Pictures only from the app itself: thumbnails it serves by token.
+        "img-src senate-app:",
         "font-src 'none'", "connect-src 'none'", "media-src 'none'", "object-src 'none'",
         "frame-src 'none'", "child-src 'none'", "worker-src 'none'", "manifest-src 'none'",
         "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
@@ -919,6 +930,15 @@ private final class BundleScheme: NSObject, WKURLSchemeHandler {
     ].joined(separator: "; ")
 
     func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
+        // `senate-app://thumb/<token>`: a thumbnail the app registered.
+        if let url = task.request.url, url.host == "thumb", url.pathComponents.count == 2,
+           let png = Thumbnails.data(token: url.lastPathComponent) {
+            let headers = ["Content-Type": "image/png", "X-Content-Type-Options": "nosniff"]
+            task.didReceive(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: headers)!)
+            task.didReceive(png)
+            task.didFinish()
+            return
+        }
         guard let url = task.request.url, url.host == "bundle", url.pathComponents.count == 2,
               let type = Self.files[url.lastPathComponent],
               let file = Bundle.main.url(forResource: url.deletingPathExtension().lastPathComponent,

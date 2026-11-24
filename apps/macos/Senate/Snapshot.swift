@@ -160,6 +160,11 @@ enum Snapshot {
                 // until the session's own card for it arrives.
                 if ProcessInfo.processInfo.environment["SENATE_APP_SNAPSHOT_SAY"] == "1" {
                     store.sessionDrafts[prompt.sessionId] = "Publish once the `cargo publish` prompt is answered."
+                    if let icon = NSApp.applicationIconImage, let picture = Attachment.picture(icon) {
+                        store.sessionAttachments[prompt.sessionId] = [picture]
+                        try? await Task.sleep(for: .milliseconds(400))
+                        await shot("session-attach")
+                    }
                     await store.say(to: prompt)
                     try? await Task.sleep(for: .seconds(1))
                     await shot("session-sent")

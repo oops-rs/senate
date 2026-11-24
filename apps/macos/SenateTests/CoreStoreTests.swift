@@ -882,3 +882,42 @@ extension CoreStoreTests {
         #expect(store.unconfirmed("s-claude", in: [card]).map(\.seq) == [301])
     }
 }
+
+extension CoreStoreTests {
+    /// The note names each staged file on a line of its own, quoted the
+    /// shell's way when it has spaces; image paths are read back from it.
+    @Test func aNoteCarriesItsFilesPaths() {
+        let body = Attachment.noteBody("Look at these.", paths: ["/h/drops/a.png", "/h/drops/my shot.png", "/h/drops/it's.txt"])
+        #expect(body == "Look at these.\n\n/h/drops/a.png\n'/h/drops/my shot.png'\n'/h/drops/it'\\''s.txt'")
+        #expect(Attachment.noteBody("", paths: ["/h/drops/a.png"]) == "/h/drops/a.png")
+        #expect(Attachment.imagePaths(in: body) == ["/h/drops/a.png", "/h/drops/my shot.png"])
+        #expect(MessageComposer.canSend("", busy: false, online: true, composing: false, attachments: 1))
+    }
+
+    /// Sending with attachments stages each, in order, then says the note
+    /// with their paths; a refusal keeps the text and the attachments.
+    @Test func attachmentsAreStagedThenNamedInTheNote() async throws {
+        let store = store()
+        let session = sessionLine("claude")
+        let a = Attachment(name: "shot.png", data: Data([1, 2, 3]), thumbnail: nil)
+        let b = Attachment(name: "log.txt", data: Data([4]), thumbnail: nil)
+
+        // Refused while staging: nothing said, everything kept.
+        store.sessionDrafts["s-claude"] = "See attached."
+        store.sessionAttachments["s-claude"] = [a, b]
+        core.failNext = .Failed(message: "attachments are limited to 20 MiB")
+        await store.say(to: session)
+        #expect(store.actionError?.contains("20 MiB") == true)
+        #expect(store.sessionDrafts["s-claude"] == "See attached.")
+        #expect(store.sessionAttachments["s-claude"]?.count == 2)
+        #expect(!core.calls.contains { $0.hasPrefix("say ") })
+
+        await store.say(to: session)
+        let calls = core.calls.filter { $0.hasPrefix("drop ") || $0.hasPrefix("say ") }
+        #expect(calls.suffix(3) == [
+            "drop s-claude shot.png 3", "drop s-claude log.txt 1",
+            "say s-claude See attached.\n\n/tmp/senate-fake/drops/fixture/shot.png\n/tmp/senate-fake/drops/fixture/log.txt",
+        ])
+        #expect(store.sessionDrafts["s-claude"] == nil && store.sessionAttachments["s-claude"] == nil)
+    }
+}
