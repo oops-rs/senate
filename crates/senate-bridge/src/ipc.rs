@@ -897,6 +897,17 @@ pub struct SessionHistoryRow {
 pub struct SessionSearchReply {
     pub hits: Vec<SessionSearchHit>,
     pub next_cursor: Option<String>,
+    /// Retry the same query while the initial or incremental index build runs.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub indexing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<SessionIndexProgress>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionIndexProgress {
+    pub indexed: usize,
+    pub total: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
