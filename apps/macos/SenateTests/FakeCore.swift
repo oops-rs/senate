@@ -96,6 +96,24 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     func refresh() throws { try record("refresh") }
     /// The archived committees; Unarchive takes one off.
     var archived: [String] = []
+    func stats(from: String, to: String, tz: String) async throws -> StatsReport {
+        try record("stats \(from) \(to) \(tz)")
+        var hours = Array(repeating: UInt64(0), count: 24)
+        hours[14] = 15
+        return StatsReport(
+            days: [StatsDay(
+                date: to, sessions: 2, sessionsStarted: 1, activeSecs: 2340, prompts: 5,
+                agentTurns: 6, toolCalls: 12, commands: 4, edits: 5, mcpCalls: 2,
+                messages: 5, threadsOpened: 2, threadsClosed: 1, threadsTaken: 0,
+                threadsAnswered: 1, approvalsDecided: 1
+            )],
+            hours: hours, currentStreak: 1, longestStreak: 1,
+            topCommittees: [StatsRank(name: "refund-v2", count: 2340)],
+            topRepos: [StatsRank(name: "refund-service", count: 2340)],
+            indexing: false, indexed: nil, total: nil,
+            notes: ["Fixture uses recorded activity."]
+        )
+    }
     func archivedCommittees() async throws -> [String] {
         try record("archived")
         return lock.withLock { archived }

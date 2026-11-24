@@ -621,3 +621,45 @@ impl Title {
         Ok(())
     }
 }
+
+/// Read generation counters from the same read-only conversation format as
+/// the timeline. Revisit the latest generation since it may still grow.
+pub(super) fn stats_usage(path: &Path, high: &mut Option<i64>) -> Result<Vec<crate::stats::Usage>> {
+    let stamp = Stamp::read(path)?;
+    let db = open(path, stamp)?;
+    let tx = db.unchecked_transaction()?;
+    verify(&tx, path, false)?;
+    let mut stmt = tx.prepare("SELECT idx,data FROM gen_metadata WHERE idx >= ?1 ORDER BY idx")?;
+    let mut step = tx.prepare("SELECT metadata FROM steps WHERE idx=?1")?;
+    let mut rows = stmt.query([high.unwrap_or(0)])?;
+    let mut events = Vec::new();
+    while let Some(row) = rows.next()? {
+        *high = Some(row.get(0)?);
+        let Ok(Some(usage)) = proto::usage(bytes(row, 1)?) else {
+            continue;
+        };
+        let at = match (usage.at, usage.step) {
+            (Some(at), _) => Some(at),
+            (None, Some(index)) => {
+                let mut rows = step.query([index])?;
+                match rows.next()? {
+                    Some(row) => proto::timestamp(bytes(row, 0)?)
+                        .ok()
+                        .flatten()
+                        .map(|ts| ts.timestamp()),
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(at) = at {
+            events.push(crate::stats::Usage {
+                key: usage.key,
+                at,
+                tokens: usage.tokens,
+                cumulative: false,
+            });
+        }
+    }
+    Ok(events)
+}

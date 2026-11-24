@@ -84,6 +84,7 @@ pub(crate) struct Transcript {
     // A physical line can yield several items. Keep its unconsumed changes
     // when a watch batch hits the wire limit.
     changes: VecDeque<Change>,
+    usage: Option<Vec<crate::stats::Usage>>,
 }
 
 fn identity(meta: &Metadata) -> (u64, u64) {
@@ -104,6 +105,7 @@ impl Transcript {
             record: Vec::new(),
             reduced: Reducer::default(),
             changes: VecDeque::new(),
+            usage: None,
         })
     }
 
@@ -211,6 +213,12 @@ impl Transcript {
                 let ts = record["timestamp"]
                     .as_str()
                     .and_then(|value| value.parse().ok());
+                if let (Some(usage), Some(at)) = (&mut self.usage, ts)
+                    && let Some(value) =
+                        crate::stats::Usage::jsonl(self.runtime, &record, at, self.offset)
+                {
+                    usage.push(value);
+                }
                 let events = match self.runtime {
                     Runtime::Claude => claude::events(&record),
                     Runtime::Codex => codex::events(&record, &mut self.codex_context),

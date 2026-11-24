@@ -1038,6 +1038,12 @@ pub enum Request {
         name: String,
         size: u32,
     },
+    /// Personal activity for inclusive local calendar dates.
+    Stats {
+        from: chrono::NaiveDate,
+        to: chrono::NaiveDate,
+        tz: String,
+    },
     SessionHistory {
         #[serde(default)]
         committee: Option<CommitteeId>,

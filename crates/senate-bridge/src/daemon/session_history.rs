@@ -36,6 +36,12 @@ impl Default for Background {
     }
 }
 
+impl Background {
+    pub(super) fn progress(&self) -> Option<SessionIndexProgress> {
+        lock(&self.status).progress
+    }
+}
+
 pub(super) async fn warm(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) {
     let mut ticks = tokio::time::interval(Duration::from_secs(5));
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -108,11 +114,7 @@ fn lower_index_priority() {
 fn refresh_index(shared: &Shared, shutdown: &watch::Receiver<bool>) -> anyhow::Result<()> {
     let mut sessions = shared.store.all_sessions()?;
     sessions.retain(|session| !shared.hosts.unpublished(&session.session_id));
-    if sessions
-        .iter()
-        .all(|session| timeline::path(session).is_none())
-        && !Index::exists(&shared.home)
-    {
+    if sessions.is_empty() && !Index::exists(&shared.home) {
         return Ok(());
     }
     sessions

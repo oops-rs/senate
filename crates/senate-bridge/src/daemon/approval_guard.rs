@@ -54,6 +54,7 @@ pub(super) fn person_only(request: &Request) -> Option<&'static str> {
     Some(match request {
         Request::Timeline { .. }
         | Request::SessionHistory { .. }
+        | Request::Stats { .. }
         | Request::SessionSearch { .. }
         | Request::SessionForget { .. } => {
             "Read session transcripts from your own terminal or the Senate app"

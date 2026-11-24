@@ -535,6 +535,32 @@ impl AppCore {
         Ok(s.into())
     }
 
+    /// Local personal activity for two inclusive ISO calendar dates and an
+    /// IANA timezone. The report is local to this machine.
+    pub async fn stats(
+        &self,
+        from: String,
+        to: String,
+        tz: String,
+    ) -> Result<crate::stats::StatsReport, CoreError> {
+        let date = |value: &str| {
+            chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|error| {
+                CoreError::Invalid {
+                    message: error.to_string(),
+                }
+            })
+        };
+        let request = Request::Stats {
+            from: date(&from)?,
+            to: date(&to)?,
+            tz,
+        };
+        let data: senate_bridge::stats::StatsReply = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        Ok(data.into())
+    }
+
     /// A page of ended and stopped sessions, newest first, on `committee`
     /// (all when `None`), after the page `before` named.
     pub async fn history(
