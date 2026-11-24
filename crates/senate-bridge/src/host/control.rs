@@ -146,6 +146,7 @@ pub(super) async fn next_stop(
                 viewer,
                 tty,
                 Duration::from_millis(nudge.quiet_ms),
+                observed_at,
             )
             .await;
             continue;
@@ -204,11 +205,17 @@ pub(super) async fn next_stop(
 /// Type the nudge into the TUI, unless a viewer typed within `quiet` or
 /// left a line unsubmitted, which it never touches. A
 /// watcher records no input, so watching never holds a nudge back.
-async fn nudge_once(stream: &mut UnixStream, viewer: &Mutex<Viewer>, tty: &Tty, quiet: Duration) {
+async fn nudge_once(
+    stream: &mut UnixStream,
+    viewer: &Mutex<Viewer>,
+    tty: &Tty,
+    quiet: Duration,
+    now: impl FnOnce() -> u64,
+) {
     // Check the draft in the same order as viewer writes. Keep the lock
     // through Enter so no viewer input can become part of the nudge.
     let mut write = tty.write.lock().await;
-    let now = observed_at();
+    let now = now();
     let (input_at, draft) = {
         let viewer = Viewer::lock(viewer);
         (viewer.activity.input_at, viewer.draft.pending())
@@ -501,6 +508,39 @@ mod tests {
     use crate::host::{ViewerActivity, emulation::Scheme, forward_keys, input};
 
     #[tokio::test(start_paused = true)]
+    async fn nudge_quiet_window_starts_at_viewer_input() -> anyhow::Result<()> {
+        let (pty, _pts) = pty_process::open()?;
+        let (_, write) = pty.into_split();
+        let tty = Tty::new(write, Scheme::Light, 24, 80);
+        let input_at = 1_000_000_000;
+        let viewer = Mutex::new(Viewer {
+            path: PathBuf::new(),
+            activity: ViewerActivity {
+                input_at,
+                ..ViewerActivity::default()
+            },
+            dirty: false,
+            draft: input::Draft::default(),
+        });
+        let (mut server, mut client) = UnixStream::pair()?;
+        let quiet = Duration::from_secs(2);
+
+        nudge_once(&mut server, &viewer, &tty, quiet, || {
+            input_at + 1_200_000_000
+        })
+        .await;
+        assert_eq!(client.read_u8().await?, TYPED_RECENTLY);
+        assert_eq!(client.read_u64().await?, 800);
+
+        nudge_once(&mut server, &viewer, &tty, quiet, || {
+            input_at + 2_000_000_000
+        })
+        .await;
+        assert_eq!(client.read_u8().await?, NUDGED);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn viewer_keys_cannot_join_the_nudge_before_enter() -> anyhow::Result<()> {
         let (pty, pts) = pty_process::open()?;
         let mut slave = std::fs::File::from(rustix::io::dup(&pts)?);
@@ -518,7 +558,13 @@ mod tests {
             draft: input::Draft::default(),
         });
         let (mut server, mut client) = UnixStream::pair()?;
-        let mut nudge = std::pin::pin!(nudge_once(&mut server, &viewer, &tty, Duration::ZERO));
+        let mut nudge = std::pin::pin!(nudge_once(
+            &mut server,
+            &viewer,
+            &tty,
+            Duration::ZERO,
+            observed_at
+        ));
         let cursor = Mutex::new(input::CursorQueries::default());
         let mut classify = input::Input::default();
         let keys = forward_keys(&tty, &viewer, &cursor, &mut classify, b"draft");

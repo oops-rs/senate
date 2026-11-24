@@ -4982,8 +4982,9 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
     assert_eq!(nudges(), 2, "{}", typed());
     assert!(!read(".fixture-prompts").contains("third note"));
 
-    // A person types a prompt: that turn takes what waited. A note right
-    // after it waits out the quiet time before its nudge.
+    // A person types a prompt and that turn takes what waited. The host's
+    // quiet period starts with those keys. The turn and hooks can use part
+    // or all of it before the fourth note arrives.
     std::fs::remove_file(project.join(".fixture-hold")).unwrap();
     let typed_at = std::time::Instant::now();
     attach(&h, "idler", b"prompt\r\x1d").await;
@@ -4998,17 +4999,14 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
     })
     .await;
     note("fourth note");
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    assert_eq!(nudges(), 2, "nudged over a typing person: {}", typed());
-    eventually("the nudge after the quiet time", TIMEOUT, || {
+    eventually("the fourth note is delivered by a nudge", TIMEOUT, || {
         read(".fixture-prompts")
             .contains("fourth note")
             .then_some(())
     })
     .await;
     assert_eq!(nudges(), 3, "{}", typed());
-    // fast_timing's quiet time is 2 s.
-    assert!(typed_at.elapsed() >= Duration::from_secs(2));
+    assert!(typed_at.elapsed() >= fast_timing().agy_nudge_quiet);
     eventually("the third nudged turn ended", TIMEOUT, || {
         (turns() == 4).then_some(())
     })
