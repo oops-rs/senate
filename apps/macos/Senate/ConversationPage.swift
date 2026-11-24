@@ -236,7 +236,7 @@ final class ConversationPage: NSObject {
         } else if let first = order.first, let at = ids.firstIndex(of: first), at > 0,
                   Array(ids[at...].prefix(order.count)) == order {
             let added = rows.suffix(ids.count - at - order.count)
-            op = ["type": "prepend", "rows": rows[..<at].reversed().map { $0.encode() },
+            op = ["type": "prepend", "rows": rows[..<at].map { $0.encode() },
                   "changed": (rows[at...].filter(changed) + added).map { $0.encode() }]
         } else if ids.count >= order.count, Array(ids.prefix(order.count)) == order {
             let all = rows.filter(changed) + rows.suffix(ids.count - order.count)

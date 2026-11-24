@@ -215,3 +215,17 @@ extension ConversationPageTests {
         #expect(text.contains("cargo build") && text.contains("git status"))
     }
 }
+
+extension ConversationPageTests {
+    /// Rows read from an older page land above, oldest first.
+    @Test func olderRowsArriveInOrder() async throws {
+        let page = try await page(["latest"])
+        _ = await page.evaluate("""
+            window.senate.apply({ type: "reset", rows: [{ id: 10, kind: "user", text: "c" }], state: {} });
+            window.senate.apply({ type: "prepend", rows: [{ id: 1, kind: "user", text: "a" }, { id: 2, kind: "user", text: "b" }], state: {} });
+            return true
+            """)
+        let order = await page.evaluate("return Array.from(document.querySelectorAll('.row')).map(r => r.textContent).join('')") as? String
+        #expect(order == "abc")
+    }
+}
