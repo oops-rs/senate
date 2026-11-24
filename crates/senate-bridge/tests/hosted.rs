@@ -144,6 +144,205 @@ async fn wait_terminal_output(output: &mut (impl tokio::io::AsyncRead + Unpin), 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
+    use rustix::fs::{FlockOperation, flock};
+    use std::time::Instant;
+
+    let mut h = Harness::new().await;
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.start().await;
+    let db = rusqlite::Connection::open(h.paths.state_db()).unwrap();
+    let mut owners = Vec::new();
+    let mut sockets = Vec::new();
+    let mut primaries = Vec::new();
+    let now = chrono::Utc::now().timestamp_millis();
+    for i in 0..36 {
+        let committee = senate_core::CommitteeId::new(format!("desk-{i:02}")).unwrap();
+        let primary = path(&format!("claude-00000000-0000-4000-8000-{i:012}"));
+        let host = senate_core::EventId::new();
+        let native = format!("native-{i}");
+        let dir = h.paths.home().join("hosts").join(host.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        let running = i < 30;
+        db.execute(
+            "INSERT INTO sessions
+             (session_id, cwd, joined_committee, state, started_at, last_seen, runtime, agent, agent_source, host_id)
+             VALUES (?1, ?2, ?3, ?4, ?7, ?7, 'claude', ?5, 'session', ?6)",
+            rusqlite::params![
+                native, h.dir.path().to_str().unwrap(), committee.as_str(),
+                if running { "live" } else { "ended" }, primary.to_string(), host.to_string(), now
+            ],
+        ).unwrap();
+        if i >= 33 {
+            db.execute(
+                "INSERT INTO hosted_paused (agent, committee, paused_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![primary.to_string(), committee.as_str(), now],
+            )
+            .unwrap();
+        }
+        if running {
+            let owner = std::fs::File::create(dir.join("owner")).unwrap();
+            flock(&owner, FlockOperation::NonBlockingLockExclusive).unwrap();
+            owners.push(owner);
+        }
+        if i < 3 {
+            sockets.push(tokio::net::UnixListener::bind(dir.join("tty")).unwrap());
+        }
+        let alias = if i < 6 { path("main") } else { path("worker") };
+        h.server
+            .state
+            .inner
+            .lock()
+            .unwrap()
+            .aliases
+            .set(&committee, alias, primary.clone())
+            .unwrap();
+        primaries.push(primary.to_string());
+    }
+    let populated: senate_core::alias::KnownAliases = call(&h, &Request::Aliases).await;
+    assert!(
+        matches!(populated, senate_core::alias::KnownAliases::Scoped(aliases) if aliases.iter().count() == 36)
+    );
+    let rows: ipc::SessionsReply = call(&h, &Request::Sessions).await;
+    assert_eq!(rows.rows.len(), 36);
+    assert_eq!(rows.rows.iter().filter(|row| row.paused).count(), 3);
+    let mut iter = sockets.into_iter();
+    let healthy = iter.next().unwrap();
+    let silent = iter.next().unwrap();
+    let no_screen = iter.next().unwrap();
+    let healthy_task = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = healthy.accept().await.unwrap();
+            stream.write_u8(3).await.unwrap();
+            let mut size = [0; 5];
+            stream.read_exact(&mut size).await.unwrap();
+            assert_eq!(size[0], 1);
+            stream.write_all(b"fixture screen").await.unwrap();
+            let _ = stream.read_to_end(&mut Vec::new()).await;
+        }
+    });
+    let no_screen_task = tokio::spawn(async move {
+        let (mut stream, _) = no_screen.accept().await.unwrap();
+        stream.write_u8(3).await.unwrap();
+        let _ = stream.read_to_end(&mut Vec::new()).await;
+    });
+
+    let open = |selector: Option<&str>| {
+        let mut cmd = tokio::process::Command::new(BIN);
+        testenv::isolate_async(&mut cmd, h.dir.path());
+        cmd.arg("attach")
+            .args(selector)
+            .env("SENATE_HOME", h.paths.home())
+            .kill_on_drop(true);
+        let (pty, pts) = pty_process::open().unwrap();
+        pty.resize(pty_process::Size::new(24, 80)).unwrap();
+        let child = pty_process::Command::from(cmd).spawn(pts).unwrap();
+        let (output, input) = pty.into_split();
+        (child, output, input)
+    };
+
+    let mut picker_times = Vec::new();
+    for delay in [Duration::ZERO, Duration::from_millis(1100)] {
+        h.server.state.inner.lock().unwrap().alias_lookup_delay = delay;
+        for (selector, picker) in [
+            (Some("main"), Some("which one?")),
+            (Some("desk-00::main"), None),
+            (Some(primaries[0].as_str()), None),
+            (None, Some("Attach to which session?")),
+        ] {
+            let start = Instant::now();
+            let (mut child, mut output, mut input) = open(selector);
+            let mut first = [0];
+            tokio::time::timeout(TIMEOUT, output.read_exact(&mut first))
+                .await
+                .unwrap()
+                .unwrap();
+            let first = start.elapsed();
+            if let Some(prompt) = picker {
+                tokio::time::timeout(
+                    TIMEOUT,
+                    wait_terminal_output(&mut output, prompt.as_bytes()),
+                )
+                .await
+                .unwrap();
+                let painted = start.elapsed();
+                eprintln!("{delay:?} {selector:?}: first byte {first:?}, picker {painted:?}");
+                let bound = if selector.is_none() { 1 } else { 2 };
+                picker_times.push((selector, delay, painted, Duration::from_secs(bound)));
+                input.write_all(b"\r").await.unwrap();
+            }
+            tokio::time::timeout(TIMEOUT, wait_terminal_output(&mut output, b"\x1b[c"))
+                .await
+                .unwrap();
+            input.write_all(b"\x1b[?62;22c").await.unwrap();
+            tokio::time::timeout(
+                TIMEOUT,
+                wait_terminal_output(&mut output, b"fixture screen"),
+            )
+            .await
+            .unwrap();
+            eprintln!(
+                "{delay:?} {selector:?}: first byte {first:?}, screen {:?}",
+                start.elapsed()
+            );
+            input.write_all(b"\x1d").await.unwrap();
+            assert!(
+                tokio::time::timeout(TIMEOUT, child.wait())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .success()
+            );
+        }
+    }
+    let mut failures = Vec::new();
+    for (primary, expected) in [
+        (&primaries[1], "terminal host did not answer in time"),
+        (
+            &primaries[2],
+            "terminal host did not send its initial screen in time",
+        ),
+    ] {
+        let start = Instant::now();
+        let (mut child, mut output, _input) = open(Some(primary));
+        let mut printed = Vec::new();
+        let mut first = None;
+        let outcome = tokio::time::timeout(Duration::from_secs(4), async {
+            let mut bytes = [0; 1024];
+            while let Ok(n @ 1..) = output.read(&mut bytes).await {
+                first.get_or_insert_with(|| start.elapsed());
+                printed.extend_from_slice(&bytes[..n]);
+            }
+            child.wait().await.unwrap()
+        })
+        .await;
+        let elapsed = start.elapsed();
+        let printed = String::from_utf8_lossy(&printed).into_owned();
+        eprintln!("{primary}: first byte {first:?}, exit {elapsed:?} {outcome:?} {printed}");
+        failures.push((primary, expected, outcome, printed, elapsed));
+    }
+    drop(silent);
+    healthy_task.abort();
+    no_screen_task.abort();
+    h.stop().await;
+    for (selector, delay, elapsed, bound) in picker_times {
+        assert!(
+            elapsed < bound,
+            "{selector:?} with {delay:?} alias lookup: picker took {elapsed:?}"
+        );
+    }
+    for (primary, expected, outcome, printed, elapsed) in failures {
+        assert!(elapsed < Duration::from_secs(3), "{primary}: {elapsed:?}");
+        assert!(!outcome.unwrap().success());
+        assert!(
+            printed.contains(primary) && printed.contains(expected),
+            "{printed}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fixture_terminal_launch_detach_restart_and_restore() {
     let mut h = Harness::new().await;
     h.config.hosted_session_limit = Some(1);

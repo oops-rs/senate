@@ -229,7 +229,10 @@ impl Shared {
             let resolved = tokio::time::timeout(Duration::from_secs(5), self.api.aliases())
                 .await
                 .map_err(|_| {
-                    IpcError::new(codes::SERVER, "could not resolve the senator alias in time")
+                    IpcError::new(
+                        codes::SERVER,
+                        format!("could not resolve alias {name} in time"),
+                    )
                 })?
                 .map_err(server_error)?
                 .resolve(name, writer);

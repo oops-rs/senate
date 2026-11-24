@@ -1108,6 +1108,8 @@ pub enum Request {
         #[serde(flatten)]
         target: AttachTarget,
     },
+    /// List terminal choices without reading conversation transcripts.
+    AttachChoices,
     Attach {
         senator: AliasName,
     },

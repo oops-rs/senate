@@ -265,6 +265,7 @@ pub struct Inner {
     pub roster: Roster,
     pub aliases: senate_core::alias::CommitteeAliases,
     pub alias_delay: Duration,
+    pub alias_lookup_delay: Duration,
     /// Answer as a server older than per-committee aliases: no
     /// `/v1/committee-aliases`, only the Senate-wide `/v1/aliases`.
     pub old_aliases: bool,
@@ -428,6 +429,10 @@ async fn add_epoch(State(st): St, mut resp: Response) -> Response {
 async fn aliases(State(st): St, headers: HeaderMap) -> Response {
     if let Err(error) = auth(&st, &headers) {
         return error;
+    }
+    let delay = st.inner.lock().unwrap().alias_lookup_delay;
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
     }
     let inner = st.inner.lock().unwrap();
     if inner.old_aliases {
@@ -1460,6 +1465,7 @@ impl FakeServer {
                 raw: HashMap::new(),
                 aliases: Default::default(),
                 alias_delay: Duration::ZERO,
+                alias_lookup_delay: Duration::ZERO,
                 old_aliases: false,
                 cursors: HashMap::new(),
                 heartbeats: Vec::new(),

@@ -1770,7 +1770,14 @@ fn pick_alias(name: AliasName) -> anyhow::Result<AliasName> {
         return Ok(name);
     }
     let paths = Paths::from_env()?;
-    let known: KnownAliases = runtime(false)?.block_on(daemon_call(&paths, &Request::Aliases))?;
+    let known: KnownAliases = runtime(false)?
+        .block_on(ipc::request(
+            &paths.socket(),
+            &Request::Aliases,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        ))
+        .with_context(|| format!("look up alias {name}"))?;
     match known.resolve(&name, None) {
         AliasMatch::Ambiguous { candidates, .. } => {
             let chosen = choose_alias(&name, candidates)?;
@@ -2097,7 +2104,7 @@ async fn resume_sessions(
 fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
     let paths = Paths::from_env()?;
     let rt = runtime(false)?;
-    let reply: ipc::SessionsReply = rt.block_on(daemon_call(&paths, &Request::Sessions))?;
+    let reply = rt.block_on(attach_choices(&paths))?;
     anyhow::ensure!(
         !reply.rows.is_empty(),
         "{}",
@@ -2116,6 +2123,16 @@ fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
         .map(|row| ipc::AttachTarget::Session {
             session_id: row.session_id,
         }))
+}
+
+async fn attach_choices(paths: &Paths) -> anyhow::Result<ipc::SessionsReply> {
+    Ok(ipc::request(
+        &paths.socket(),
+        &Request::AttachChoices,
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+    )
+    .await?)
 }
 
 /// `senate session approve` with no name: the one session whose
@@ -2539,7 +2556,18 @@ async fn attach_target(
     read_only: bool,
 ) -> anyhow::Result<()> {
     use std::io::Write as _;
-    let info: ipc::AttachInfo = daemon_call(paths, &Request::AttachInfo { target }).await?;
+    let selector = match &target {
+        ipc::AttachTarget::Senator { senator } => senator.to_string(),
+        ipc::AttachTarget::Session { session_id } => session_id.clone(),
+    };
+    let info: ipc::AttachInfo = ipc::request(
+        &paths.socket(),
+        &Request::AttachInfo { target },
+        Duration::from_secs(1),
+        Duration::from_secs(6),
+    )
+    .await
+    .with_context(|| format!("look up terminal for {selector}"))?;
     let label = label.unwrap_or_else(|| info.primary.to_string());
     if let Some(tty) = info.tty {
         if read_only {
@@ -2640,10 +2668,7 @@ fn choose_alias(
     // Sessions this machine hosts say more; any other senator is listed by
     // its alias alone.
     let rows = rt
-        .block_on(daemon_call::<crate::ipc::SessionsReply>(
-            &paths,
-            &Request::Sessions,
-        ))
+        .block_on(attach_choices(&paths))
         .map(|reply| reply.rows)
         .unwrap_or_default();
     let choices: Vec<crate::host::Choice> = candidates
