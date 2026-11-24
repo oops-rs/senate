@@ -391,7 +391,7 @@ struct DeskEntryDetail: View {
     /// Close, the original thread and the committee in its menu.
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
-            Text(verbatim: L("desk.item_heading", item.committee, String(item.seq)))
+            Text(verbatim: DeskEntryDetail.title(item, detail))
                 .font(.headline)
                 .lineLimit(1)
                 .padding(.horizontal, Theme.Space.xs)
@@ -446,6 +446,18 @@ struct DeskEntryDetail: View {
             }
             .menuIndicator(.hidden)
         }
+    }
+
+    /// The page's title by what the item is, as its card's chip says: a
+    /// question or note to the Speaker, or a request for the committee it
+    /// would be forwarded to.
+    static func title(_ item: DocketEntry, _ detail: DeskItemView? = nil) -> String {
+        let at = "\(item.committee) #\(item.seq)"
+        if let detail, detail.actions.contains(.forward), let to = detail.destinationLabel {
+            return L("desk.title_request_for", to, at)
+        }
+        let kind = item.kindLabel.prefix(1).uppercased() + item.kindLabel.dropFirst()
+        return L("desk.title_to_speaker", kind, at)
     }
 
     private func load() async {

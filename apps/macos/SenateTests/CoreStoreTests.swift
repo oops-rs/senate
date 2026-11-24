@@ -1079,3 +1079,17 @@ extension CoreStoreTests {
         #expect(Headline.duration(2340) == "39m" && Headline.duration(7260) == "2h 1m")
     }
 }
+
+extension CoreStoreTests {
+    /// A desk item's page is titled by what it is.
+    @Test func aDeskItemIsTitledByWhatItIs() async throws {
+        let store = store()
+        let question = DocketEntry(committee: "refund-v2", seq: 63, kindLabel: "question", by: "tester",
+                                   body: "Which quarter?", awaiting: "addressed", why: "", agents: [], since: Date())
+        #expect(DeskEntryDetail.title(question) == "Question to the Speaker · refund-v2 #63")
+        let request = DocketEntry(committee: "refund-v2", seq: 60, kindLabel: "request", by: "tester",
+                                  body: "Pass it on", awaiting: "addressed", why: "", agents: [], since: Date())
+        let detail = try await store.deskItem(request)
+        #expect(DeskEntryDetail.title(request, detail) == "Request for ledger in payments · refund-v2 #60")
+    }
+}
