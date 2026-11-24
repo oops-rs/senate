@@ -427,7 +427,12 @@ struct PastSessionPage: View {
                         Label(L("past.forget"), systemImage: "trash")
                     }
                     Divider()
-                    Button(L("mention.copy", row.sessionId)) { Mentions.copyText(row.sessionId) }
+                    // An ended session keeps its alias and its session id
+                    // (what `senate session` takes), not a live senator.
+                    if Mentions.isAlias(row.label) {
+                        Button(L("copy.senator_alias")) { Mentions.copyText(row.label) }
+                    }
+                    Button(L("copy.session_id")) { Mentions.copyText(row.sessionId) }
                 } label: {
                     Label(L("thread.more"), systemImage: "ellipsis")
                 }

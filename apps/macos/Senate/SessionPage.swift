@@ -401,10 +401,7 @@ struct SessionToolbar: ToolbarContent {
                     .disabled(store.isBusy("session:\(h.label)") || !store.state.online)
                     Divider()
                 }
-                if let h = s.hosted {
-                    Button(L("mention.copy", h.label)) { Mentions.copyText(h.label) }
-                }
-                Button(L("mention.copy", s.sessionId)) { Mentions.copyText(s.sessionId) }
+                CopySenator(label: s.hosted?.label, mention: s.mention)
             } label: {
                 Label(L("thread.more"), systemImage: "ellipsis")
             }
