@@ -179,6 +179,13 @@ pub fn launchd_plist(spec: &Spec, senated: &Path) -> String {
         xml(&text(senated))
     );
     out.push_str("  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <true/>\n");
+    for key in ["SoftResourceLimits", "HardResourceLimits"] {
+        let limit = crate::fd::SERVICE_LIMIT;
+        let _ = writeln!(
+            out,
+            "  <key>{key}</key>\n  <dict>\n    <key>NumberOfFiles</key>\n    <integer>{limit}</integer>\n  </dict>"
+        );
+    }
     // The daemon hosts interactive PTYs and their coding agents.
     out.push_str("  <key>ProcessType</key>\n  <string>Interactive</string>\n");
     // Room for `pause_on_shutdown` (90 s at most) before launchd kills it.
@@ -243,6 +250,7 @@ pub fn systemd_unit(spec: &Spec, senated: &Path) -> String {
     let mut out = String::new();
     out.push_str("[Unit]\nDescription=Senate daemon for this machine (senated --machine)\n\n");
     out.push_str("[Service]\nType=simple\n");
+    let _ = writeln!(out, "LimitNOFILE={}", crate::fd::SERVICE_LIMIT);
     let _ = writeln!(
         out,
         "ExecStart={} --machine",
@@ -1484,6 +1492,16 @@ mod tests {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>10240</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>10240</integer>
+  </dict>
   <key>ProcessType</key>
   <string>Interactive</string>
   <key>ExitTimeOut</key>
@@ -1533,6 +1551,7 @@ mod tests {
              \n\
              [Service]\n\
              Type=simple\n\
+             LimitNOFILE=10240\n\
              ExecStart=\"/home/alice/.cargo/bin/senated\" --machine\n\
              KillMode=process\n\
              Restart=always\n\

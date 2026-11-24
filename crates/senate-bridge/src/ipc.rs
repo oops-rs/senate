@@ -2512,6 +2512,8 @@ impl CommitteeStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusReply {
     pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descriptors: Option<crate::fd::Snapshot>,
     pub version: String,
     pub person: Name,
     /// The Senate this bridge serves, by its path (`acme/north-desk`), as

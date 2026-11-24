@@ -13,6 +13,7 @@ senate-log = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
+hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "service", "tokio"] }
 chrono = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }

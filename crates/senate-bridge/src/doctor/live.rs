@@ -335,6 +335,27 @@ pub fn live(live: &Live, l: Locale) -> Vec<Check> {
                     format!("running (pid {}, {})", status.pid, status.version),
                 ),
             ));
+            if let Some(fd) = &status.descriptors {
+                let used = fd
+                    .open
+                    .map_or_else(|| l.pick("未知", "unknown").to_string(), |n| n.to_string());
+                let limit = fd.soft_limit.map_or_else(
+                    || l.pick("无限制", "unlimited").to_string(),
+                    |n| n.to_string(),
+                );
+                let text = l.pick(
+                    format!("文件描述符：{used} / {limit}"),
+                    format!("file descriptors: {used} / {limit}"),
+                );
+                let name = "daemon.descriptors";
+                checks.push(
+                    if matches!((fd.open, fd.soft_limit), (Some(n), Some(limit)) if n > limit / 2) {
+                        Check::warn(name, text, None::<String>)
+                    } else {
+                        Check::ok(name, text)
+                    },
+                );
+            }
             if status.version != live.version {
                 checks.push(Check::warn(
                     "daemon.version",
@@ -354,7 +375,10 @@ pub fn live(live: &Live, l: Locale) -> Vec<Check> {
         }
         Err(e) => checks.push(Check::fail(
             "daemon",
-            l.pick(format!("没有运行：{e}"), format!("not running: {e}")),
+            l.pick(
+                format!("无法获取状态：{e}"),
+                format!("status unavailable: {e}"),
+            ),
             Some(SERVICE_INSTALL),
         )),
     }

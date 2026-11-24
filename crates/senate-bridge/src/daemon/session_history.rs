@@ -16,6 +16,7 @@ pub(super) struct Background {
     status: Mutex<Status>,
     wake: tokio::sync::Notify,
     ready: watch::Sender<u64>,
+    reader: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Default for Background {
@@ -30,6 +31,7 @@ impl Default for Background {
             }),
             wake: tokio::sync::Notify::new(),
             ready: watch::channel(0).0,
+            reader: Arc::default(),
         }
     }
 }
@@ -329,8 +331,10 @@ impl Shared {
             // keep running and callers get the committed partial results.
             let _ = tokio::time::timeout(Duration::from_millis(100), ready.changed()).await;
         }
+        let reader = self.history_background.reader.clone().lock_owned().await;
         let shared = self.clone();
         tokio::task::spawn_blocking(move || {
+            let _reader = reader;
             let progress_before = {
                 let status = lock(&shared.history_background.status);
                 if let Some(error) = &status.error {
