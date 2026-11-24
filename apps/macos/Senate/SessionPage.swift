@@ -48,6 +48,7 @@ struct SessionPage: View {
         }
         .id(session.sessionId)
         .environment(\.mentionCommittee, session.committee)
+        .toolbar { SessionToolbar(store: store, session: session) }
     }
 }
 
@@ -59,23 +60,9 @@ struct SessionHeader: View {
 
     var body: some View {
         let s = session
+        // Its name, state and actions are in the window's toolbar
+        // (SessionToolbar); here, what describes it.
         VStack(alignment: .leading, spacing: Theme.Space.s) {
-            HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s) {
-                SenatorName(name: s.displayName, id: Mentions.id(s.mention))
-                    .font(Theme.Fonts.title)
-                    .accessibilityAddTraits(.isHeader)
-                Spacer(minLength: Theme.Space.m)
-                if let h = s.hosted {
-                    HStack(spacing: Theme.Space.s) {
-                        if store.isBusy("session:\(h.label)") { ProgressView().controlSize(.small) }
-                        Button(L("sessions.attach")) { store.attach(h) }
-                            .buttonStyle(.pill)
-                            .help(L("sessions.attach_help"))
-                        SessionActions(store: store, hosted: h, style: .buttons)
-                    }
-                    .disabled(store.isBusy("session:\(h.label)") || !store.state.online)
-                }
-            }
             if let title = s.title {
                 Text(verbatim: title)
                     .font(Theme.Fonts.text)
@@ -84,7 +71,6 @@ struct SessionHeader: View {
                     .textSelection(.enabled)
             }
             HStack(spacing: Theme.Space.xs) {
-                StatusChip(session: s)
                 if let committee = s.committee {
                     Button {
                         store.place = .committee(committee)
@@ -111,38 +97,18 @@ struct SessionHeader: View {
                 TimedMention(date: s.lastActivity) { L("session.active_ago", $0) }
             }
         }
-        .padding(.top, Theme.Space.xl)
-        .padding(.bottom, Theme.Space.m)
+        .padding(.top, Theme.Space.l)
+        .padding(.bottom, Theme.Space.s)
         .contextMenu {
             Button(L("mention.copy", s.sessionId)) { Mentions.copyText(s.sessionId) }
         }
     }
 }
 
-/// The session's state, in its status's colour.
-private struct StatusChip: View {
-    let session: SessionLine
-
-    var body: some View {
-        HStack(spacing: 5) {
-            StatusMark(status: session.status)
-            Text(verbatim: session.statusLabel)
-                .font(Theme.Fonts.chip)
-                .foregroundStyle(Theme.onSurfaceVariant)
-        }
-        .padding(.leading, 6)
-        .padding(.trailing, Theme.Space.s)
-        .padding(.vertical, 3)
-        .background(Theme.containerHigh, in: Capsule())
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(session.statusLabel)
-    }
-}
-
 /// Stop, Pause, Resume or Restore, as the hosted session's state allows:
 /// pill buttons in the page's header, items in the sidebar's menu.
 struct SessionActions: View {
-    enum Style { case buttons, menu }
+    enum Style { case buttons, menu, toolbar }
 
     let store: CoreStore
     let hosted: HostedSession
@@ -151,21 +117,29 @@ struct SessionActions: View {
     var body: some View {
         let h = hosted
         if h.running {
-            action(L("session.pause"), help: L("session.pause_help")) { await store.pause(h) }
-            action(L("sessions.stop"), help: L("sessions.stop_help"), danger: true) { await store.stop(h) }
+            action(L("session.pause"), "pause", help: L("session.pause_help")) { await store.pause(h) }
+            // On the toolbar, Stop sits in the session's menu, not as a button.
+            if style != .toolbar {
+                action(L("sessions.stop"), "stop", help: L("sessions.stop_help"), danger: true) { await store.stop(h) }
+            }
         } else if h.paused {
-            action(L("sessions.resume"), help: L("sessions.resume_help"), filled: true) { await store.resume(h) }
+            action(L("sessions.resume"), "play", help: L("sessions.resume_help"), filled: true) { await store.resume(h) }
         } else {
-            action(L("sessions.restore"), help: L("sessions.restore_help"), filled: true) { await store.restore(h) }
+            action(L("sessions.restore"), "arrow.counterclockwise", help: L("sessions.restore_help"), filled: true) {
+                await store.restore(h)
+            }
         }
     }
 
     @ViewBuilder
     private func action(
-        _ title: String, help: String, filled: Bool = false, danger: Bool = false,
+        _ title: String, _ symbol: String, help: String, filled: Bool = false, danger: Bool = false,
         _ run: @escaping () async -> Void
     ) -> some View {
         switch style {
+        case .toolbar:
+            Button { Task { await run() } } label: { Label(title, systemImage: symbol) }
+                .help(help)
         case .buttons:
             Button(title) { Task { await run() } }
                 .buttonStyle(.pill(danger ? .danger : filled ? .filled : .tonal))
@@ -367,5 +341,63 @@ struct Nothing: View {
             }
         }
         .card()
+    }
+}
+
+/// A session's name, state and actions, in the window's toolbar: its glyph
+/// carrying its state and its name with the state in words at the leading
+/// edge; Attach and Pause, Resume or Restore as the trailing items; Stop
+/// and the copies in the session's menu.
+struct SessionToolbar: ToolbarContent {
+    let store: CoreStore
+    let session: SessionLine
+
+    var body: some ToolbarContent {
+        let s = session
+        ToolbarItem(placement: .navigation) {
+            HStack(spacing: Theme.Space.s) {
+                SessionMark(runtime: s.runtime, status: s.status)
+                VStack(alignment: .leading, spacing: 0) {
+                    SenatorName(name: s.displayName, id: Mentions.id(s.mention))
+                        .font(.headline)
+                        .lineLimit(1)
+                    Text(verbatim: s.statusLabel)
+                        .font(.caption)
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                }
+            }
+            .padding(.horizontal, Theme.Space.xs)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+        }
+        ToolbarSpacer(.flexible)
+        if let h = s.hosted {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if store.isBusy("session:\(h.label)") { ProgressView().controlSize(.small) }
+                Button { store.attach(h) } label: { Label(L("sessions.attach"), systemImage: "apple.terminal") }
+                    .help(L("sessions.attach_help"))
+                    .disabled(!store.state.online)
+                SessionActions(store: store, hosted: h, style: .toolbar)
+                    .disabled(store.isBusy("session:\(h.label)") || !store.state.online)
+            }
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                if let h = s.hosted, h.running {
+                    Button(role: .destructive) { Task { await store.stop(h) } } label: {
+                        Label(L("sessions.stop"), systemImage: "stop")
+                    }
+                    .disabled(store.isBusy("session:\(h.label)") || !store.state.online)
+                    Divider()
+                }
+                if let h = s.hosted {
+                    Button(L("mention.copy", h.label)) { Mentions.copyText(h.label) }
+                }
+                Button(L("mention.copy", s.sessionId)) { Mentions.copyText(s.sessionId) }
+            } label: {
+                Label(L("thread.more"), systemImage: "ellipsis")
+            }
+            .menuIndicator(.hidden)
+        }
     }
 }

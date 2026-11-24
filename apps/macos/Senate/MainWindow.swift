@@ -181,7 +181,13 @@ private struct Sidebar: View {
                 SecretaryRow(store: store)
                     .tag(CoreStore.Place.secretary)
                 ForEach(store.sections, id: \.self) { section in
-                    Label(section.title, systemImage: section.symbol)
+                    // In the label's own colour, as the Secretary row's is,
+                    // not the sidebar's accent.
+                    Label {
+                        Text(verbatim: section.title)
+                    } icon: {
+                        Image(systemName: section.symbol).foregroundStyle(Theme.onSurfaceVariant)
+                    }
                         .badge(store.state.online ? store.count(section) : 0)
                         .tag(CoreStore.Place.section(section))
                 }
