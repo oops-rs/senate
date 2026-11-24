@@ -508,19 +508,24 @@ fn advisories(view: &StatusView) -> Vec<String> {
                 format!("Approval notices for hosted seat {seat} are unavailable because the terminal has no readable viewer activity."),
             ));
         }
+        let runtime = if session.runtime == Runtime::Claude {
+            "Claude"
+        } else {
+            session.runtime.as_str()
+        };
         let unbound = view.hosted_unbound.get(&session.session_id);
         if let Some(new) = unbound {
             lines.push(l.pick(
-                format!("托管 Claude 席位 {seat} 无法绑定原生会话 {new}。消息暂存于原会话。运行 senate attach {seat} 检查终端，或退出终端后运行 senate session restore {seat}。"),
-                format!("Hosted Claude seat {seat} could not bind native session {new}. Messages wait for the original session. Run senate attach {seat} to inspect the terminal, or exit it and run senate session restore {seat}."),
+                format!("托管 {runtime} 席位 {seat} 无法绑定原生会话 {new}。消息暂存于原会话。运行 senate attach {seat} 检查终端，或退出终端后运行 senate session restore {seat}。"),
+                format!("Hosted {runtime} seat {seat} could not bind native session {new}. Messages wait for the original session. Run senate attach {seat} to inspect the terminal, or exit it and run senate session restore {seat}."),
             ));
         }
         if let Some(Some(refused)) = view.hosted.get(&session.session_id)
             && Some(refused) != unbound
         {
             lines.push(l.pick(
-                format!("托管 Claude 席位 {seat} 拒绝了原生会话 {refused} 的钩子上报。运行 senate attach {seat} 可检查当前会话。"),
-                format!("Hosted Claude seat {seat} refused a hook reporting native session {refused}. Use senate attach {seat} to check the current conversation."),
+                format!("托管 {runtime} 席位 {seat} 拒绝了原生会话 {refused} 的钩子上报。运行 senate attach {seat} 可检查当前会话。"),
+                format!("Hosted {runtime} seat {seat} refused a hook reporting native session {refused}. Use senate attach {seat} to check the current conversation."),
             ));
         }
     }

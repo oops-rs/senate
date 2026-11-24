@@ -410,6 +410,13 @@ type Seat = (SenatorName, CommitteeId);
 /// The branch a session is on now and what it is bound to there.
 type Rebind = (Option<String>, Option<CommitteeId>);
 
+const AGY_HOST_PROOF_TTL: Duration = Duration::from_secs(60);
+struct AgyHostObservation {
+    pid: u32,
+    session_id: String,
+    at: Instant,
+}
+
 /// An idle agy session ([`Shared::nudge_idle_agy`]): which idle spell
 /// this is, and whether it has had its nudge.
 struct AgyIdle {
@@ -542,6 +549,7 @@ pub(crate) struct Shared {
     /// did, not yet told: the branch they are on, and what they are bound
     /// to now.
     rebinds: Mutex<HashMap<String, Rebind>>,
+    agy_host_observed: Mutex<HashMap<EventId, AgyHostObservation>>,
     /// agy sessions idle since their last turn ended (`Stop` with nothing
     /// waiting, no hook since), and whether their host has typed the idle
     /// nudge since. Any later hook of the session removes it. Kept in
@@ -984,6 +992,7 @@ impl Shared {
             auto: Mutex::new(HashMap::new()),
             home: common.home.clone(),
             rebinds: Mutex::new(HashMap::new()),
+            agy_host_observed: Mutex::new(HashMap::new()),
             agy_idle: Mutex::new(HashMap::new()),
             working_sessions: Mutex::new(HashMap::new()),
             desk_decisions: tokio::sync::Mutex::new(()),
@@ -1356,7 +1365,7 @@ impl Shared {
     fn served_agents(&self) -> Result<BTreeSet<SenatorName>, StoreError> {
         Ok(self
             .store
-            .all_sessions()?
+            .current_sessions()?
             .into_iter()
             .filter(|s| !self.hosts.unpublished(&s.session_id))
             .map(|s| s.agent)
@@ -1422,7 +1431,7 @@ impl Shared {
             let mut sessions = self.checked_live_sessions()?;
             sessions.extend(
                 self.store
-                    .all_sessions()?
+                    .current_sessions()?
                     .into_iter()
                     .filter(|session| !session.is_live()),
             );
@@ -3164,6 +3173,7 @@ impl Shared {
                 };
                 self.sessions_changed(wrap(result))
             }
+            Request::RebindHost { host, to } => wrap(self.repair_agy_binding(&host, &to).await),
             Request::Restore {
                 session,
                 senator,
@@ -3846,11 +3856,12 @@ impl Shared {
         if report.runtime == Runtime::Agy && report.event == HookEvent::UserPromptSubmit {
             lock(&self.agy_idle).remove(&report.session_id);
         }
-        let (_binding, switched) = if native && report.runtime == Runtime::Claude {
-            self.bind_claude_hook(&report, &mut upsert).await?
-        } else {
-            (self.session_bindings.read().await, None)
-        };
+        let (_binding, switched) =
+            if native && matches!(report.runtime, Runtime::Claude | Runtime::Agy) {
+                self.bind_hosted_hook(&report, &mut upsert).await?
+            } else {
+                (self.session_bindings.read().await, None)
+            };
         let mut host = if native {
             self.store
                 .session_host(&report.session_id)
@@ -3867,7 +3878,7 @@ impl Shared {
             host = None;
         }
         let before = self.store.session(&report.session_id).map_err(internal)?;
-        if native && report.runtime == Runtime::Claude {
+        if native && matches!(report.runtime, Runtime::Claude | Runtime::Agy) {
             match self
                 .store
                 .hosted_native_retired(&report.session_id)
@@ -3926,6 +3937,9 @@ impl Shared {
                 self.no_longer_working(&session.session_id);
             }
             _ => {}
+        }
+        if changed_host_context && session.runtime == Runtime::Agy {
+            self.mark_agy_idle(&session.session_id);
         }
         self.publish(WatchEvent::Sessions);
         let was = before.map(|b| (b.agent.clone(), b.committee().cloned(), b.state));
@@ -4142,12 +4156,13 @@ impl Shared {
         let turn = lock(&self.working_sessions).get(session_id).copied();
         let mut waiting = 0;
         let mut unanswered = Vec::new();
-        if let Some(session) = self.store.session(session_id).map_err(internal)?
+        let session = self.store.session(session_id).map_err(internal)?;
+        if let Some(session) = &session
             && session.is_live()
             && let Some(committee) = session.committee()
         {
             if session.runtime == Runtime::Agy {
-                waiting = self.hook_items(&session, committee)?.len();
+                waiting = self.hook_items(session, committee)?.len();
             }
             if waiting == 0
                 && self
@@ -4183,7 +4198,7 @@ impl Shared {
         // to read it; with nothing, the session sits idle from here.
         if waiting == 0
             && unanswered.is_empty()
-            && session::Runtime::Agy.native_id(session_id).is_some()
+            && session.is_some_and(|session| session.is_live() && session.runtime == Runtime::Agy)
         {
             self.mark_agy_idle(session_id);
         } else {
@@ -4247,6 +4262,9 @@ impl Shared {
             let Ok(Some(host)) = self.store.session_host(&sid) else {
                 continue;
             };
+            if crate::host::unbound_context(&paths, &host).is_some() {
+                continue;
+            }
             // Counted as nudged before the line is typed: the turn it starts
             // can end, and a new idle spell begin, before the host replies.
             let spell = match lock(&self.agy_idle).get_mut(&sid) {
@@ -6369,6 +6387,15 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         }
                     }
                         return;
+                    }
+                    Ok(Request::SessionHook(mut report))
+                        if report.runtime == Runtime::Agy && report.host.is_some() =>
+                    {
+                        let reply = match shared.verify_agy_host_hook(peer, &mut report).await {
+                            Ok(()) => Box::pin(shared.dispatch(Request::SessionHook(report))).await,
+                            Err(error) => Reply::err(error),
+                        };
+                        (reply, false)
                     }
                     Ok(Request::Sessions) => {
                         let person = shared

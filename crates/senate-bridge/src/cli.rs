@@ -771,6 +771,14 @@ enum DebugCmd {
 
 #[derive(Subcommand)]
 enum SessionCmd {
+    /// Repair two agy conversation records for one hosted terminal.
+    Rebind {
+        /// The original senator or the terminal's host ID.
+        host: String,
+        /// The live senator that should own this terminal.
+        #[arg(long)]
+        to: AliasName,
+    },
     /// List past sessions or search their conversations.
     History {
         /// Restrict history to this committee.
@@ -4094,6 +4102,20 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             runtime(false)?.block_on(pause_sessions(
                 &paths, &selector, force, dry_run, timeout, locale,
             ))
+        }
+        SessionCmd::Rebind { host, to } => {
+            let paths = Paths::from_env()?;
+            let reply: ipc::RebindHostReply =
+                runtime(false)?.block_on(daemon_call(&paths, &Request::RebindHost { host, to }))?;
+            println!(
+                "Terminal now follows {} ({})",
+                reply.current, reply.session_id
+            );
+            println!("Undelivered for {}: {}", reply.retired, reply.undelivered);
+            for thread in reply.threads {
+                println!("  {} #{}", thread.committee, thread.seq);
+            }
+            Ok(())
         }
         SessionCmd::Resume { which, dry_run } => {
             let paths = Paths::from_env()?;

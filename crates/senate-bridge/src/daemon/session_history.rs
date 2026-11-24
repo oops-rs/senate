@@ -225,6 +225,7 @@ impl Shared {
         self.refresh_display_aliases().await;
         let shared = self.clone();
         tokio::task::spawn_blocking(move || {
+            let retired = shared.store.retired_hosted_sessions().map_err(internal)?;
             let mut sessions = shared.history_sessions()?;
             sessions.retain(|(session, host, live)| {
                 !live
@@ -235,6 +236,7 @@ impl Shared {
                         (session.last_seen, &session.session_id) < (before.last, &before.session_id)
                     })
                     && (host.is_some()
+                        || retired.contains(&session.session_id)
                         || timeline::path(session).is_some_and(|path| {
                             std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
                         }))
