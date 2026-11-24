@@ -113,6 +113,23 @@ import Testing
         ])
     }
 
+    @Test func aSessionStoppingLeavesTownAndStartingComesBack() {
+        let old = input([senator("a", .working), senator("b", .stopped)])
+        let new = input([senator("a", .stopped), senator("b", .idle), senator("c", .stopped)])
+        // A new senator already stopped does not arrive.
+        #expect(TownDiff.events(from: old, to: new) == [.left(senator: "a"), .arrived(senator: "b")])
+    }
+
+    @Test func aThreadAnsweredIsSettled() {
+        let people = [senator("a"), senator("b")]
+        var answered = thread(6)
+        answered.answered = true
+        #expect(TownDiff.events(from: input(people, threads: [thread(5)]), to: input(people, threads: [answered])) == [
+            .message(from: "a", to: "b", thread: ref(), line: "hello there"),
+            .answered(thread: ref(), a: "a", b: "b"),
+        ])
+    }
+
     @Test func aThreadThatGrewIsAMessage() {
         let people = [senator("a"), senator("b")]
         let old = input(people, threads: [thread(5)])
@@ -203,6 +220,81 @@ import Testing
         _ = director.accept([message("a", root: 1), message("b", root: 2)], present: ["a", "b"], reduceMotion: false)
         _ = director.accept([.left(senator: "b")], present: ["a"], reduceMotion: false)
         #expect(director.queue.isEmpty)
+    }
+
+    @Test func arrivalsWalkWhileThereIsRoomElseAppear() {
+        var director = TownDirector()
+        director.maxWalkers = 1
+        let present: Set<String> = ["a", "b"]
+        #expect(director.accept([.arrived(senator: "a"), .left(senator: "b")], present: present, reduceMotion: false) == [
+            .arrive(senator: "a", walk: true), .depart(senator: "b", walk: false),
+        ])
+        // The walker in counts against the limit until home.
+        #expect(director.out == ["a"])
+        _ = director.cameHome("a")
+        #expect(director.accept([.left(senator: "a")], present: present, reduceMotion: true) == [.depart(senator: "a", walk: false)])
+        #expect(director.accept([.arrived(senator: "ghost")], present: present, reduceMotion: false).isEmpty)
+    }
+
+    @Test func aSettledThreadChecksThoseInTown() {
+        var director = TownDirector()
+        #expect(director.accept([.answered(thread: ref(), a: "a", b: "ghost")], present: ["a"], reduceMotion: false)
+            == [.check(thread: ref(), a: "a", b: nil)])
+        #expect(director.accept([.answered(thread: ref(), a: "x", b: "y")], present: ["a"], reduceMotion: false).isEmpty)
+    }
+
+    @Test func theWayInFromTheEdge() {
+        let layout = TownLayout(committees: ["a", "b", "c"])
+        let room = layout.room("a")!
+        let edge = layout.edgeX(for: room)
+        #expect(edge < layout.bounds.minX || edge > layout.bounds.maxX)
+        let path = TownLayout.pathFromEdge(edge, to: CGPoint(x: room.midX, y: room.midY), in: room)
+        #expect(path.first?.x == edge)
+        #expect(path.contains(TownLayout.door(of: room)))
+        #expect(path.last == CGPoint(x: room.midX, y: room.midY))
+    }
+
+    // MARK: Placement
+
+    @Test func aBubbleGoesAboveTheHeadWhenNothingIsThere() {
+        let view = CGRect(x: -500, y: -500, width: 1000, height: 1000)
+        let b = TownPlacement.bubble(size: CGSize(width: 100, height: 22), head: .zero, obstacles: [], viewport: view)
+        #expect(b.centre.x == 0)
+        #expect(b.centre.y > 11)
+        #expect(b.tail == .zero)
+    }
+
+    @Test func aBubbleAvoidsAFaceAndStaysInView() {
+        let view = CGRect(x: -500, y: -500, width: 1000, height: 1000)
+        let size = CGSize(width: 100, height: 22)
+        // Someone stands right above the speaker.
+        let face = CGRect(x: -20, y: 15, width: 40, height: 30)
+        let b = TownPlacement.bubble(size: size, head: .zero, obstacles: [face], viewport: view)
+        let rect = CGRect(x: b.centre.x - 50, y: b.centre.y - 11, width: 100, height: 22)
+        #expect(!rect.intersects(face))
+        // At the top edge of the view it is kept inside.
+        let edge = TownPlacement.bubble(size: size, head: CGPoint(x: 480, y: 490), obstacles: [], viewport: view)
+        #expect(edge.centre.x + 50 <= 500)
+        #expect(edge.centre.y + 11 <= 500)
+    }
+
+    @Test func namesNeverOverlap() {
+        let a = TownPlacement.Label(id: "a", rect: CGRect(x: 0, y: 0, width: 40, height: 10), priority: 0)
+        let chair = TownPlacement.Label(id: "chair", rect: CGRect(x: 20, y: 0, width: 40, height: 10), priority: 3)
+        let c = TownPlacement.Label(id: "c", rect: CGRect(x: 10, y: -11, width: 40, height: 10), priority: 0)
+        let far = TownPlacement.Label(id: "far", rect: CGRect(x: 300, y: 0, width: 40, height: 10), priority: 0)
+        let out = TownPlacement.labels([a, chair, c, far], step: 11)
+        #expect(out["chair"] == .some(0))
+        #expect(out["far"] == .some(0))
+        #expect(out["a"] == .some(11))
+        // Whatever is shown, nothing overlaps.
+        let shown = [a, chair, c, far].compactMap { l in out[l.id]!.map { l.rect.offsetBy(dx: 0, dy: -$0) } }
+        for (i, r) in shown.enumerated() {
+            for q in shown.dropFirst(i + 1) { #expect(!r.intersects(q)) }
+        }
+        // With no room left a name hides.
+        let crowd = (0..<4).map { TownPlacement.Label(id: "\($0)", rect: CGRect(x: 0, y: 0, width: 40, height: 10), priority: 0) }
+        #expect(TownPlacement.labels(crowd, step: 11).values.filter { $0 == nil }.count == 2)
     }
 
     // MARK: Text

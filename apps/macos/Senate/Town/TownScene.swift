@@ -53,6 +53,15 @@ final class TownScene: SKScene {
     }
     private var fitted = false
     private var interacting = false
+    /// Senators walking out of town: kept until they reach the edge.
+    private var departing: Set<String> = []
+    /// Bubbles showing now, and where (so the next one avoids them).
+    private var bubbles: [(node: SKNode, rect: CGRect)] = []
+    /// ✓ marks showing now (at most a few).
+    private var checks = 0
+    /// Where the signs, flags and visitors are: bubbles keep off them.
+    private var signRects: [String: [CGRect]] = [:]
+    private var signs: [CGRect] { signRects.values.flatMap { $0 } }
 
     override init(size: CGSize) {
         super.init(size: size)
@@ -82,6 +91,13 @@ final class TownScene: SKScene {
             placePeople()
         }
         perform(director.accept(events, present: Set(people.keys), reduceMotion: reduceMotion))
+        // Whoever left without a walk out goes now.
+        for (id, node) in people where state.senators[id] == nil && !departing.contains(id) {
+            node.removeFromParent()
+            people[id] = nil
+            walkers.remove(id)
+        }
+        arrangeLabels()
         wake()
     }
 
@@ -138,6 +154,29 @@ final class TownScene: SKScene {
         fitted = true
         updateLabels()
         wake()
+    }
+
+    /// Zoom in on a house (or the hall) under a view point, gliding there.
+    func focus(at viewPoint: CGPoint) {
+        let room: CGRect
+        switch hit(at: viewPoint) {
+        case let .committee(name)?: guard let r = layout.room(name) else { return }; room = r
+        case .hall?: room = layout.hall
+        default: return
+        }
+        let scale = min(max(max(room.width * 1.7 / size.width, room.height * 1.9 / size.height), Self.minScale), Self.maxScale)
+        let target = CGPoint(x: room.midX, y: room.midY + 10)
+        fitted = true
+        movers += 1
+        let duration = reduceMotion ? 0 : 0.35
+        let move = SKAction.move(to: target, duration: duration)
+        move.timingMode = .easeInEaseOut
+        let zoom = SKAction.scale(to: scale, duration: duration)
+        zoom.timingMode = .easeInEaseOut
+        cam.run(.sequence([.group([move, zoom]), .run { [weak self] in
+            self?.movers -= 1
+            self?.updateLabels()
+        }]))
     }
 
     /// A gesture is under way: full frame rate until it ends.
@@ -272,7 +311,11 @@ final class TownScene: SKScene {
         walkers = []
         movers = 0
         strollers = 0
+        departing = []
+        bubbles = []
+        checks = 0
         world.removeAllChildren()
+        signRects = [:]
         houses = [:]
         people = [:]
         threads = [:]
@@ -369,12 +412,14 @@ final class TownScene: SKScene {
         node.addChild(title)
         node.position = CGPoint(x: room.midX, y: room.maxY + 14)
         node.zPosition = 30
+        signRects[text, default: []].append(CGRect(x: room.midX - width / 2, y: room.maxY + 4, width: width, height: 20))
         return node
     }
 
     private func drawHouse(_ committee: TownCommittee) {
         guard let room = layout.room(committee.name) else { return }
         houses[committee.name]?.removeFromParent()
+        signRects[committee.name] = nil
         let house = SKNode()
         house.name = "house:\(committee.name)"
         let floor = TownScene.sprite(art.room)
@@ -404,13 +449,30 @@ final class TownScene: SKScene {
                 flag.addChild(count)
             }
             house.addChild(flag)
-            let visitor = TownScene.sprite(art.person(.other, .wave, visitor: true))
-            visitor.anchorPoint = CGPoint(x: 0.5, y: 0)
+            signRects[committee.name, default: []].append(CGRect(x: flag.position.x - 4, y: flag.position.y, width: 24, height: 30))
+            // The visitor: someone come for the person, waiting at the door,
+            // a "waiting" badge over its head and whom it waits on below.
+            let visitor = SKNode()
+            let figure = TownScene.sprite(art.person(.other, .stand, visitor: true))
+            figure.anchorPoint = CGPoint(x: 0.5, y: 0)
+            visitor.addChild(figure)
+            let badge = TownScene.sprite(art.waitBadge)
+            badge.position = CGPoint(x: 0, y: 42)
+            badge.zPosition = 0.02
+            visitor.addChild(badge)
+            let whom = label(L("town.waits_on", state.person ?? L("town.you")), size: 8.5, bold: true,
+                             color: art.palette.dark ? art.palette.attention : 0x8A4F00)
+            whom.verticalAlignmentMode = .top
+            whom.position = CGPoint(x: 0, y: -2)
+            whom.zPosition = 0.5
+            visitor.addChild(whom)
+            visitor.setScale(1.35)
             let door = TownLayout.door(of: room)
-            visitor.position = CGPoint(x: door.x + 30, y: door.y - 30)
+            visitor.position = CGPoint(x: door.x + 34, y: door.y - 30)
             visitor.zPosition = Self.depth(visitor.position.y)
             visitor.name = "thread:\(first.key)"
             house.addChild(visitor)
+            signRects[committee.name, default: []].append(CGRect(x: visitor.position.x - 22, y: visitor.position.y - 14, width: 44, height: 80))
         }
         world.addChild(house)
         houses[committee.name] = house
@@ -418,6 +480,7 @@ final class TownScene: SKScene {
 
     private func drawHall() {
         hallNode.removeAllChildren()
+        signRects[L("town.hall")] = nil
         let room = layout.hall
         hallNode.name = "hall"
         let floor = TownScene.sprite(art.hall)
@@ -457,11 +520,6 @@ final class TownScene: SKScene {
 
     private func placePeople() {
         let all = state.senators
-        for (id, node) in people where all[id] == nil {
-            node.removeFromParent()
-            people[id] = nil
-            walkers.remove(id)
-        }
         for id in all.keys.sorted() {
             guard let senator = all[id], let home = home(of: id) else { continue }
             let node: PersonNode
@@ -479,6 +537,7 @@ final class TownScene: SKScene {
             if !director.out.contains(id) { settle(node) }
         }
         updateLabels()
+        arrangeLabels()
     }
 
     /// Put a senator in its place for its mood.
@@ -544,6 +603,7 @@ final class TownScene: SKScene {
             self.strollers -= 1
             self.walkers.remove(node.senator.id)
             node.body.texture = self.art.person(node.senator.runtime, .stand)
+            self.arrangeLabels()
             self.scheduleWander(node)
         }
     }
@@ -572,7 +632,116 @@ final class TownScene: SKScene {
                 } else {
                     fade(from: from, to: to, thread: thread, line: line)
                 }
+            case let .arrive(id, walk): arrive(id, walk: walk)
+            case let .depart(id, walk): depart(id, walk: walk)
+            case let .check(thread, a, b):
+                threads[thread.key] = thread
+                check(thread, over: [a, b].compactMap { $0 })
             }
+        }
+    }
+
+    /// Come into town from its nearer edge, along the street, in at the door.
+    private func arrive(_ id: String, walk: Bool) {
+        guard let node = people[id] else { return }
+        settle(node)
+        guard walk else {
+            node.alpha = 0
+            movers += 1
+            node.run(.sequence([.fadeAlpha(to: node.senator.mood == .paused ? 0.85 : 1, duration: 0.5),
+                                .run { [weak self] in self?.movers -= 1 }]))
+            return
+        }
+        let rest = restSpot(node)
+        node.removeAllActions()
+        node.body.removeAllActions()
+        let path = TownLayout.pathFromEdge(layout.edgeX(for: node.room), to: rest, in: node.room)
+        node.position = path[0]
+        node.isHidden = false
+        walkers.insert(id)
+        movers += 1
+        self.walk(node, along: path, speed: max(150, TownLayout.length(path) / 6)) { [weak self, weak node] in
+            guard let self, let node else { return }
+            self.movers -= 1
+            self.walkers.remove(id)
+            self.settle(node)
+            self.arrangeLabels()
+            self.perform(self.director.cameHome(id))
+        }
+    }
+
+    /// Leave town: out of the door and along the street to the edge; then
+    /// gone, or (a stopped session) hidden at home.
+    private func depart(_ id: String, walk: Bool) {
+        guard let node = people[id] else { return }
+        let finish = { [weak self, weak node] in
+            guard let self, let node else { return }
+            self.departing.remove(id)
+            self.walkers.remove(id)
+            if self.state.senators[id] == nil {
+                node.removeFromParent()
+                self.people[id] = nil
+            } else {
+                self.settle(node)
+            }
+            self.arrangeLabels()
+        }
+        // Someone not in sight (stopped already) has nothing to walk.
+        guard walk, !node.isHidden || node.alpha > 0 else {
+            if walk { perform(director.cameHome(id)) }
+            departing.insert(id)
+            movers += 1
+            node.run(.sequence([.fadeOut(withDuration: 0.5), .run { [weak self] in
+                self?.movers -= 1
+                finish()
+            }]))
+            return
+        }
+        node.removeAllActions()
+        node.body.removeAllActions()
+        endStroll(node)
+        node.isHidden = false
+        node.alpha = 1
+        node.setRaised(false, art: art)
+        node.setAsleep(false, palette: art.palette)
+        let path = Array(TownLayout.pathFromEdge(layout.edgeX(for: node.room), to: node.position, in: node.room).reversed())
+        departing.insert(id)
+        walkers.insert(id)
+        movers += 1
+        self.walk(node, along: path, speed: max(150, TownLayout.length(path) / 6)) { [weak self] in
+            guard let self else { return }
+            self.movers -= 1
+            finish()
+            self.perform(self.director.cameHome(id))
+        }
+    }
+
+    /// A ✓ over each of the two for a moment: the thread is settled.
+    private func check(_ thread: TownThreadRef, over ids: [String]) {
+        for id in ids {
+            guard checks < 6, let node = people[id], !node.isHidden else { continue }
+            let mark = SKNode()
+            mark.name = "thread:\(thread.key)"
+            mark.zPosition = 58
+            let disc = SKShapeNode(circleOfRadius: 9)
+            disc.fillColor = TownPalette.color(art.palette.glow)
+            disc.strokeColor = .clear
+            let tick = label("✓", size: 12, bold: true, color: art.palette.dark ? 0x10241A : 0xFFFFFF)
+            mark.addChild(disc)
+            mark.addChild(tick)
+            mark.position = CGPoint(x: node.position.x + 16, y: node.position.y + 58)
+            mark.alpha = 0
+            world.addChild(mark)
+            checks += 1
+            movers += 1
+            mark.run(.sequence([
+                .group([.fadeIn(withDuration: 0.2), reduceMotion ? .wait(forDuration: 0.2) : .moveBy(x: 0, y: 6, duration: 0.2)]),
+                .wait(forDuration: 1.4), .fadeOut(withDuration: 0.3), .removeFromParent(),
+                .run { [weak self] in
+                    self?.checks -= 1
+                    self?.movers -= 1
+                },
+            ]))
         }
     }
 
@@ -602,23 +771,14 @@ final class TownScene: SKScene {
         node.isHidden = false
         let start = node.position
         let (spot, room) = destination(to: to, thread: thread)
+        node.nameLabel?.isHidden = true
         let out = TownLayout.path(from: start, in: node.room, to: spot, in: room)
         walkers.insert(from)
         movers += 1
         walk(node, along: out, speed: max(150, TownLayout.length(out) / 6)) { [weak self, weak node] in
             guard let self, let node else { return }
             node.body.texture = self.art.person(node.senator.runtime, .stand)
-            let bubble = self.bubble(line, thread: thread)
-            bubble.position = CGPoint(x: node.position.x, y: node.position.y + 46)
-            bubble.setScale(0.6)
-            bubble.alpha = 0
-            self.world.addChild(bubble)
-            bubble.run(.sequence([
-                .group([.fadeIn(withDuration: 0.18), .scale(to: 1, duration: 0.18)]),
-                .wait(forDuration: 2.6),
-                .fadeOut(withDuration: 0.25),
-                .removeFromParent(),
-            ]))
+            self.showBubble(line, thread: thread, over: node, hold: 2.6)
             node.run(.sequence([.wait(forDuration: 3.0), .run { [weak self, weak node] in
                 guard let self, let node else { return }
                 let back = TownLayout.path(from: node.position, in: room, to: self.restSpot(node), in: node.room)
@@ -627,6 +787,7 @@ final class TownScene: SKScene {
                     self.movers -= 1
                     self.walkers.remove(node.senator.id)
                     self.settle(node)
+                    self.arrangeLabels()
                     self.perform(self.director.cameHome(node.senator.id))
                 }
             }]), withKey: "visit")
@@ -644,19 +805,64 @@ final class TownScene: SKScene {
     /// is for. Nobody moves.
     private func fade(from: String, to: String?, thread: TownThreadRef, line: String) {
         guard let sender = people[from] else { return }
-        let (spot, _) = destination(to: to, thread: thread)
-        let first = bubble(line, thread: thread)
-        first.position = CGPoint(x: sender.position.x, y: sender.position.y + 46)
-        first.alpha = 0
-        let second = bubble(line, thread: thread)
-        second.position = CGPoint(x: spot.x + 24, y: spot.y + 52)
-        second.alpha = 0
-        world.addChild(first)
-        world.addChild(second)
+        showBubble(line, thread: thread, over: sender, hold: 1.4)
+        let target = to.flatMap { people[$0] }
         movers += 1
-        first.run(.sequence([.fadeIn(withDuration: 0.3), .wait(forDuration: 1.4), .fadeOut(withDuration: 0.5), .removeFromParent()]))
-        second.run(.sequence([.wait(forDuration: 1.7), .fadeIn(withDuration: 0.5), .wait(forDuration: 1.8),
-                              .fadeOut(withDuration: 0.4), .removeFromParent(), .run { [weak self] in self?.movers -= 1 }]))
+        run(.sequence([.wait(forDuration: 1.7), .run { [weak self] in
+            guard let self else { return }
+            if let target {
+                self.showBubble(line, thread: thread, over: target, hold: 1.8)
+            } else {
+                let (spot, _) = self.destination(to: nil, thread: thread)
+                self.showBubble(line, thread: thread, head: CGPoint(x: spot.x, y: spot.y + 20), exclude: nil, hold: 1.8)
+            }
+            self.movers -= 1
+        }]))
+    }
+
+    /// The part of the scene on screen now.
+    var viewport: CGRect {
+        CGRect(x: cam.position.x - size.width / 2 * cam.xScale, y: cam.position.y - size.height / 2 * cam.yScale,
+               width: size.width * cam.xScale, height: size.height * cam.yScale)
+    }
+
+    private func showBubble(_ text: String, thread: TownThreadRef, over node: PersonNode, hold: TimeInterval) {
+        let head = CGPoint(x: node.position.x, y: node.position.y + 34 * node.xScale + 2)
+        showBubble(text, thread: thread, head: head, exclude: node.senator.id, hold: hold)
+    }
+
+    /// A bubble above `head`, placed to cover no one else's face or name
+    /// and no other bubble, inside the view; its tail points at the head.
+    private func showBubble(_ text: String, thread: TownThreadRef, head: CGPoint, exclude: String?, hold: TimeInterval) {
+        bubbles.removeAll { $0.node.parent == nil }
+        // Readable when zoomed out: a bubble grows with the zoom.
+        let scale = min(max(cam.xScale * 0.85, 1), 2.4)
+        let words = label(text.isEmpty ? "…" : text, size: 11, color: art.palette.ink)
+        let local = CGSize(width: max(words.frame.width + 18, 34), height: 22)
+        let size = CGSize(width: local.width * scale, height: local.height * scale)
+        var obstacles = bubbles.map(\.rect)
+        for (id, p) in people where id != exclude && !p.isHidden {
+            obstacles.append(p.calculateAccumulatedFrame())
+        }
+        // Houses' signs and flags, and the visitors at their doors.
+        obstacles += signs
+        let placed = TownPlacement.bubble(size: size, head: head, obstacles: obstacles, viewport: viewport)
+        let node = bubble(words, size: local, tip: CGPoint(x: (placed.tail.x - placed.centre.x) / scale,
+                                                          y: (placed.tail.y - placed.centre.y) / scale),
+                          thread: thread)
+        node.position = placed.centre
+        node.setScale(scale * 0.6)
+        node.alpha = 0
+        world.addChild(node)
+        let rect = CGRect(x: placed.centre.x - size.width / 2, y: placed.centre.y - size.height / 2,
+                          width: size.width, height: size.height)
+        bubbles.append((node, rect))
+        node.run(.sequence([
+            .group([.fadeIn(withDuration: 0.18), .scale(to: scale, duration: 0.18)]),
+            .wait(forDuration: hold),
+            .fadeOut(withDuration: 0.25),
+            .removeFromParent(),
+        ]))
     }
 
     /// Walk a path at `speed` points a second, legs going, then `done`.
@@ -683,35 +889,77 @@ final class TownScene: SKScene {
 
     /// A speech bubble with the first words of what was said; a click on it
     /// opens the thread.
-    private func bubble(_ text: String, thread: TownThreadRef) -> SKNode {
+    /// `tip` is where the tail points, from the bubble's centre, unscaled.
+    private func bubble(_ words: SKLabelNode, size: CGSize, tip: CGPoint, thread: TownThreadRef) -> SKNode {
         let node = SKNode()
         node.name = "thread:\(thread.key)"
         node.zPosition = 60
-        let words = label(text.isEmpty ? "…" : text, size: 11, color: art.palette.ink)
-        let width = max(words.frame.width + 18, 34)
-        let plate = SKShapeNode(rectOf: CGSize(width: width, height: 22), cornerRadius: 11)
+        let plate = SKShapeNode(rectOf: size, cornerRadius: size.height / 2)
         plate.fillColor = TownPalette.color(art.palette.bubble)
-        plate.strokeColor = TownPalette.color(art.palette.streetEdge)
+        plate.strokeColor = TownPalette.color(art.palette.dark ? art.palette.inkSoft : art.palette.streetEdge, alpha: art.palette.dark ? 0.5 : 1)
         plate.lineWidth = 1
+        // The tail: from the bottom edge, as near the head as the round
+        // ends allow, to just short of the head.
+        let baseX = min(max(tip.x, -size.width / 2 + 12), size.width / 2 - 12)
+        let end = CGPoint(x: tip.x, y: min(tip.y + 3, -size.height / 2 - 4))
         let tail = SKShapeNode(path: {
             let p = CGMutablePath()
-            p.move(to: CGPoint(x: -5, y: -10.5))
-            p.addLine(to: CGPoint(x: 0, y: -17))
-            p.addLine(to: CGPoint(x: 5, y: -10.5))
+            p.move(to: CGPoint(x: baseX - 5, y: -size.height / 2 + 1))
+            p.addLine(to: end)
+            p.addLine(to: CGPoint(x: baseX + 5, y: -size.height / 2 + 1))
+            p.closeSubpath()
             return p
         }())
         tail.fillColor = plate.fillColor
-        tail.strokeColor = plate.fillColor
+        tail.strokeColor = plate.strokeColor
+        tail.lineWidth = 1
         node.addChild(tail)
         node.addChild(plate)
+        // The plate's fill covers the tail's stroke where they join.
+        let seam = SKShapeNode(rectOf: CGSize(width: 9, height: 2))
+        seam.fillColor = plate.fillColor
+        seam.strokeColor = .clear
+        seam.position = CGPoint(x: baseX, y: -size.height / 2 + 1.2)
+        node.addChild(seam)
         node.addChild(words)
         return node
     }
 
     /// Names show when close enough to read them.
     private func updateLabels() {
+        arrangeLabels()
+    }
+
+    /// Names under people, none over another: the chair's and those who
+    /// wait on a person keep their place, others step down a line or hide.
+    /// Walkers' names hide while they walk.
+    private func arrangeLabels() {
         let show = cam.xScale < 1.5
-        for node in people.values { node.nameLabel?.isHidden = !show }
+        var labels: [TownPlacement.Label] = []
+        for (id, node) in people {
+            guard let label = node.nameLabel else { continue }
+            label.position.y = node.labelBaseY
+            guard show, !node.isHidden, !walkers.contains(id) || node.strolling else {
+                label.isHidden = true
+                continue
+            }
+            let f = label.frame
+            let s = node.xScale
+            let rect = CGRect(x: node.position.x + f.minX * s, y: node.position.y + f.minY * s,
+                              width: f.width * s, height: f.height * s)
+            let priority = node.senator.chair ? 3 : node.senator.mood == .waiting ? 2 : node.senator.mood == .working ? 1 : 0
+            labels.append(.init(id: id, rect: rect, priority: priority))
+        }
+        let step: CGFloat = 11 * 1.35
+        for (id, shift) in TownPlacement.labels(labels, step: step) {
+            guard let node = people[id], let label = node.nameLabel else { continue }
+            if let shift {
+                label.isHidden = false
+                label.position.y = node.labelBaseY - shift / node.xScale
+            } else {
+                label.isHidden = true
+            }
+        }
     }
 
     private func clampCamera() {
@@ -817,6 +1065,10 @@ final class PersonNode: SKNode {
         }()
         label.text = text.count > 16 ? String(text.prefix(15)) + "…" : text
         label.fontColor = TownPalette.color(palette.inkSoft)
-        label.position = CGPoint(x: 0, y: seated ? -12 : -2)
+        labelBaseY = seated ? -12 : -2
+        label.position = CGPoint(x: 0, y: labelBaseY)
     }
+
+    /// Where the name sits before any collision moves it.
+    private(set) var labelBaseY: CGFloat = -2
 }

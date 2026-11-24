@@ -8,6 +8,12 @@ enum TownAction: Hashable, Sendable {
     case visit(from: String, to: String?, thread: TownThreadRef, line: String, walk: Bool)
     /// Show a senator's mood (after its walk, when it is out).
     case mood(senator: String, TownMood)
+    /// Walk in from the edge of town (or, without `walk`, fade in).
+    case arrive(senator: String, walk: Bool)
+    /// Walk out to the edge of town (or fade out).
+    case depart(senator: String, walk: Bool)
+    /// A brief ✓ over the two who settled a thread.
+    case check(thread: TownThreadRef, a: String?, b: String?)
 }
 
 /// Turns events into the scene's actions, keeping the town calm: at most
@@ -53,8 +59,16 @@ struct TownDirector {
                 // Gone: whatever it was going to say is not said.
                 queue.removeAll { if case let .visit(from, _, _, _, _) = $0 { return from == senator } else { return false } }
                 heldMoods[senator] = nil
-            case .arrived:
-                break
+                guard present.contains(senator), !out.contains(senator) else { continue }
+                actions.append(.depart(senator: senator, walk: letOut(senator, reduceMotion)))
+            case let .arrived(senator):
+                guard present.contains(senator), !out.contains(senator) else { continue }
+                actions.append(.arrive(senator: senator, walk: letOut(senator, reduceMotion)))
+            case let .answered(thread, a, b):
+                let a = a.flatMap { present.contains($0) ? $0 : nil }
+                let b = b.flatMap { present.contains($0) ? $0 : nil }
+                guard a != nil || b != nil else { continue }
+                actions.append(.check(thread: thread, a: a, b: b))
             }
         }
         let started = dispatch()
@@ -68,6 +82,15 @@ struct TownDirector {
         var actions: [TownAction] = []
         if let mood = heldMoods.removeValue(forKey: senator) { actions.append(.mood(senator: senator, mood)) }
         return actions + dispatch()
+    }
+
+    /// Whether an arrival or a departure walks: when motion is allowed and
+    /// there is room among the walkers (it then counts as out until
+    /// `cameHome`); otherwise it happens at once.
+    private mutating func letOut(_ senator: String, _ reduceMotion: Bool) -> Bool {
+        guard !reduceMotion, out.count < maxWalkers else { return false }
+        out.insert(senator)
+        return true
     }
 
     /// Forget everything in flight (the scene was rebuilt).

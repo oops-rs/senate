@@ -33,14 +33,17 @@ extension TownInput {
             let waiting = state.inbox
                 .filter { $0.forPerson && $0.committee == name }
                 .sorted { $0.since < $1.since }
-                .map { TownThreadRef(committee: $0.committee, root: $0.root, title: $0.title) }
+                .map {
+                    TownThreadRef(committee: $0.committee, root: $0.root, title: $0.title,
+                                  asker: Mentions.shared.plain($0.asker, committee: $0.committee))
+                }
             // The Secretary's own committee, with only the Secretary: the hall is its house.
             if senators.isEmpty && waiting.isEmpty && name == secretaryLine?.committee { continue }
             committees.append(TownCommittee(name: name, senators: senators, waiting: waiting))
         }
         var hall = TownHall(docket: store.docketEntries.count)
         hall.secretary = secretaryLine.map(TownSenator.init(line:))
-        self.state = TownState(committees: committees, hall: hall)
+        self.state = TownState(committees: committees, hall: hall, person: state.person)
         threads = store.agentThreads.map(TownThread.init(row:))
     }
 }
@@ -49,7 +52,8 @@ extension TownSenator {
     init(line: SessionLine) {
         self.init(
             id: TownText.senatorId(line.mention), name: line.displayName, runtime: TownRuntime(line.runtime),
-            mood: TownMood(line.status), chair: line.chair, sessionId: line.sessionId
+            mood: TownMood(line.status), chair: line.chair, sessionId: line.sessionId,
+            doing: line.title
         )
     }
 }
@@ -88,7 +92,7 @@ extension TownThread {
         self.init(
             ref: TownThreadRef(committee: row.committee, root: row.root, title: row.title),
             updated: row.updated, speaker: speaker, listener: listener,
-            line: row.newsLine ?? row.title
+            line: row.newsLine ?? row.title, answered: row.answered
         )
     }
 }

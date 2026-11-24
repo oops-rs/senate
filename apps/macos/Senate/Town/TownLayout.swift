@@ -120,6 +120,20 @@ struct TownLayout: Equatable {
         return dedupe(points)
     }
 
+    /// The way in from the edge of town at `edgeX`: along the street below
+    /// the room to its door, and in. Reversed, the way out.
+    static func pathFromEdge(_ edgeX: CGFloat, to point: CGPoint, in room: CGRect) -> [CGPoint] {
+        let door = door(of: room)
+        let y = streetY(below: room)
+        return dedupe([CGPoint(x: edgeX, y: y), CGPoint(x: door.x, y: y), door, point])
+    }
+
+    /// The nearer edge of town to a room, beyond the last lot.
+    func edgeX(for room: CGRect) -> CGFloat {
+        let b = bounds
+        return room.midX - b.minX < b.maxX - room.midX ? b.minX - 40 : b.maxX + 40
+    }
+
     /// How long a path is, in points.
     static func length(_ path: [CGPoint]) -> CGFloat {
         zip(path, path.dropFirst()).reduce(0) { $0 + hypot($1.1.x - $1.0.x, $1.1.y - $1.0.y) }

@@ -38,6 +38,8 @@ struct TownSenator: Hashable, Sendable, Identifiable {
     var chair: Bool = false
     /// This machine's session for it, which a click opens.
     var sessionId: String?
+    /// What it is working on, when known (its latest status title).
+    var doing: String?
 }
 
 /// A thread, as far as the town needs it: where it is and what it is called.
@@ -45,6 +47,8 @@ struct TownThreadRef: Hashable, Sendable {
     var committee: String
     var root: UInt64
     var title: String
+    /// Who asked, by name, for a thread waiting on the person.
+    var asker: String?
 
     var key: String { "\(committee):\(root)" }
 }
@@ -70,6 +74,8 @@ struct TownHall: Hashable, Sendable {
 struct TownState: Hashable, Sendable {
     var committees: [TownCommittee] = []
     var hall = TownHall()
+    /// The person things wait on (`alice`), for the visitors' labels.
+    var person: String?
 
     /// Every senator by id, the Secretary included.
     var senators: [String: TownSenator] {
@@ -93,8 +99,12 @@ enum TownEvent: Hashable, Sendable {
     /// the thread names no one in town: it goes to the thread's house).
     case message(from: String, to: String?, thread: TownThreadRef, line: String)
     case mood(senator: String, TownMood)
+    /// Came into town: a new senator, or one whose session started again.
     case arrived(senator: String)
+    /// Left town: gone from the state, or its session stopped.
     case left(senator: String)
+    /// A thread between `a` and `b` was answered or closed.
+    case answered(thread: TownThreadRef, a: String?, b: String?)
 }
 
 /// A thread between agents as one state of the store shows it: enough to
@@ -110,6 +120,8 @@ struct TownThread: Hashable, Sendable {
     var listener: String?
     /// The first line of what was said, else the thread's title.
     var line: String
+    /// It has been answered or closed.
+    var answered = false
 }
 
 /// One reading of the store: the town and the threads in flight.
@@ -129,21 +141,34 @@ enum TownDiff {
         for id in after.keys.sorted() {
             guard let now = after[id] else { continue }
             if let was = before[id] {
-                if was.mood != now.mood { events.append(.mood(senator: id, now.mood)) }
-            } else {
+                if was.mood == now.mood { continue }
+                // A session stopping leaves town; one starting again comes back.
+                if now.mood == .stopped {
+                    events.append(.left(senator: id))
+                } else if was.mood == .stopped {
+                    events.append(.arrived(senator: id))
+                } else {
+                    events.append(.mood(senator: id, now.mood))
+                }
+            } else if now.mood != .stopped {
                 events.append(.arrived(senator: id))
             }
         }
         for id in before.keys.sorted() where after[id] == nil {
             events.append(.left(senator: id))
         }
-        let known = Dictionary(old.threads.map { ($0.ref.key, $0.updated) }, uniquingKeysWith: max)
+        let known = Dictionary(old.threads.map { ($0.ref.key, $0) }, uniquingKeysWith: { a, b in a.updated >= b.updated ? a : b })
         for thread in new.threads.sorted(by: { ($0.updated, $0.ref.key) < ($1.updated, $1.ref.key) }) {
-            if let seen = known[thread.ref.key], seen >= thread.updated { continue }
-            guard thread.speaker != thread.listener else { continue }
-            events.append(.message(
-                from: thread.speaker, to: thread.listener, thread: thread.ref, line: thread.line
-            ))
+            let seen = known[thread.ref.key]
+            if let seen, seen.updated >= thread.updated { continue }
+            if thread.speaker != thread.listener {
+                events.append(.message(
+                    from: thread.speaker, to: thread.listener, thread: thread.ref, line: thread.line
+                ))
+            }
+            if thread.answered, seen.map({ !$0.answered }) ?? false {
+                events.append(.answered(thread: thread.ref, a: thread.speaker, b: thread.listener))
+            }
         }
         return events
     }

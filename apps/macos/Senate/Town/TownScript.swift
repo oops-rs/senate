@@ -31,7 +31,7 @@ enum TownScript {
                 s("claude-town", "town", .claude, .working),
                 s("codex-flaky", "flaky", .codex, .idle),
                 s("claude-app", "app", .claude, .waiting),
-            ], waiting: [TownThreadRef(committee: "senate", root: 2577, title: "Unknown committee in ask")]),
+            ], waiting: [TownThreadRef(committee: "senate", root: 2577, title: "Unknown committee in ask", asker: "app")]),
             TownCommittee(name: "ledger", senators: [
                 s("codex-ledger", "ledger-chair", .codex, .idle, chair: true),
                 s("claude-migrate", "migrate", .claude, .working),
@@ -50,7 +50,8 @@ enum TownScript {
                 s("claude-docs", "docs", .claude, .idle, chair: true),
             ]),
         ],
-        hall: TownHall(secretary: s("claude-secretary", "secretary", .claude, .working), docket: 1)
+        hall: TownHall(secretary: s("claude-secretary", "secretary", .claude, .working), docket: 1),
+        person: "wendell"
     ))
 
     /// What happens in the busy town: visits within a house, across the
@@ -65,6 +66,9 @@ enum TownScript {
         .message(from: "claude-docs", to: "claude-secretary", thread: ref("docs", 9, "Release notes"),
                  line: "Release notes are ready for the Speaker"),
         .mood(senator: "codex-flaky", .working),
+        .answered(thread: ref("ledger", 77, "Migration order"), a: "claude-migrate", b: "codex-ledger"),
+        .arrived(senator: "claude-new"),
+        .left(senator: "claude-modal"),
     ]
 
     private static func ref(_ committee: String, _ root: UInt64, _ title: String) -> TownThreadRef {
@@ -75,8 +79,12 @@ enum TownScript {
     static var busyState: TownState {
         var state = quiet.state
         for (i, committee) in state.committees.enumerated() {
-            for (j, senator) in committee.senators.enumerated() where senator.id == "codex-flaky" {
-                state.committees[i].senators[j].mood = .working
+            for (j, senator) in committee.senators.enumerated() {
+                if senator.id == "codex-flaky" { state.committees[i].senators[j].mood = .working }
+                if senator.id == "claude-modal" { state.committees[i].senators[j].mood = .stopped }
+            }
+            if committee.name == "web" {
+                state.committees[i].senators.append(s("claude-new", "new", .claude, .idle))
             }
         }
         return state

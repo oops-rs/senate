@@ -12,7 +12,7 @@ enum TownSnapshot {
 
     static func run(_ store: CoreStore, shot: (String) async -> Void) async {
         let large = ProcessInfo.processInfo.environment[TownScript.env] == "large"
-        store.place = .town
+        store.select(.town)
         await shot("town-quiet")
         // SENATE_APP_TOWN_HOLD=<s>: stay on the quiet town that long (to
         // measure what a still town costs), then go on.
