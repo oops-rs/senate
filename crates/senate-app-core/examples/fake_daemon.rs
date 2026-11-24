@@ -112,6 +112,14 @@ async fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(36);
     common::history(&mut w, history);
+    // FAKE_ARCHIVED=a,b: archived committees, for "Show archived" (two by
+    // default; empty for none).
+    let archived = std::env::var("FAKE_ARCHIVED").unwrap_or_else(|_| "launch-2025,old-docs".into());
+    w.archived = archived
+        .split(',')
+        .filter(|c| !c.trim().is_empty())
+        .filter_map(|c| senate_core::CommitteeId::new(c.trim()).ok())
+        .collect();
     let world = Arc::new(Mutex::new(w));
     let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
     println!("fake daemon on {}", socket.display());

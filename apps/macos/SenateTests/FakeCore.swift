@@ -94,8 +94,16 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     }
     func reconnect() throws { try record("reconnect") }
     func refresh() throws { try record("refresh") }
-    func archivedCommittees() async throws -> [String] { try record("archived"); return [] }
-    func unarchiveCommittee(committee: String) async throws { try record("unarchive:\(committee)") }
+    /// The archived committees; Unarchive takes one off.
+    var archived: [String] = []
+    func archivedCommittees() async throws -> [String] {
+        try record("archived")
+        return lock.withLock { archived }
+    }
+    func unarchiveCommittee(committee: String) async throws {
+        try record("unarchive:\(committee)")
+        lock.withLock { archived.removeAll { $0 == committee } }
+    }
     func reply(committee: String, thread: UInt64, body: String) async throws {
         await hold()
         try record("reply \(committee) \(thread) \(body)")

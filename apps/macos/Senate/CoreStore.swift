@@ -79,6 +79,17 @@ final class CoreStore {
         didSet { defaults.set(showInactive, forKey: Self.showInactiveKey) }
     }
     private static let showInactiveKey = "showInactive"
+    /// List the archived committees in the sidebar, dimmed, each with
+    /// Unarchive. Off by default; remembered. The roster leaves them out.
+    var showArchived = false {
+        didSet {
+            defaults.set(showArchived, forKey: Self.showArchivedKey)
+            if !showArchived { archived = [] }
+        }
+    }
+    private static let showArchivedKey = "showArchived"
+    /// The archived committees, by name, read while `showArchived` is on.
+    private(set) var archived: [String] = []
     /// Show Senate in the Dock (a regular app with a main menu), or keep it
     /// in the menu bar only. On unless turned off; applies at once.
     var showInDock = true {
@@ -125,6 +136,7 @@ final class CoreStore {
         self.defaults = defaults
         drafts = defaults.dictionary(forKey: Self.draftsKey) as? [String: String] ?? [:]
         showInactive = defaults.bool(forKey: Self.showInactiveKey)
+        showArchived = defaults.bool(forKey: Self.showArchivedKey)
         showInDock = Dock.showsInDock(defaults)
         applyDock = notifications
         folded = Set(defaults.stringArray(forKey: Self.foldedKey) ?? [])
@@ -736,6 +748,30 @@ final class CoreStore {
     func isBusy(_ key: String) -> Bool { busy.contains(key) }
 
     @discardableResult
+    /// Read the archived committees (while "Show archived" is on).
+    func loadArchived() async {
+        guard showArchived, let core else { return }
+        do {
+            let names = try await core.archivedCommittees()
+            if showArchived { archived = names.sorted() }
+        } catch {
+            actionError = describe(error)
+        }
+    }
+
+    /// Unarchive a committee: the Speaker in person only, which the server
+    /// checks; a refusal is shown as it says. It comes back among the
+    /// committees with the core's next state.
+    @discardableResult
+    func unarchive(_ committee: String) async -> Bool {
+        let ok = await run("unarchive:\(committee)") { core in
+            try await core.unarchiveCommittee(committee: committee)
+        }
+        if ok { archived.removeAll { $0 == committee } }
+        await loadArchived()
+        return ok
+    }
+
     func run(_ key: String, _ op: (any AppCoreProtocol) async throws -> Void) async -> Bool {
         guard let core else { return false }
         busy.insert(key)
