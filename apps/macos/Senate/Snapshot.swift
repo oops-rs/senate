@@ -252,6 +252,15 @@ enum Snapshot {
             }
             store.place = .section(.senates)
             await shot("profile")
+            // Links: one for what is not here, and one for another Senate,
+            // through the router as the system would deliver them.
+            store.links.open("senate://open/v1/committee/gone", provenance: .system)
+            await store.links.flush()
+            await shot("link-unavailable")
+            store.place = .confirmSenate(
+                LinkRouter.SenateSwitch(key: "team/local", title: "Senate team/local"),
+                "senate://open/v1/committee/payments?senate=%2Fteam%2Flocal")
+            await shot("link-other-senate")
             // The account popover, opened from the foot.
             NotificationCenter.default.post(name: openAccount, object: nil)
             try? await Task.sleep(for: .milliseconds(800))
