@@ -4,8 +4,8 @@
 use super::*;
 use crate::host;
 use crate::host_approval::{
-    ApprovalNotice, ClaudeCandidate, CodexApprovalSignal, HostApprovalState, PromptDecision,
-    observed_at, tool_label,
+    ApprovalNotice, ClaudeCandidate, CodexApprovalOutcome, CodexApprovalSignal, HostApprovalState,
+    PromptDecision, observed_at, tool_label,
 };
 use crate::ipc::{ClaudeApprovalSignal, HostedPrompt};
 use senate_core::StatusState;
@@ -14,6 +14,8 @@ use tokio::sync::mpsc;
 const RETRY: Duration = Duration::from_secs(1);
 const POST_TIMEOUT: Duration = Duration::from_secs(5);
 const POST_FAILURE_LIMIT: u8 = 6;
+// Permission hooks can arrive before Claude paints its dialog.
+const CLAUDE_DIALOG_GRACE_NS: u64 = 2_000_000_000;
 
 #[derive(Debug, thiserror::Error)]
 enum PostError {
@@ -148,7 +150,7 @@ impl Shared {
         &self,
         session_id: &str,
         request_id: Option<&str>,
-        answer: Option<PromptDecision>,
+        outcome: CodexApprovalOutcome,
         at: u64,
     ) -> Result<(), StoreError> {
         let Some((id, session)) = self.approval_host(session_id)? else {
@@ -156,16 +158,21 @@ impl Shared {
         };
         if session.runtime == Runtime::Codex {
             self.edit_approvals(&id, |state| {
-                let applies =
-                    |n: &ApprovalNotice| n.at <= at && request_id.is_none_or(|key| n.prompt == key);
-                if let Some(answer) = answer
-                    && let Some(notice) = state.notices.iter_mut().rfind(|n| applies(n))
-                {
-                    notice.answer = Some(answer);
-                    close_notices(state, applies);
-                    return true;
+                let applies = |n: &ApprovalNotice| {
+                    !n.screen && n.at <= at && request_id.is_none_or(|key| n.prompt == key)
+                };
+                match outcome {
+                    CodexApprovalOutcome::Answered(answer) => {
+                        let Some(notice) = state.notices.iter_mut().rfind(|n| applies(n)) else {
+                            return false;
+                        };
+                        notice.answer = Some(answer);
+                        close_notices(state, applies);
+                        true
+                    }
+                    CodexApprovalOutcome::ResolvedElsewhere => close_notices(state, applies),
+                    CodexApprovalOutcome::Dismissed => dismiss_notices(state, applies),
                 }
-                close_notices(state, applies)
             })?;
         }
         Ok(())
@@ -253,13 +260,25 @@ impl Shared {
         })
     }
 
-    /// A hosted Claude session's turn ended (its Stop hook): no permission
-    /// dialog can be waiting in it any more, so its Claude notices and its
-    /// request opened before now are settled, however the dialog was
-    /// answered. This is what closes a notice whose own result never came
-    /// (an interrupted command, or a Notification that arrived after the
-    /// person had already answered by typing). A tool result alone does not
-    /// say this: a parallel tool can finish while a dialog is up.
+    /// A negative screen check or a turn boundary settles only observations
+    /// that were already present when the check or hook began.
+    pub(super) fn dismiss_claude(
+        &self,
+        id: &EventId,
+        session_id: &str,
+        through: u64,
+    ) -> Result<(), StoreError> {
+        self.edit_approvals(id, |state| {
+            if state.session_id != session_id {
+                return false;
+            }
+            let candidate = state.claude.take_if(|c| c.at <= through).is_some();
+            dismiss_notices(state, |n| !n.screen && n.at <= through) || candidate
+        })
+    }
+
+    /// A parallel tool can finish while a dialog is up. Stop is different:
+    /// the turn itself ended, even if the tool's own result never came.
     pub(super) async fn on_claude_turn_end(&self, session_id: &str) -> Result<(), StoreError> {
         let at = observed_at();
         let _binding = self.session_bindings.read().await;
@@ -269,13 +288,7 @@ impl Shared {
         if session.runtime != Runtime::Claude {
             return Ok(());
         }
-        self.edit_approvals(&id, |state| {
-            if state.session_id != session_id {
-                return false;
-            }
-            let candidate = state.claude.take_if(|c| c.at <= at).is_some();
-            close_notices(state, |n| !n.screen && n.at <= at) || candidate
-        })
+        self.dismiss_claude(&id, session_id, at)
     }
 
     /// Each host's oldest open notice, dated on the wall clock.
@@ -308,7 +321,16 @@ impl Shared {
     async fn reconcile_approval_hosts(&self) -> Result<(), StoreError> {
         let _binding = self.session_bindings.read().await;
         let paths = Paths::new(&self.home);
+        let mut claude_checks = Vec::new();
         for (id, state) in self.store.hosted_approval_states()? {
+            let through = observed_at().saturating_sub(CLAUDE_DIALOG_GRACE_NS);
+            let check_claude = state.claude.as_ref().is_some_and(|c| c.at <= through)
+                || state.notices.iter().any(|n| {
+                    n.runtime == Runtime::Claude
+                        && !n.screen
+                        && n.archive.is_none()
+                        && n.at <= through
+                });
             let native = state.session_id;
             let current = match self.store.session_for_host(&id)? {
                 Some(session_id)
@@ -333,8 +355,24 @@ impl Shared {
                     return moved || attended;
                 }
                 let had_candidate = state.claude.take().is_some();
-                close_notices(state, |_| true) || had_candidate
+                dismiss_notices(state, |_| true) || had_candidate
             })?;
+            if check_claude && current.as_deref() == Some(native.as_str()) {
+                let paths = &paths;
+                claude_checks.push(async move {
+                    (
+                        host::control::permission_shown(paths, &id).await,
+                        id,
+                        native,
+                        through,
+                    )
+                });
+            }
+        }
+        for (shown, id, native, through) in futures::future::join_all(claude_checks).await {
+            if shown == Some(false) {
+                self.dismiss_claude(&id, &native, through)?;
+            }
         }
         // Take the relay's live snapshot even if the native request arrived
         // before the host was published. A disconnected relay supplies no
@@ -377,20 +415,26 @@ impl Shared {
             if live != id {
                 continue;
             }
-            let shown = host::prompt::read(paths, &id)
-                .filter(|_| !relayed.iter().any(|prompt| prompt.session_id == native));
+            let shown = host::prompt::read(paths, &id);
+            let native_approval = relayed.iter().any(|prompt| prompt.session_id == native);
             let viewer = host::viewer_activity(paths, &id);
             self.edit_approvals(&id, |state| {
                 let key = shown.map(|prompt| format!("screen:{}", prompt.since));
                 // Senate's own approval of what is on the screen comes first.
-                let approval = state.claude.is_some()
+                let approval = native_approval
+                    || state.claude.is_some()
                     || state
                         .notices
                         .iter()
                         .any(|n| !n.screen && n.archive.is_none());
-                let mut changed = close_notices(state, |n| {
-                    n.screen && (approval || key.as_ref() != Some(&n.prompt))
-                });
+                let screen_ended =
+                    |n: &ApprovalNotice| n.screen && (approval || key.as_ref() != Some(&n.prompt));
+                let unattended = |n: &ApprovalNotice| {
+                    viewer.as_ref().is_some_and(|viewer| viewer.input_at < n.at)
+                };
+                let dismissed =
+                    dismiss_notices(state, |n| screen_ended(n) && !approval && unattended(n));
+                let mut changed = close_notices(state, screen_ended) || dismissed;
                 if approval {
                     return changed;
                 }
@@ -724,20 +768,36 @@ impl Shared {
                 })?;
             }
             (Some(seq), Some(id)) => {
-                let event = Self::status_event(
+                let mut status = StatusPayload::new(StatusState::Archived);
+                if notice.dismissed && notice.answer.is_none() {
+                    status.reason = Some(
+                        self.locale
+                            .pick(
+                                "终端提示已消失，未收到答复。",
+                                "The terminal prompt went away unanswered.",
+                            )
+                            .into(),
+                    );
+                }
+                let mut event = Self::status_event(
                     notice.committee.clone(),
                     sender,
                     seq,
-                    &StatusPayload::new(StatusState::Archived),
+                    &status,
                     Some(id.clone()),
                 )
                 .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(notice.id));
-                let event = match &notice.answer {
-                    Some(answer) if notice.relay_thread.is_some() => {
-                        event.with_meta(meta::APPROVAL_WAIT, serde_json::json!(answer))
+                if let Some(reason) = status.reason {
+                    event.body = reason;
+                }
+                if notice.relay_thread.is_some() {
+                    if let Some(answer) = &notice.answer {
+                        event = event.with_meta(meta::APPROVAL_WAIT, serde_json::json!(answer));
+                    } else if notice.dismissed {
+                        event = event
+                            .with_meta(meta::APPROVAL_WAIT, serde_json::json!({"dismissed":true}));
                     }
-                    _ => event,
-                };
+                }
                 self.api.append(&event).await?;
                 self.store.edit_hosted_approvals(host_id, |state| {
                     let count = state.notices.len();
@@ -817,7 +877,7 @@ fn set_context(state: &mut HostApprovalState, session_id: &str) -> bool {
     }
     state.session_id = session_id.to_owned();
     state.claude = None;
-    close_notices(state, |_| true);
+    dismiss_notices(state, |_| true);
     true
 }
 
@@ -834,7 +894,8 @@ fn observe_input(state: &mut HostApprovalState, at: u64) -> bool {
         // shows the terminal is attended but says nothing about its native
         // approval outcome.
         notice.at <= at
-            && (notice.screen || notice.runtime != Runtime::Codex || notice.relay_thread.is_none())
+            && !notice.screen
+            && (notice.runtime != Runtime::Codex || notice.relay_thread.is_none())
     }) || candidate
 }
 
@@ -855,6 +916,7 @@ fn typing_keeps_a_relayed_codex_wait_open_for_its_native_outcome() -> anyhow::Re
         unseated: false,
         archive: None,
         answer: None,
+        dismissed: false,
         append_attempted: true,
         failures: 0,
         screen: false,
@@ -881,7 +943,7 @@ fn typing_keeps_a_relayed_codex_wait_open_for_its_native_outcome() -> anyhow::Re
     assert!(observe_input(&mut state, 101));
     assert!(state.notices[0].archive.is_some());
     assert!(state.notices[1].archive.is_none());
-    assert!(state.notices[2].archive.is_some());
+    assert!(state.notices[2].archive.is_none());
     assert!(close_notices(&mut state, |notice| notice.prompt == "relayed"));
     assert!(state.notices[1].archive.is_some());
     Ok(())
@@ -919,6 +981,7 @@ fn open_notice(
         unseated: false,
         archive: None,
         answer: None,
+        dismissed: false,
         append_attempted: false,
         failures: 0,
         screen: false,
@@ -927,10 +990,26 @@ fn open_notice(
 }
 
 fn close_notices(state: &mut HostApprovalState, applies: impl Fn(&ApprovalNotice) -> bool) -> bool {
+    settle_notices(state, false, applies)
+}
+
+fn dismiss_notices(
+    state: &mut HostApprovalState,
+    applies: impl Fn(&ApprovalNotice) -> bool,
+) -> bool {
+    settle_notices(state, true, applies)
+}
+
+fn settle_notices(
+    state: &mut HostApprovalState,
+    dismissed: bool,
+    applies: impl Fn(&ApprovalNotice) -> bool,
+) -> bool {
     let mut changed = false;
     for notice in &mut state.notices {
         if notice.archive.is_none() && applies(notice) {
             notice.archive = Some(EventId::new());
+            notice.dismissed = dismissed;
             notice.failures = 0;
             changed = true;
         }
@@ -971,8 +1050,8 @@ pub(super) async fn observe(
                             tracing::warn!(%error, "recording Codex approval request");
                         }
                     }
-                    CodexApprovalSignal::Resolved { session_id, request_id, answer, at } => {
-                        if let Err(error) = shared.observe_codex_resolution(&session_id, request_id.as_deref(), answer, at) {
+                    CodexApprovalSignal::Resolved { session_id, request_id, outcome, at } => {
+                        if let Err(error) = shared.observe_codex_resolution(&session_id, request_id.as_deref(), outcome, at) {
                             tracing::warn!(%error, "recording Codex approval resolution");
                         }
                         continue;

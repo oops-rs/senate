@@ -61,6 +61,15 @@ impl AppLink {
         format!("{PREFIX}{encoded}").parse()
     }
 
+    pub fn with_target(self, target: Target) -> Result<Self, InvalidLink> {
+        Self {
+            target,
+            senate: self.senate,
+        }
+        .to_string()
+        .parse()
+    }
+
     pub fn for_senate(target: Target, senate_id: &str) -> Result<Self, InvalidLink> {
         Self {
             target,
@@ -109,7 +118,7 @@ impl FromStr for AppLink {
             ["thread", committee, seq] => Target::Thread(read_slug(committee)?, read_seq(seq)?),
             ["senator", name] => {
                 let name = decode(name, false)?;
-                if !qualified(&name) && !slug(&name) {
+                if !qualified(&name) && !selector_slug(&name) {
                     return Err(InvalidLink);
                 }
                 Target::Senator(name)
@@ -162,7 +171,7 @@ impl fmt::Display for AppLink {
 
 fn read_slug(value: &str) -> Result<String, InvalidLink> {
     let value = decode(value, false)?;
-    if slug(&value) {
+    if committee_slug(&value) {
         Ok(value)
     } else {
         Err(InvalidLink)
@@ -174,9 +183,12 @@ fn read_seq(value: &str) -> Result<Seq, InvalidLink> {
 }
 
 fn slug(value: &str) -> bool {
+    committee_slug(value) && !KEYWORDS.contains(&value)
+}
+
+fn committee_slug(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 63
-        && !KEYWORDS.contains(&value)
         && value.as_bytes()[0].is_ascii_alphanumeric()
         && value
             .bytes()
@@ -186,10 +198,35 @@ fn slug(value: &str) -> bool {
 fn qualified(value: &str) -> bool {
     value
         .split_once("::")
-        .is_some_and(|(committee, alias)| slug(committee) && slug(alias))
+        .is_some_and(|(committee, alias)| committee_slug(committee) && selector_slug(alias))
+}
+
+fn selector_slug(value: &str) -> bool {
+    if value.starts_with("obs-") {
+        observer_selector(value)
+    } else {
+        slug(value)
+    }
+}
+
+fn observer_selector(value: &str) -> bool {
+    value
+        .strip_prefix("obs-")
+        .and_then(|rest| rest.split_once('-'))
+        .is_some_and(|(hint, digest)| {
+            hint.len() == 12
+                && digest.len() == 32
+                && hint
+                    .bytes()
+                    .chain(digest.bytes())
+                    .all(|digit| digit.is_ascii_digit() || matches!(digit, b'a'..=b'f'))
+        })
 }
 
 fn session_id(value: &str) -> bool {
+    if value.starts_with("obs-") {
+        return observer_selector(value);
+    }
     let id = value
         .strip_prefix("agy:")
         .or_else(|| value.strip_prefix("acp:"))

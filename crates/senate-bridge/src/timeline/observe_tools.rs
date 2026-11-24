@@ -30,10 +30,50 @@ pub(crate) struct Observation {
     pub started: bool,
 }
 
+/// Resolve only the runtime-owned transcript namespace and filename for this native session.
+pub(crate) fn verified_path(
+    path: &Path,
+    root: &Path,
+    runtime: Runtime,
+    id: &str,
+) -> Option<PathBuf> {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    let root = root.canonicalize().ok()?;
+    if !path.symlink_metadata().ok()?.is_file() {
+        return None;
+    }
+    let path = path.canonicalize().ok()?;
+    if !path.starts_with(root) || path.extension()? != "jsonl" {
+        return None;
+    }
+    let filename = path.file_stem()?.to_str()?;
+    let owned_name = match runtime {
+        Runtime::Claude => filename == id,
+        Runtime::Codex => filename.strip_prefix("rollout-").is_some_and(|name| {
+            name.strip_suffix(id)
+                .is_some_and(|prefix| prefix.ends_with('-'))
+        }),
+        _ => false,
+    };
+    owned_name.then_some(path)
+}
+
 impl Tail {
-    pub(crate) fn open(path: PathBuf) -> io::Result<Self> {
+    pub(crate) fn open(path: PathBuf, runtime: Runtime, native_id: &str) -> io::Result<Self> {
         let file = super::open_file(&path)?;
         let metadata = file.metadata()?;
+        if runtime == Runtime::Codex && !codex_owner(&file, native_id)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "transcript session does not match",
+            ));
+        }
         let offset = metadata.len();
         let anchor = anchor(&file, offset)?;
         Ok(Self {
@@ -94,6 +134,21 @@ impl Tail {
     }
 }
 
+fn codex_owner(file: &File, native_id: &str) -> io::Result<bool> {
+    let mut bytes = vec![0; 64 * 1024];
+    let len = file.read_at(&mut bytes, 0)?;
+    let first_line = bytes[..len].iter().position(|&byte| byte == b'\n');
+    Ok(first_line
+        .and_then(|end| serde_json::from_slice::<Value>(&bytes[..end]).ok())
+        .is_some_and(|meta| {
+            meta["type"] == "session_meta"
+                && meta["payload"]["id"]
+                    .as_str()
+                    .or_else(|| meta["payload"]["session_id"].as_str())
+                    == Some(native_id)
+        }))
+}
+
 fn anchor(file: &File, offset: u64) -> io::Result<Vec<u8>> {
     let mut bytes = vec![0; offset.min(32) as usize];
     file.read_exact_at(&mut bytes, offset.saturating_sub(32))?;
@@ -120,7 +175,10 @@ fn classify(
         }
     };
     match runtime {
-        Runtime::Claude if record["isSidechain"] != true => {
+        Runtime::Claude
+            if record["isSidechain"] != true
+                && record["sessionId"].as_str() == Some(native_session) =>
+        {
             let assistant = record["type"] == "assistant";
             let user = record["type"] == "user";
             if !assistant && !user {
@@ -229,6 +287,7 @@ mod tests {
         let aliases = BTreeMap::from([("private-server".into(), "directory".into())]);
         let record = serde_json::json!({
             "type": "assistant",
+            "sessionId": "native-session",
             "message": { "content": [
                 { "type": "tool_use", "id": "call-a", "name": "Bash", "input": { "command": "secret-canary" } },
                 { "type": "tool_use", "id": "call-b", "name": "mcp__private-server__find", "input": { "path": "/private" } },
@@ -275,11 +334,17 @@ mod tests {
         writeln!(
             file,
             "{}",
+            serde_json::json!({"type":"session_meta","payload":{"id":"native"}})
+        )?;
+        assert!(Tail::open(file.path().to_owned(), Runtime::Codex, "other").is_err());
+        writeln!(
+            file,
+            "{}",
             serde_json::json!({
                 "type": "response_item", "payload": { "type": "function_call", "name": "Read", "call_id": "old" }
             })
         )?;
-        let mut tail = Tail::open(file.path().to_owned())?;
+        let mut tail = Tail::open(file.path().to_owned(), Runtime::Codex, "native")?;
         assert!(
             tail.read(Runtime::Codex, "native", &BTreeMap::new())?
                 .is_empty()
@@ -301,6 +366,38 @@ mod tests {
             tail.read(Runtime::Codex, "native", &BTreeMap::new())?
                 .is_empty()
         );
+        Ok(())
+    }
+    #[test]
+    fn claude_records_from_another_session_are_ignored() {
+        let mut observations = Vec::new();
+        let record = serde_json::json!({
+            "sessionId":"foreign","type":"assistant","message":{"content":[
+                {"type":"tool_use","id":"x","name":"Bash"}
+            ]}
+        });
+        classify(
+            Runtime::Claude,
+            "native",
+            &record,
+            &BTreeMap::new(),
+            &mut observations,
+        );
+        assert!(observations.is_empty());
+    }
+
+    #[test]
+    fn rejects_other_roots_and_runtime_filenames() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("projects");
+        std::fs::create_dir(&root)?;
+        let good = root.join("native.jsonl");
+        let foreign = directory.path().join("native.jsonl");
+        std::fs::write(&good, "")?;
+        std::fs::write(&foreign, "")?;
+        assert!(verified_path(&good, &root, Runtime::Claude, "native").is_some());
+        assert!(verified_path(&foreign, &root, Runtime::Claude, "native").is_none());
+        assert!(verified_path(&good, &root, Runtime::Claude, "other").is_none());
         Ok(())
     }
 }

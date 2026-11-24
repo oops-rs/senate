@@ -141,7 +141,7 @@ impl Front {
     pub(super) async fn verify_card_session(
         &self,
         peer: Option<u32>,
-        selector: &SessionSelector,
+        session: &Session,
     ) -> Result<(), IpcError> {
         let no_identity =
             || IpcError::bad_request("Cannot verify the calling process owns the card's session");
@@ -152,7 +152,9 @@ impl Front {
             .await
             .map_err(|_| no_identity())?;
         let shared = self.primary();
-        let session = shared.resolve(selector)?;
+        if !session.is_live() {
+            return Err(no_identity());
+        }
         let mut allowed = Vec::new();
         allowed.extend(session.claude_pid);
         if let Some(host_id) = shared

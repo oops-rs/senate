@@ -29,6 +29,7 @@ struct SessionTail {
 struct Call {
     id: String,
     kind: String,
+    started_at: Instant,
 }
 
 impl Tools {
@@ -76,12 +77,21 @@ impl Tools {
             else {
                 continue;
             };
+            let Some(root) = transcript_root(session.runtime) else {
+                continue;
+            };
+            let Some(path) =
+                timeline::observe_tools::verified_path(&path, &root, session.runtime, id)
+            else {
+                tails.remove(id);
+                continue;
+            };
             if !tails
                 .get(id)
                 .is_some_and(|tail| tail.observation.matches(&path))
             {
                 tails.remove(id);
-                if let Ok(observation) = Tail::open(path) {
+                if let Ok(observation) = Tail::open(path, session.runtime, id) {
                     tails.insert(
                         id.into(),
                         SessionTail {
@@ -101,7 +111,7 @@ impl Tools {
             };
             for item in observations {
                 let call = if item.started {
-                    if tail.calls.len() >= MAX_CALLS || tail.calls.contains_key(&item.call_id) {
+                    if tail.calls.contains_key(&item.call_id) {
                         continue;
                     }
                     let Some(kind) = item.kind else {
@@ -110,11 +120,22 @@ impl Tools {
                     let active = Call {
                         id: uuid::Uuid::new_v4().to_string(),
                         kind,
+                        started_at: Instant::now(),
                     };
                     let borrowed = Call {
                         id: active.id.clone(),
                         kind: active.kind.clone(),
+                        started_at: active.started_at,
                     };
+                    if tail.calls.len() >= MAX_CALLS
+                        && let Some(oldest) = tail
+                            .calls
+                            .iter()
+                            .min_by_key(|(_, call)| call.started_at)
+                            .map(|(key, _)| key.clone())
+                    {
+                        tail.calls.remove(&oldest);
+                    }
                     tail.calls.insert(item.call_id, active);
                     borrowed
                 } else if let Some(call) = tail.calls.remove(&item.call_id) {
@@ -123,6 +144,7 @@ impl Tools {
                     Call {
                         id: uuid::Uuid::new_v4().to_string(),
                         kind,
+                        started_at: Instant::now(),
                     }
                 } else {
                     continue;
@@ -149,4 +171,17 @@ fn aliases(paths: &Paths) -> BTreeMap<String, String> {
         .filter(|(key, alias)| !key.is_empty() && key.len() <= 128 && alias.parse::<Name>().is_ok())
         .take(64)
         .collect()
+}
+
+fn transcript_root(runtime: Runtime) -> Option<PathBuf> {
+    let (variable, default, transcripts) = match runtime {
+        Runtime::Claude => ("CLAUDE_CONFIG_DIR", ".claude", "projects"),
+        Runtime::Codex => ("CODEX_HOME", ".codex", "sessions"),
+        _ => return None,
+    };
+    let home = std::env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(default)))?;
+    home.is_absolute().then(|| home.join(transcripts))
 }

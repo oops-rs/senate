@@ -94,7 +94,7 @@ pub(crate) async fn merge(
             if let Some(history) = &local.history {
                 retired.alias = history.alias.clone().or_else(|| retired.alias.clone());
                 let history_id = registry
-                    .history_id(&history.native_id)
+                    .history_id(grant, &history.native_id)
                     .map_err(|_| ProjectionError::NotReady)?;
                 retired.link = AppLink::for_senate(Target::HistoryEntry(history_id), id)
                     .ok()
@@ -113,7 +113,7 @@ pub(crate) async fn merge(
         }
         public.approvals.push(senate_observe_protocol::Approval {
             id: registry
-                .approval_id(&approval.native_id)
+                .approval_id(grant, &approval.native_id)
                 .map_err(|_| ProjectionError::NotReady)?,
             committee_id: approval.committee.to_string(),
             senator_id: approval.senator.to_string(),
@@ -142,14 +142,19 @@ pub(crate) async fn merge(
         let project_id = registry
             .project_id(&path)
             .map_err(|_| ProjectionError::NotReady)?;
-        let name = path
+        let name: String = path
             .file_name()
             .and_then(|name| name.to_str())
-            .filter(|name| {
-                !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
-            })
-            .unwrap_or("Project")
-            .to_owned();
+            .filter(|name| name.len() <= 128)
+            .unwrap_or_default()
+            .chars()
+            .filter(|&character| crate::previews::safe_label_char(character))
+            .collect();
+        let name = if name.trim().is_empty() {
+            "Project".to_owned()
+        } else {
+            name
+        };
         roots.entry(project_id.clone()).or_insert(path);
         committee.project_id = Some(project_id.clone());
         projects

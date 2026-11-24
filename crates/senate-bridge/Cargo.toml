@@ -14,7 +14,13 @@ description = "The developer-machine side of Senate: sessions, delivery, MCP too
 name = "senate"
 path = "src/main.rs"
 
+[features]
+default = ["observe-cli"]
+observe-cli = ["dep:axum", "dep:senate-observe-client", "senate-observe/replay"]
+
 [dependencies]
+axum = { workspace = true, optional = true }
+senate-observe-client = { workspace = true, optional = true }
 senate-observe.workspace = true
 senate-observe-protocol.workspace = true
 senate-remote-admin.workspace = true

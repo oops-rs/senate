@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Committee directory scene</title>
+<style>
+  body { font: 16px system-ui, sans-serif; padding: 1rem; }
+  button { display: block; margin-bottom: .5rem; }
+</style>
+<h1>Committees</h1>
+<main></main>
+<script type="module">
+/* SCENE_SDK */
+const host = await fromParent();
+const view = document.querySelector("main");
+const committees = new Map();
+function draw() {
+  view.replaceChildren(...[...committees.values()].map((committee) => {
+    const button = document.createElement("button");
+    button.textContent = committee.name;
+    button.disabled = !committee.link;
+    button.addEventListener("click", () => void host.open(committee.link));
+    return button;
+  }));
+}
+host.subscribe(({ type, data }) => {
+  if (type === "observe.snapshot") {
+    committees.clear();
+    for (const committee of data.snapshot.committees) committees.set(committee.id, committee);
+    draw();
+  } else if (type === "observe.event" && data.frame.kind === "state.patch") {
+    for (const committee of data.frame.data.remove?.committees ?? []) committees.delete(committee.id);
+    for (const committee of data.frame.data.upsert?.committees ?? []) committees.set(committee.id, committee);
+    draw();
+  }
+});
+await host.ready();
+</script>

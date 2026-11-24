@@ -940,7 +940,6 @@ mod tests {
                     topology: false,
                     expires_in_days: None,
                     lines: None,
-                    auto_confirmed: false,
                 },
             },
         };
@@ -953,17 +952,31 @@ mod tests {
             wait,
         )
         .await?;
-        let mut auto = issue("automatic lines");
+        let mut profile = issue("topology metadata");
         if let Request::ObserveAdmin {
             command: AdminRequest::Create { grant },
-        } = &mut auto
+        } = &mut profile
         {
             grant.scope = Scope::Lines;
             grant.lines = Some(LinePolicy::Auto);
-            grant.auto_confirmed = true;
             grant.topology = true;
         }
-        let auto: IssuedGrant = ipc.call(&auto, wait).await?;
+        assert!(ipc.call::<IssuedGrant>(&profile, wait).await.is_err());
+        if let Request::ObserveAdmin {
+            command: AdminRequest::Create { grant },
+        } = &mut profile
+        {
+            grant.lines = Some(LinePolicy::Published);
+        }
+        assert!(ipc.call::<IssuedGrant>(&profile, wait).await.is_err());
+        if let Request::ObserveAdmin {
+            command: AdminRequest::Create { grant },
+        } = &mut profile
+        {
+            grant.scope = Scope::Metadata;
+            grant.lines = None;
+        }
+        let profile: IssuedGrant = ipc.call(&profile, wait).await?;
         let issued: IssuedGrant = ipc.call(&issue("first scene"), wait).await?;
         let other: IssuedGrant = ipc.call(&issue("second scene"), wait).await?;
         let http = reqwest::Client::builder()
@@ -986,22 +999,22 @@ mod tests {
         assert_eq!(snapshot.committees.len(), 1);
         assert_eq!(snapshot.committees[0].id, "visible");
         let events = format!("{}/v1/observe/events", top.url);
-        let auto_state: Snapshot = http
+        let profile_state: Snapshot = http
             .get(&state)
-            .bearer_auth(&auto.token)
+            .bearer_auth(&profile.token)
             .send()
             .await?
             .error_for_status()?
             .json()
             .await?;
         assert!(
-            auto_state
+            !profile_state
                 .capabilities
                 .iter()
-                .any(|capability| capability == "lines_auto")
+                .any(|capability| capability == "published_lines")
         );
         assert_eq!(
-            auto_state
+            profile_state
                 .senate
                 .person
                 .and_then(|person| person.card)
@@ -1037,19 +1050,6 @@ mod tests {
             )
             .await?;
         assert_eq!(candidate.line, "first-line-canary");
-        let mut auto_stream = http
-            .get(&events)
-            .bearer_auth(&auto.token)
-            .header("last-event-id", auto_state.cursor.as_str())
-            .send()
-            .await?
-            .error_for_status()?;
-        let frame = first_observed_event(&mut auto_stream, committed.event.seq, true).await?;
-        let Event::MessagePosted(data) = frame.event else {
-            anyhow::bail!("expected public filing");
-        };
-        assert_eq!(data.line.as_deref(), Some(candidate.line.as_str()));
-        drop(auto_stream);
         let expected = committed.event.seq;
         let pong = first_observed_event(&mut stream, expected, false).await?;
         let Event::MessagePosted(message) = pong.event else {
