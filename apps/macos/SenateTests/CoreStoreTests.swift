@@ -42,9 +42,9 @@ import SenateCore
         let id = try store.newDeskActionId()
         core.failNext = .Failed(message: "The destination is temporarily unavailable.")
         await #expect(throws: CoreError.self) {
-            _ = try await store.decideDeskItem(item, itemId: detail.eventId, id: id, reason: nil)
+            _ = try await store.decideDeskItem(item, itemId: detail.eventId, id: id, choice: .forward)
         }
-        let receipt = try await store.decideDeskItem(item, itemId: detail.eventId, id: id, reason: nil)
+        let receipt = try await store.decideDeskItem(item, itemId: detail.eventId, id: id, choice: .forward)
         #expect(receipt.delivered && receipt.seq == 75)
         #expect(core.calls.filter { $0 == "desk-decide refund-v2 60 desk-test-action forward" }.count == 2)
         #expect(store.place == .desk(item))
@@ -1028,5 +1028,31 @@ extension CoreStoreTests {
         await store.threads.start(committees: ["refund-v2"], archived: true)
         #expect(store.threads.threads("refund-v2").map(\.root) == [10, 30, 20])
         store.threads.stop()
+    }
+}
+
+extension CoreStoreTests {
+    /// An item awaiting an answer is answered as the Speaker, or closed;
+    /// what can be done comes from the daemon, and an item nobody here
+    /// can act on says whom it waits on.
+    @Test func aDeskItemIsAnsweredOrClosedAsTheSpeaker() async throws {
+        let store = store()
+        let question = DocketEntry(committee: "commons-demo", seq: 63, kindLabel: "Question", by: "tester",
+                                   body: "Which env?", awaiting: "addressed", why: "", agents: [], since: Date())
+        let detail = try await store.deskItem(question)
+        #expect(detail.actions == [.answer, .close])
+        let answered = try await store.decideDeskItem(question, itemId: detail.eventId, id: "a1",
+                                                      choice: .answer(body: "staging"))
+        #expect(answered.kind == .answered && answered.seq == 77)
+        let closed = try await store.decideDeskItem(question, itemId: detail.eventId, id: "c1",
+                                                    choice: .close(reason: "stale"))
+        #expect(closed.kind == .closed && closed.seq == 78)
+        #expect(core.calls.contains("desk-decide commons-demo 63 a1 answer"))
+        #expect(core.calls.contains("desk-decide commons-demo 63 c1 close"))
+
+        let away = DocketEntry(committee: "refund-v2", seq: 62, kindLabel: "Request", by: "tester",
+                               body: "x", awaiting: "away", why: "", agents: [], since: Date())
+        let held = try await store.deskItem(away)
+        #expect(held.actions.isEmpty && held.waitsOn != nil)
     }
 }

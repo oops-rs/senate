@@ -694,9 +694,11 @@ final class CoreStore {
         return core.newDeskActionId()
     }
 
-    func decideDeskItem(_ entry: DocketEntry, itemId: String, id: String, reason: String?) async throws -> DeskOutcomeView {
+    /// Decide an item on the Speaker's desk: forward, refuse, answer as the
+    /// Speaker, or close. A retry sends the same `id`.
+    func decideDeskItem(_ entry: DocketEntry, itemId: String, id: String, choice: DeskChoice) async throws -> DeskOutcomeView {
         guard let core else { throw CoreError.NotStarted }
-        return try await core.decideDeskItem(committee: entry.committee, seq: entry.seq, itemId: itemId, id: id, reason: reason)
+        return try await core.deskDecide(committee: entry.committee, seq: entry.seq, itemId: itemId, id: id, decision: choice)
     }
 
     func loadThread(_ row: InboxThread) async {
