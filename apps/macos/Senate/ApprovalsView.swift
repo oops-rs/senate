@@ -15,9 +15,7 @@ struct ApprovalsView: View {
         content
             .toolbar {
                 ToolbarSpacer(.flexible)
-                if store.deskSelection == nil {
-                    ToolbarItem(placement: .primaryAction) { RefreshButton(store: store) }
-                }
+                ToolbarItem(placement: .primaryAction) { RefreshButton(store: store) }
             }
     }
 
@@ -26,9 +24,7 @@ struct ApprovalsView: View {
         let approvals = store.state.approvals
         let desk = store.deskThreads
         let docket = store.docketEntries
-        if let selected = store.deskSelection {
-            DeskEntryDetail(store: store, item: selected).id(selected.id)
-        } else if prompts.isEmpty && approvals.isEmpty && desk.isEmpty && docket.isEmpty {
+        if prompts.isEmpty && approvals.isEmpty && desk.isEmpty && docket.isEmpty {
             EmptyState(text: L("approvals.empty"))
         } else {
             ReadingColumn {
@@ -135,47 +131,64 @@ private struct DeskCard: View {
     }
 }
 
+/// Something awaiting the Speaker (a question, a note, a request between
+/// committees): the same card as what is put to you, opening the item,
+/// where it is answered, forwarded or refused, or read when it waits on
+/// someone else.
 private struct EntryCard: View {
     let store: CoreStore
     let item: DocketEntry
+    @State private var hovered = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.s) {
-            HStack(spacing: 6) {
-                Chip(text: L("waiting.to_speaker"), tone: .accent)
-                Button {
-                    store.place = .committee(item.committee)
-                } label: {
+        // `addressed` is what the kind's chip already says; the others say
+        // whom or what it waits on.
+        let telling = item.awaiting != "addressed"
+        Button {
+            store.place = .desk(item)
+        } label: {
+            VStack(alignment: .leading, spacing: Theme.Space.s) {
+                HStack(spacing: 6) {
+                    Chip(text: item.kindLabel, tone: .accent)
                     Chip(text: item.committee)
+                    if telling {
+                        Chip(text: L("docket.\(item.awaiting)"), tone: item.awaiting == "away" ? .attention : .neutral)
+                    }
+                    Spacer(minLength: Theme.Space.s)
+                    TimedMention(date: item.since) { ago in
+                        L("docket.meta", String(item.seq), item.by, ago)
+                    }
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                    .lineLimit(1)
                 }
-                .buttonStyle(.plain)
-                .help(L("committees.open", item.committee))
-                Chip(text: L("docket.\(item.awaiting)"), tone: item.awaiting == "away" ? .attention : .neutral)
-                Spacer(minLength: Theme.Space.s)
-                TimedMention(date: item.since) { ago in
-                    L("docket.meta", String(item.seq), item.by, ago)
+                MentionText(item.body)
+                    .font(Theme.Fonts.heading)
+                    .foregroundStyle(Theme.onSurface)
+                    .lineLimit(4)
+                    .multilineTextAlignment(.leading)
+                if telling {
+                    MentionText(item.why)
+                        .font(Theme.Fonts.text)
+                        .foregroundStyle(Theme.onSurfaceVariant)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
                 }
-                .font(Theme.Fonts.meta)
-                .foregroundStyle(Theme.onSurfaceVariant)
-                .lineLimit(1)
             }
-            MentionText(item.body)
-                .font(Theme.Fonts.text)
-                .foregroundStyle(Theme.onSurface)
-                .lineLimit(4)
-                .textSelection(.enabled)
-            MentionText(item.why)
-                .font(Theme.Fonts.row)
-                .foregroundStyle(Theme.onSurfaceVariant)
-            Button(L("desk.open_item")) { store.deskSelection = item }
-                .buttonStyle(.pill)
-                .accessibilityIdentifier("desk-open-\(item.id)")
+            .padding(Theme.Space.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(hovered ? Theme.containerHigh : Theme.container,
+                        in: RoundedRectangle(cornerRadius: Theme.Radius.card))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
         }
-        .card()
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(L("desk.open_item_help"))
+        .accessibilityIdentifier("desk-open-\(item.id)")
     }
 }
 
-private struct DeskEntryDetail: View {
+struct DeskEntryDetail: View {
     let store: CoreStore
     let item: DocketEntry
 
@@ -315,15 +328,9 @@ private struct DeskEntryDetail: View {
         }
     }
 
-    /// Back to Approvals; what the request is; Forward and Refuse while it
+    /// What the request is; Forward and Refuse while it
     /// can be decided; the original thread and the committee in its menu.
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
-            Button { store.deskSelection = nil } label: {
-                Label(L("desk.back"), systemImage: "chevron.backward")
-            }
-            .help(L("desk.back"))
-        }
         ToolbarItem(placement: .navigation) {
             Text(verbatim: L("desk.item_heading", item.committee, String(item.seq)))
                 .font(.headline)

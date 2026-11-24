@@ -665,23 +665,6 @@
         }
       }
     },
-    "desk.back": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Back to Approvals"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "返回审批"
-          }
-        }
-      }
-    },
     "desk.cancel": {
       "extractionState": "manual",
       "localizations": {
@@ -818,19 +801,19 @@
         }
       }
     },
-    "desk.open_item": {
+    "desk.open_item_help": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open desk request"
+            "value": "Open it on the Speaker's desk"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "打开待处理请求"
+            "value": "在议长办公桌上打开"
           }
         }
       }

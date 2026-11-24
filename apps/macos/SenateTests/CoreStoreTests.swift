@@ -36,7 +36,7 @@ import SenateCore
         let item = DocketEntry(committee: "refund-v2", seq: 60, kindLabel: "Request",
                                by: "tester", body: "Preview", awaiting: "addressed", why: "",
                                agents: [], since: Date())
-        store.deskSelection = item
+        store.place = .desk(item)
         let detail = try await store.deskItem(item)
         #expect(detail.item.body == "Full request")
         let id = try store.newDeskActionId()
@@ -47,7 +47,7 @@ import SenateCore
         let receipt = try await store.decideDeskItem(item, itemId: detail.eventId, id: id, reason: nil)
         #expect(receipt.delivered && receipt.seq == 75)
         #expect(core.calls.filter { $0 == "desk-decide refund-v2 60 desk-test-action forward" }.count == 2)
-        #expect(store.deskSelection == item)
+        #expect(store.place == .desk(item))
     }
 
     @Test func statesArriveInTheOrderTheCoreSentThem() async throws {

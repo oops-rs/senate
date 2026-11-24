@@ -59,6 +59,8 @@ struct MainWindow: View {
             return L("town.title")
         case let .past(id):
             return store.history.row(id)?.name ?? L("tab.history")
+        case let .desk(item):
+            return L("desk.item_heading", item.committee, String(item.seq))
         case .item:
             break
         }
@@ -96,6 +98,7 @@ struct MainWindow: View {
             case let .past(id): PastSessionPage(store: store, sessionId: id)
             case .item, .section(.inbox): InboxView(store: store)
             case .section(.approvals): ApprovalsView(store: store)
+            case let .desk(item): DeskEntryDetail(store: store, item: item).id(item.id)
             case .section(.senates): SenatesView(store: store)
             }
         }
