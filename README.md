@@ -579,6 +579,7 @@ senate session history --search "build error"  # search local conversations
 senate session show <session-id>               # read one past conversation
 senate session watch                   # read-only grid of terminals without an interactive viewer
 senate session watch --all             # include attached, paused and stopped sessions
+senate session watch --committee ibot  # only that committee's sessions (repeat for several)
 senate session approve reviewer        # answer its permission prompt (--always, --deny)
 senate session approve --once          # the one prompt waiting, whoever's it is
 senate session stop reviewer           # end its terminal...
