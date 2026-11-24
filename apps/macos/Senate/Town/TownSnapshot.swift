@@ -1,5 +1,5 @@
 #if DEBUG
-import Foundation
+import AppKit
 
 /// Development only: with `SENATE_APP_SNAPSHOT=<dir>` and
 /// `SENATE_APP_SNAPSHOT_TOWN=1`, picture the Town page and quit: the town
@@ -64,6 +64,61 @@ enum TownSnapshot {
         let dark = ProcessInfo.processInfo.environment["SENATE_APP_SNAPSHOT_APPEARANCE"] == "dark"
         _ = await page.evaluate("window.town.setOptions({ time: t }); return true", ["t": dark ? "night" : "day"])
         await shot("works-town")
+        // SENATE_APP_TOWN_HOLD=<s>: stay on the whole town that long, the world running (to measure what it costs).
+        if let hold = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_HOLD"].flatMap(Double.init) {
+            // SENATE_APP_TOWN_HOLD_ZOOM=<z>: hold close up on the plaza instead of the whole town.
+            if let zoom = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_HOLD_ZOOM"].flatMap(Double.init) {
+                _ = await page.evaluate("return window.town.look('hall', z)", ["z": zoom])
+            }
+            let web = (page.web.value(forKey: "_webProcessIdentifier") as? Int) ?? 0
+            print("snapshot: holding the quiet town \(hold) s app=\(ProcessInfo.processInfo.processIdentifier) web=\(web)")
+            try? await Task.sleep(for: .seconds(hold))
+        }
+        // SENATE_APP_TOWN_PHASES=<s>: what the town costs in each state, `<s>` seconds each:
+        // in front (key), visible behind another window, on another page, minimised.
+        if let each = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_PHASES"].flatMap(Double.init) {
+            let web = (page.web.value(forKey: "_webProcessIdentifier") as? Int) ?? 0
+            let ids = "app=\(ProcessInfo.processInfo.processIdentifier) web=\(web)"
+            let window = page.web.window
+            window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            print("snapshot: phase key \(ids)")
+            try? await Task.sleep(for: .seconds(each)); print("snapshot: stats key \(String(describing: await page.evaluate("return window.town.stats()")))")
+            // A small window of our own takes the key; the town stays fully visible.
+            let other = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 160, height: 80), styleMask: [.titled], backing: .buffered, defer: false)
+            other.setFrameOrigin(NSPoint(x: (NSScreen.main?.visibleFrame.maxX ?? 800) - 170, y: (NSScreen.main?.visibleFrame.minY ?? 0) + 10))
+            other.becomesKeyOnlyIfNeeded = false
+            other.makeKeyAndOrderFront(nil)
+            print("snapshot: phase notkey \(ids) key=\(window?.isKeyWindow == true)")
+            try? await Task.sleep(for: .seconds(each)); print("snapshot: stats notkey \(String(describing: await page.evaluate("return window.town.stats()")))")
+            other.close()
+            window?.makeKeyAndOrderFront(nil)
+            store.select(.section(.inbox))
+            print("snapshot: phase hidden \(ids)")
+            try? await Task.sleep(for: .seconds(each))
+            store.select(.town)
+            try? await Task.sleep(for: .seconds(2))
+            window?.miniaturize(nil)
+            print("snapshot: phase minimised \(ids)")
+            try? await Task.sleep(for: .seconds(each))
+            window?.deminiaturize(nil)
+            print("snapshot: phase done")
+            return
+        }
+        // SENATE_APP_TOWN_WALK=<n>: close-ups at about ten frames a second (people walking).
+        if let walk = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_WALK"].flatMap(Int.init) {
+            for (name, place, zoom) in [("walk-ring", "hall", 2.0), ("walk-promenade", "memory", 2.6)] {
+                _ = await page.evaluate("return window.town.look(w, z)", ["w": place, "z": zoom])
+                try? await Task.sleep(for: .milliseconds(400))
+                for i in 0..<walk {
+                    let start = ContinuousClock.now
+                    await grab(String(format: "\(name)-%03d", i))
+                    let left = Duration.milliseconds(100) - (ContinuousClock.now - start)
+                    if left > .zero { try? await Task.sleep(for: left) }
+                }
+            }
+            _ = await page.evaluate("return window.town.fit()")
+        }
         let frames = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_FRAMES"].flatMap(Int.init) ?? 40
         for i in 0..<frames {
             let start = ContinuousClock.now

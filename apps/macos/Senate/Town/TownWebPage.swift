@@ -1,4 +1,5 @@
 import AppKit
+import IOKit.ps
 import SwiftUI
 import WebKit
 import SenateCore
@@ -36,8 +37,21 @@ import SenateCore
 @MainActor
 final class TownWebPage: NSObject {
     static let enabled = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_WEB"] == "1"
-    /// `SENATE_APP_TOWN_DEMO=1` (or `large`): the page's own dev shell replays its demo recording.
+    /// `SENATE_APP_TOWN_DEMO=1` (or `large`): this shell replays the scene's demo recording
+    /// (`recordings/demo*.ndjson`, observe frames) through the same contract instead of the store's town.
     static let demo: String? = ProcessInfo.processInfo.environment[TownScript.env].map { $0 == "large" ? "large" : "small" }
+    /// For the demo: `SENATE_APP_TOWN_TIME` (dawn, day, dusk, night), `SENATE_APP_TOWN_WEATHER`
+    /// (clear, cloudy, rain, windy, fog) and `SENATE_APP_TOWN_SEASON` (spring, summer, autumn, winter)
+    /// fix the time of day, the weather and the season instead of the clock's and the date's.
+    static let demoLook: String = {
+        let env = ProcessInfo.processInfo.environment
+        let allowed: [(String, String, Set<String>)] = [
+            ("SENATE_APP_TOWN_TIME", "time", ["dawn", "day", "dusk", "night"]),
+            ("SENATE_APP_TOWN_WEATHER", "weather", ["clear", "cloudy", "rain", "windy", "fog"]),
+            ("SENATE_APP_TOWN_SEASON", "season", ["spring", "summer", "autumn", "winter"]),
+        ]
+        return allowed.compactMap { key, name, values in env[key].flatMap { values.contains($0) ? "\(name)=\($0)" : nil } }.joined(separator: "&")
+    }()
     /// The page on screen (snapshots, measurement).
     static weak var shown: TownWebPage?
 
@@ -52,14 +66,20 @@ final class TownWebPage: NSObject {
     private var opens: [ContinuousClock.Instant] = []
     private var feed: TownActivityFeed?
     private var cursor: UInt64 = 0
-    private var storage: [String: String] = [:]
+    /// The scene's own settings (`storage.*`), kept across launches for this scene.
+    private var storage: [String: String] = UserDefaults.standard.dictionary(forKey: TownWebPage.storageKey) as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(storage, forKey: TownWebPage.storageKey) }
+    }
+    private static let storageKey = "town.scene.storage"
     private var colorScheme = "light"
     private var reduceMotion = false
     private var visible = false
+    private var displaysAsleep = false
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
 
     init(store: CoreStore) {
         self.store = store
-        page = Self.demo.map { URL(string: "senate-town://town/index.html?demo=\($0)")! } ?? TownScheme.page
+        page = Self.demo != nil && !Self.demoLook.isEmpty ? URL(string: "senate-town://town/index.html?\(Self.demoLook)")! : TownScheme.page
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         config.setURLSchemeHandler(TownScheme(), forURLScheme: TownScheme.scheme)
@@ -67,14 +87,13 @@ final class TownWebPage: NSObject {
         config.preferences.isElementFullscreenEnabled = false
         web = WKWebView(frame: .zero, configuration: config)
         super.init()
-        if Self.demo == nil {
-            config.userContentController.add(WeakTownHandler(self), contentWorld: .page, name: "scene")
-        }
+        config.userContentController.add(WeakTownHandler(self), contentWorld: .page, name: "scene")
         web.navigationDelegate = self
         web.uiDelegate = self
         web.allowsBackForwardNavigationGestures = false
         web.allowsMagnification = false
         web.allowsLinkPreview = false
+        watchWindow()
         Self.noNetwork { [weak self] list in
             guard let self else { return }
             guard let list else {
@@ -92,7 +111,32 @@ final class TownWebPage: NSObject {
     func show(_ state: TownState) {
         guard Self.demo == nil, state != self.state else { return }
         self.state = state
+        // Off screen nothing is sent (the scene is paused and costs nothing); the latest goes when it's back.
+        guard sentOnScreen else { return }
         send("observe.snapshot", ["snapshot": snapshot(state)])
+    }
+
+    /// What the scene was last told about being on screen.
+    private var sentOnScreen = false
+
+    /// On screen or not: off screen the demo and the live feed stop sending
+    /// (nothing runs in the page); back on screen they start again from a
+    /// fresh snapshot.
+    private func onScreenChanged(_ now: Bool) {
+        guard now != sentOnScreen else { return }
+        sentOnScreen = now
+        if let demo = Self.demo {
+            demoTask?.cancel()
+            demoTask = nil
+            if now { startDemo(demo) }
+            return
+        }
+        if now {
+            if let state { send("observe.snapshot", ["snapshot": snapshot(state)]) }
+            startFeed()
+        } else {
+            feed?.stop()
+        }
     }
 
     func setOptions(reduceMotion: Bool? = nil, dark: Bool? = nil, visible: Bool? = nil) {
@@ -100,25 +144,77 @@ final class TownWebPage: NSObject {
         if let dark { colorScheme = dark ? "dark" : "light" }
         if let visible { self.visible = visible }
         sendEnvironment()
-        if visible == true { startFeed() }
-        if visible == false { feed?.stop() }
+        // Shown again: the web view joins its window a moment after the page appears.
+        if visible == true {
+            for delay in [0.3, 1.0] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.sendEnvironment() }
+            }
+        }
     }
 
     private func sendEnvironment() {
+        guard ready else { return }
         let size = web.bounds.size
+        defer { onScreenChanged(onScreen) }
         send("environment", [
             "color_scheme": colorScheme, "reduced_motion": reduceMotion,
-            "locale": Locale.current.identifier(.bcp47), "time_zone": TimeZone.current.identifier, "visible": visible,
+            "locale": Locale.current.identifier(.bcp47), "time_zone": TimeZone.current.identifier, "visible": onScreen,
             "viewport": ["width": size.width, "height": size.height],
             "safe_area": ["top": 0, "right": 0, "bottom": 0, "left": 0],
+            "focused": web.window?.isKeyWindow ?? false,
+            "power": Self.power,
         ])
+    }
+
+    /// The page can be seen: shown, in a window that isn't hidden, occluded or
+    /// minimised, with the displays awake. Anything less pauses the scene.
+    private var onScreen: Bool {
+        guard visible, !displaysAsleep, let window = web.window else { return false }
+        return window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
+    }
+
+    /// On battery or in Low Power Mode the scene draws less.
+    private static var power: String {
+        if ProcessInfo.processInfo.isLowPowerModeEnabled { return "low_power" }
+        let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue()
+        let type = info.flatMap { IOPSGetProvidingPowerSourceType($0)?.takeUnretainedValue() as String? }
+        return type == kIOPMBatteryPowerKey ? "battery" : "ac"
+    }
+
+    /// Key, occlusion, minimising, display sleep and power changes go to the scene as they happen.
+    private func watchWindow() {
+        let center = NotificationCenter.default, workspace = NSWorkspace.shared.notificationCenter
+        let windowNotes: [Notification.Name] = [
+            NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification, NSWindow.didChangeOcclusionStateNotification,
+            NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+        ]
+        for name in windowNotes {
+            observers.append((center, center.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                let window = ObjectIdentifier(note.object as AnyObject)
+                MainActor.assumeIsolated {
+                    guard let self, let mine = self.web.window, ObjectIdentifier(mine) == window else { return }
+                    self.sendEnvironment()
+                }
+            }))
+        }
+        observers.append((center, center.addObserver(forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sendEnvironment() }
+        }))
+        for (name, asleep) in [(NSWorkspace.screensDidSleepNotification, true), (NSWorkspace.screensDidWakeNotification, false)] {
+            observers.append((workspace, workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.displaysAsleep = asleep
+                    self?.sendEnvironment()
+                }
+            }))
+        }
     }
 
     /// The committees' activity, live, while the page is shown, as public frames.
     private func startFeed() {
         // Only once the page can take what arrives: the feed starts at the
         // log's head, so nothing it sends is missed or replayed.
-        guard let store, ready, visible, Self.demo == nil else { return }
+        guard let store, ready, sentOnScreen, Self.demo == nil else { return }
         if feed == nil {
             feed = TownActivityFeed(store: store, entries: { [weak self] entries in
                 guard let self else { return }
@@ -128,6 +224,34 @@ final class TownWebPage: NSObject {
         feed?.start()
     }
 
+    /// The demo: the scene's own recording (observe recording format: a header,
+    /// a snapshot, timed frames or replacement snapshots, an end mark), replayed
+    /// in time and on a loop, exactly as live frames would arrive.
+    private var demoTask: Task<Void, Never>?
+    private func startDemo(_ kind: String) {
+        guard demoTask == nil,
+              let root = Bundle.main.url(forResource: "town", withExtension: nil),
+              let text = try? String(contentsOf: root.appendingPathComponent("recordings/demo\(kind == "large" ? "-large" : "").ndjson"), encoding: .utf8)
+        else { return }
+        let rows = text.split(separator: "\n").dropFirst().compactMap { line in
+            (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
+        }
+        demoTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let start = ContinuousClock.now
+                for row in rows {
+                    let at = Duration.milliseconds((row["offset_ms"] as? NSNumber)?.int64Value ?? 0)
+                    let wait = at - (ContinuousClock.now - start)
+                    if wait > .zero { try? await Task.sleep(for: wait) }
+                    if Task.isCancelled { return }
+                    guard let self else { return }
+                    if let snapshot = row["snapshot"] { self.send("observe.snapshot", ["snapshot": snapshot]) }
+                    else if let frame = row["frame"] { self.send("observe.event", ["frame": frame]) }
+                }
+            }
+        }
+    }
+
     func evaluate(_ js: String, _ args: [String: Any] = [:]) async -> Any? {
         guard ready else { return nil }
         return try? await web.callAsyncJavaScript(js, arguments: args, in: nil, contentWorld: .page)
@@ -135,7 +259,7 @@ final class TownWebPage: NSObject {
 
     /// One message to the scene.
     private func send(_ type: String, _ data: [String: Any], request: String? = nil) {
-        guard ready, Self.demo == nil else { return }
+        guard ready else { return }
         var message: [String: Any] = ["host_version": 1, "type": type, "data": data]
         if let request { message["request_id"] = request }
         web.callAsyncJavaScript("window.__senateScene(m)", arguments: ["m": message], in: nil, in: .page) { result in
@@ -233,14 +357,15 @@ final class TownWebPage: NSObject {
         let request = (body["request_id"] as? String).flatMap { $0.count <= 64 ? $0 : nil }
         switch type {
         case "ready":
+            // A (re)loaded page: it knows nothing yet.
             ready = true
+            sentOnScreen = false
+            demoTask?.cancel()
+            demoTask = nil
+            feed?.stop()
             send("status", ["state": "ready"])
+            // The demo or the store's town starts when (and while) the scene is on screen.
             sendEnvironment()
-            if let state {
-                self.state = nil
-                show(state)
-            }
-            startFeed()
         case "open":
             guard let url = data["url"] as? String, url.utf8.count <= 2048 else { return }
             // At most five a second: a page that floods is ignored.
@@ -332,11 +457,6 @@ extension TownWebPage: WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
-
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        // The demo's page is its own shell and never says `ready` to this one.
-        if Self.demo != nil { ready = true }
-    }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         ready = false
