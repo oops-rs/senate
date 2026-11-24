@@ -544,7 +544,7 @@ impl AppCore {
         limit: u32,
     ) -> Result<crate::history::HistoryPage, CoreError> {
         let committee = committee
-            .map(|c| CommitteeId::new(c))
+            .map(CommitteeId::new)
             .transpose()
             .map_err(|e| CoreError::Invalid {
                 message: e.to_string(),
@@ -572,7 +572,7 @@ impl AppCore {
         limit: u32,
     ) -> Result<crate::history::SearchPage, CoreError> {
         let committee = committee
-            .map(|c| CommitteeId::new(c))
+            .map(CommitteeId::new)
             .transpose()
             .map_err(|e| CoreError::Invalid {
                 message: e.to_string(),
