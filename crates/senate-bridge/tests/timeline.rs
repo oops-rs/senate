@@ -926,6 +926,11 @@ async fn agent_history_requests_are_refused() {
         Request::SessionForget {
             session_id: "hidden".into(),
         },
+        Request::SessionDrop {
+            session_id: "hidden".into(),
+            name: "safe.png".into(),
+            size: 1,
+        },
     ] {
         let refused = ipc::request::<serde_json::Value>(&paths.socket(), &op, TIMEOUT, TIMEOUT)
             .await

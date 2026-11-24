@@ -24,6 +24,7 @@ pub(crate) struct Front {
     pub(super) remote: Option<Arc<crate::remote::Service>>,
     relay: Arc<Relay>,
     pub(super) process_checks: tokio::sync::Semaphore,
+    pub(super) session_drops: tokio::sync::Semaphore,
     watch: broadcast::Sender<WatchEvent>,
     /// Watch clients that show notifications themselves, connected now.
     app_clients: Arc<std::sync::atomic::AtomicUsize>,
@@ -41,6 +42,7 @@ impl Front {
             senates: vec![senate],
             relay,
             process_checks: tokio::sync::Semaphore::new(4),
+            session_drops: tokio::sync::Semaphore::new(2),
             watch,
             app_clients,
         }

@@ -100,6 +100,10 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
         try record("archived")
         return lock.withLock { archived }
     }
+    func sessionDrop(sessionId: String, name: String, bytes: Data) async throws -> String {
+        try record("drop \(sessionId) \(name) \(bytes.count)")
+        return "/tmp/senate-fake/drops/fixture/\(name)"
+    }
     func unarchiveCommittee(committee: String) async throws {
         try record("unarchive:\(committee)")
         lock.withLock { archived.removeAll { $0 == committee } }

@@ -311,10 +311,7 @@ pub async fn attach(path: &Path, paths: &Paths, label: &str) -> anyhow::Result<(
         crate::testenv::confined(path),
         "terminal socket is outside the test directory"
     );
-    let drops = super::hosts(paths).canonicalize().ok().and_then(|hosts| {
-        let session = path.parent()?.canonicalize().ok()?;
-        (session.parent() == Some(&hosts)).then(|| session.join("drops"))
-    });
+    let drops = super::paste::drop_directory(paths, path).ok();
     let stream = UnixStream::connect(path)
         .await
         .context("connect to the hosted terminal")?;

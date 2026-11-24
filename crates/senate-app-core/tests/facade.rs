@@ -59,6 +59,28 @@ async fn until(listener: &Listener, what: &str, ok: impl Fn(&AppState) -> bool) 
 }
 
 #[tokio::test]
+async fn session_drop_uses_the_upload_wire_and_preserves_refusals() {
+    let (dir, socket, world) = setup();
+    let daemon = FakeDaemon::start(&socket, world);
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en".into())).unwrap();
+    core.start(Arc::new(Listener::default())).unwrap();
+    let saved = core
+        .session_drop("fixture".into(), "image.png".into(), vec![0, 255])
+        .await
+        .unwrap();
+    assert_eq!(saved, "/tmp/senate-fake/drops/fixture/image.png");
+    let problem = core
+        .session_drop("unknown".into(), "image.png".into(), vec![])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(problem, senate_app_core::CoreError::Failed { message }
+        if message == "no registered session with that ID")
+    );
+    drop(daemon);
+}
+
+#[tokio::test]
 async fn the_desk_action_returns_its_receipt_and_preserves_a_daemon_refusal() {
     let (dir, socket, world) = setup();
     common::desk_fixture(&mut world.lock().unwrap());

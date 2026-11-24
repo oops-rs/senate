@@ -77,6 +77,18 @@ impl Link {
         ipc::request(&self.socket, request, CONNECT_TIMEOUT, timeout).await
     }
 
+    pub(crate) async fn session_drop(
+        &self,
+        session_id: String,
+        name: String,
+        bytes: &[u8],
+    ) -> Result<String, ClientError> {
+        ipc::IpcClient::connect(&self.socket, CONNECT_TIMEOUT)
+            .await?
+            .session_drop(session_id, name, bytes)
+            .await
+    }
+
     /// Open a `watch` stream.
     pub async fn watch(&self) -> Result<WatchStream, ClientError> {
         let stream =
