@@ -655,6 +655,15 @@ fn decode_keys(pending: &mut Vec<u8>, unknown: Option<Key>) -> Vec<Key> {
             Mouse::Incomplete if !detach => break,
             _ => {}
         }
+        const KITTY_ENTER: &[&[u8]] = &[b"\x1b[13u", b"\x1b[13;1u", b"\x1b[13;1:1u"];
+        if let Some(key) = KITTY_ENTER.iter().find(|key| rest.starts_with(key)) {
+            out.push(Key::Open);
+            at += key.len();
+            continue;
+        }
+        if !detach && KITTY_ENTER.iter().any(|key| key.starts_with(rest)) {
+            break;
+        }
         let (key, len) = match rest {
             // Ctrl-C, in raw mode a plain byte.
             [b'q' | 0x03, ..] => (Some(Key::Quit), 1),
@@ -1569,6 +1578,15 @@ mod tests {
             incremental.screen().hide_cursor(),
             full.screen().hide_cursor()
         );
+    }
+
+    #[test]
+    fn kitty_enter_opens_the_grid_tile_even_when_split() {
+        let mut pending = b"\x1b[13;1:".to_vec();
+        assert!(keys(&mut pending).is_empty());
+        pending.extend_from_slice(b"1u");
+        assert_eq!(keys(&mut pending), [Key::Open]);
+        assert!(keys(&mut b"\x1b[13;2u".to_vec()).is_empty());
     }
 
     #[test]

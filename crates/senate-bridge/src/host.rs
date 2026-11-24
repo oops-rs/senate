@@ -4,6 +4,7 @@
 pub(crate) mod control;
 mod emulation;
 mod input;
+mod keyboard;
 mod paste;
 mod picker;
 pub(crate) mod prompt;
@@ -1225,14 +1226,17 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
     tty.resize(rows, cols).await?;
     // Subscribe alongside the snapshot and the modes. The output pump holds
     // the same emulation lock while it updates both.
-    let (mirror, mut output, modes) = {
+    let (mirror, mut output, modes, keyboard) = {
         let mut emulation = tty.emulation();
         let (mirror, output) = tty.screen.join();
-        (mirror, output, emulation.attach())
+        let modes = emulation.attach();
+        let keyboard = emulation.keyboard_preamble();
+        (mirror, output, modes, keyboard)
     };
     tokio::time::timeout(Duration::from_secs(3), async {
         stream.write_all(&modes).await?;
-        stream.write_all(&mirror.attach_snapshot()).await
+        stream.write_all(&mirror.attach_snapshot()).await?;
+        stream.write_all(&keyboard).await
     })
     .await??;
     let (mut input, mut screen) = stream.into_split();
