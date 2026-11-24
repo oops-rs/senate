@@ -115,9 +115,10 @@ its generation. Reserve person names and reject another live session's seat.
 Treat self-chosen names as ordinary aliases. Chair, secretary, and Speaker
 authority requires a daemon-controlled launch or a person-approved binding. A
 native privileged seat moving to a different process requires reauthorization.
-Resolve a selector once and carry that proof through dispatch. Derive Git
-context from verified process or launch state. Observe requires runtime-owned
-transcript paths and matching native record IDs.
+Resolve a selector once and carry that proof through dispatch. Native Git
+metadata still comes from the hook report. It provides context and carries no
+role authority. Observe requires runtime-owned transcript paths and matching
+native record IDs.
 
 Native role commands use a session proof distinct from operator proof. A
 different process cannot refresh a live binding. A privileged native

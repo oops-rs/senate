@@ -246,12 +246,6 @@ impl Front {
             };
             candidate.and_then(|process| kernel_process::BoundProcess::capture(process).ok())
         };
-        let Some(root) = root else {
-            if privileged {
-                return Err(no_owner());
-            }
-            return Ok(());
-        };
         let mut same_seat_owner = false;
         if !native && matches!(source, AgentSource::Env | AgentSource::File) {
             for prior in shared
@@ -271,12 +265,24 @@ impl Front {
                         .store
                         .verified_native_owner(&prior.session_id)
                         .map_err(internal)?);
-                if prior_owner.as_ref() != Some(&root) {
+                if root.is_none() || prior_owner != root {
                     return Err(no_owner());
                 }
                 same_seat_owner = true;
             }
         }
+        let Some(root) = root else {
+            if privileged
+                || shared
+                    .store
+                    .verified_native_owner(&report.session_id)
+                    .map_err(internal)?
+                    .is_some_and(|owner| owner.live())
+            {
+                return Err(no_owner());
+            }
+            return Ok(());
+        };
         match shared
             .store
             .claim_native_process(
