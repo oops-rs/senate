@@ -5,7 +5,7 @@ import AppKit
 /// `SENATE_APP_SNAPSHOT_TOWN=1`, picture the Town page and quit. With
 /// `SENATE_APP_TOWN_DEMO=1` (or `large`) the town is the demo recording, the
 /// same every time; without it, the Senate's own through Observe (the fake
-/// daemon's; `SENATE_APP_TOWN_GRANT=1` presses Allow).
+/// daemon's, once a person has pressed Allow; before that, the access card).
 enum TownSnapshot {
     static let env = "SENATE_APP_SNAPSHOT_TOWN"
 
@@ -24,16 +24,12 @@ enum TownSnapshot {
         // Pictures by day in light, by night in dark, whatever the clock.
         let dark = ProcessInfo.processInfo.environment["SENATE_APP_SNAPSHOT_APPEARANCE"] == "dark"
         _ = await page.evaluate("window.town.setOptions({ time: t }); return true", ["t": dark ? "night" : "day"])
-        // SENATE_APP_TOWN_GRANT=1 (live, against the fake daemon): picture the
-        // one-click access, click it, and forget the grant again at the end.
-        let granting = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_GRANT"] == "1" && TownWebPage.demoEnv == nil
-        if granting {
+        // Live without a grant: the access card. A grant is made only by the
+        // person pressing Allow (never by this hook, never at startup).
+        if TownWebPage.demoEnv == nil {
             for _ in 0..<30 where !page.accessNeeded { try? await Task.sleep(for: .milliseconds(100)) }
-            await shot("works-access")
-            do { try await page.grantAccess() } catch { print("snapshot: grant failed: \(error)") }
-            try? await Task.sleep(for: .seconds(2))
+            if page.accessNeeded { await shot("works-access") }
         }
-        defer { if granting { page.forgetAccess() } }
         await shot("works-town")
         // SENATE_APP_TOWN_HOLD=<s>: stay on the whole town that long, the world running (to measure what it costs).
         if let hold = ProcessInfo.processInfo.environment["SENATE_APP_TOWN_HOLD"].flatMap(Double.init) {
