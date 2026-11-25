@@ -280,6 +280,9 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
     };
 
     let mut picker_times = Vec::new();
+    // How long this machine takes, now, from starting `senate attach` to a
+    // healthy host's screen with nothing to choose and no delayed lookup.
+    let mut healthy_attach = Duration::ZERO;
     for delay in [Duration::ZERO, Duration::from_millis(1100)] {
         h.server.state.inner.lock().unwrap().alias_lookup_delay = delay;
         for (selector, picker) in [
@@ -338,6 +341,9 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
             .await
             .unwrap();
             eprintln!("{delay:?} {selector:?}: screen {:?}", start.elapsed());
+            if picker.is_none() && delay.is_zero() {
+                healthy_attach = healthy_attach.max(opening.elapsed());
+            }
             input.write_all(b"\x1d").await.unwrap();
             assert!(
                 tokio::time::timeout(TIMEOUT, child.wait())
@@ -359,7 +365,7 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
     ] {
         let (child, mut output, mut input) = open(Some(primary));
         let start = Instant::now();
-        let outcome = tokio::time::timeout(Duration::from_secs(4), async {
+        let outcome = tokio::time::timeout(Duration::from_secs(4) + healthy_attach, async {
             if probe {
                 // Complete the separate terminal capability probe before
                 // testing the deadline for the host's initial screen.
@@ -385,7 +391,12 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
         let exit = outcome.unwrap_or_else(|error| panic!("{primary}: {error}"));
         let stderr = String::from_utf8_lossy(&exit.stderr);
         eprintln!("{primary}: exit {elapsed:?} {} {stderr}", exit.status);
-        assert!(elapsed < Duration::from_secs(3), "{primary}: {elapsed:?}");
+        // The client gives a host two seconds. What it spends before that
+        // clock starts (its own launch, the lookup, the connection) is what
+        // a healthy attach just took on this machine: a fixed second for it
+        // failed a loaded run at 3.88 s.
+        let bound = Duration::from_secs(3) + healthy_attach;
+        assert!(elapsed < bound, "{primary}: {elapsed:?} of {bound:?}");
         assert!(!exit.status.success());
         assert!(
             stderr.contains(primary) && stderr.contains(expected),
