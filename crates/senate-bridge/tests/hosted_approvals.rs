@@ -2422,6 +2422,7 @@ async fn late_claude_hooks_cannot_reopen_a_finished_turn() {
         ipc::ClaudeApprovalSignal::Requested {
             tool: "echo old".into(),
             fingerprint: "old".into(),
+            confirmation_label: None,
         },
         ipc::ClaudeApprovalSignal::Pending,
     ] {

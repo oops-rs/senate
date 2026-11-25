@@ -493,14 +493,14 @@ fn approval_signal(hook: &Value) -> Option<ClaudeApprovalSignal> {
     );
     match event {
         "PermissionRequest" => {
-            let description = input
-                .get("command")
-                .and_then(Value::as_str)
+            let command = input.get("command").and_then(Value::as_str);
+            let description = command
                 .and_then(|command| command.lines().next())
                 .map_or_else(|| tool.to_owned(), |line| format!("{tool}: {line}"));
             Some(ClaudeApprovalSignal::Requested {
-                tool: crate::host_approval::tool_label(&description),
+                tool: crate::host_approval::tool_label(command.unwrap_or(tool)),
                 fingerprint,
+                confirmation_label: Some(crate::host_approval::tool_label(&description)),
             })
         }
         "PostToolUse" | "PostToolUseFailure" => {

@@ -40,9 +40,16 @@ pub(crate) fn tool_label(tool: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ClaudeApprovalSignal {
-    Requested { tool: String, fingerprint: String },
+    Requested {
+        tool: String,
+        fingerprint: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confirmation_label: Option<String>,
+    },
     Pending,
-    Finished { fingerprint: String },
+    Finished {
+        fingerprint: String,
+    },
 }
 
 /// One permission request currently confirmed by the Codex connection.
@@ -99,6 +106,8 @@ pub(crate) struct ClaudeCandidate {
     pub tool: String,
     pub fingerprint: String,
     pub at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_label: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

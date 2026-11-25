@@ -97,7 +97,7 @@ impl Shared {
                         fingerprint: candidate.fingerprint,
                         at: candidate.at,
                     },
-                    candidate.tool,
+                    candidate.confirmation_label.unwrap_or(candidate.tool),
                 )
             }
             Runtime::Agy | Runtime::Acp => return Err(self.nothing_pending(&host, &session)),

@@ -109,7 +109,11 @@ impl Shared {
                     .max(state.claude.as_ref().map_or(0, |request| request.at));
                 let attended = observe_input(state, input_at);
                 let observed = match signal {
-                    ClaudeApprovalSignal::Requested { tool, fingerprint } => {
+                    ClaudeApprovalSignal::Requested {
+                        tool,
+                        fingerprint,
+                        confirmation_label,
+                    } => {
                         let newer = at > last_request;
                         state.claude_request_at = last_request.max(at);
                         if newer && at > input_at {
@@ -117,6 +121,7 @@ impl Shared {
                                 tool,
                                 fingerprint,
                                 at,
+                                confirmation_label,
                             });
                         }
                         newer
