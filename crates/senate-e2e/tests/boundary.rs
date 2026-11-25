@@ -1214,11 +1214,9 @@ async fn another_committees_chair_receives_discussion_but_requests_wait_on_the_d
     let mut desk = Desk::new(dir.path(), "alice", Locale::En, "[local]\n");
     let sender = desk.inbox("sender");
     let chair = desk.inbox("chair");
+    let next_chair = desk.inbox("next-chair");
     desk.start().await;
-    for (session, committee_name, inbox) in [
-        ("author", "client", &sender),
-        ("maintainer", "senate", &chair),
-    ] {
+    let join = async |session: &str, committee_name: &str, inbox: &FakeInbox| {
         let cwd = dir.path().join(committee_name);
         fs::create_dir_all(cwd.join(".senate")).unwrap();
         fs::write(cwd.join(".senate/committee"), committee_name).unwrap();
@@ -1240,7 +1238,9 @@ async fn another_committees_chair_receives_discussion_but_requests_wait_on_the_d
         .await
         .unwrap();
         desk.wait_stream_of(session).await;
-    }
+    };
+    join("author", "client", &sender).await;
+    join("maintainer", "senate", &chair).await;
     let target = CommitteeId::new("senate").unwrap();
     let source = CommitteeId::new("client").unwrap();
     let hub = desk.senate().daemon.hub.clone();
@@ -1374,6 +1374,29 @@ async fn another_committees_chair_receives_discussion_but_requests_wait_on_the_d
         hub.committee_agents(&source).await.unwrap(),
         [path("claude-author")]
     );
+
+    // Another senator takes the chair of the target committee. The thread
+    // stays with the one it was pinned to, who still gets the reply, and
+    // the author's receipt says who chairs now.
+    join("successor", "senate", &next_chair).await;
+    let info: senate_core::api::ChairInfo = desk
+        .ipc(Request::SetChair {
+            session: Default::default(),
+            committee: Some(target.clone()),
+            senator: path("claude-successor"),
+        })
+        .await;
+    assert_eq!(info.chair, Some(path("claude-successor")));
+    let late = desk
+        .answer("author", receipt.posted.seq, "One more thing about it.")
+        .await;
+    chair.wait_for("One more thing about it.").await;
+    assert_eq!(late.notes.len(), 1, "{:?}", late.notes);
+    let note = &late.notes[0];
+    assert_eq!(note.who.committee(), Some(&target));
+    assert_eq!(note.who.address(), &senator("claude-maintainer"));
+    assert_eq!(note.chair_now, Some(path("claude-successor")));
+    assert!(!note.away, "{note:?}");
     desk.stop().await;
 }
 

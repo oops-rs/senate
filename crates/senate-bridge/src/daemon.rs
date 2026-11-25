@@ -5413,6 +5413,7 @@ impl Shared {
                     away: true,
                     last_seen: presence.last_seen,
                     paused: presence.paused,
+                    chair_now: None,
                 });
             }
         }
@@ -5623,6 +5624,13 @@ impl Shared {
             ));
         }
         let from = self.speaker_for(session.as_ref(), &committee, &acting)?;
+        // A discussion opened here with another committee's chair stays
+        // with whoever chaired it then: which committee that is.
+        let opened_with_chair_of = (root.is_chair_discussion() && root.from == from)
+            .then(|| senate_core::locator::intended(&root))
+            .flatten()
+            .filter(|target| target.address() == &Address::Chair)
+            .and_then(|target| target.committee().cloned());
         let to = if companion || acting.as_person || from != asker {
             vec![asker]
         } else if root.is_chair_discussion() && root.from == from {
@@ -5683,6 +5691,9 @@ impl Shared {
             event = event.with_id(id);
         }
         let mut posted = self.post(event).await?;
+        if let Some(there) = opened_with_chair_of {
+            self.note_chair_changed(&mut posted, &there).await;
+        }
         if companion && let Some(c) = lock(&self.companion).as_mut() {
             c.answered = true;
         }
@@ -5690,6 +5701,38 @@ impl Shared {
             posted.unseen_escalation = self.mark_after_speaking(&posted, &[thread], &seen).await?;
         }
         Ok(posted)
+    }
+
+    /// A reply in a discussion opened with the chair of `there` went to the
+    /// senator who chaired it when it began. When someone else chairs it
+    /// now, the receipt says so ([`RecipientNote::chair_now`]): the reply
+    /// is delivered as before, and the sender knows to ask the chair
+    /// afresh. Best effort, like the rest of the notes.
+    async fn note_chair_changed(&self, posted: &mut Posted, there: &CommitteeId) {
+        let Some(peer) = posted.intended.clone() else {
+            return;
+        };
+        let Some(then) = peer.address().as_senator() else {
+            return;
+        };
+        let chair = tokio::time::timeout(RECIPIENT_NOTE_TIMEOUT, self.api.chair(there))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|info| info.chair);
+        let Some(now) = chair.filter(|now| now != then) else {
+            return;
+        };
+        match posted.notes.iter_mut().find(|note| note.who == peer) {
+            Some(note) => note.chair_now = Some(now),
+            None => posted.notes.push(RecipientNote {
+                who: peer,
+                away: false,
+                last_seen: None,
+                paused: false,
+                chair_now: Some(now),
+            }),
+        }
     }
 
     /// The root of the thread `thread` is in (a message inside a thread

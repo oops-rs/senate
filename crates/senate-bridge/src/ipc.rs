@@ -2592,6 +2592,10 @@ pub struct RecipientNote {
     /// Away because it was paused: it is expected back.
     #[serde(default, skip_serializing_if = "is_false")]
     pub paused: bool,
+    /// The thread was opened with a committee's chair, and `who` (the chair
+    /// then, whom the thread stays with) no longer is: who chairs it now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chair_now: Option<SenatorName>,
 }
 
 /// An event the daemon appended on the agent's behalf.

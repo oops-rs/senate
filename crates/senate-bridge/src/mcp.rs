@@ -3319,8 +3319,25 @@ fn no_profiles(daemon_socket: &std::path::Path, locale: Locale) -> String {
 /// ([`ipc::RecipientNote`]): one line each, nothing when there is none.
 pub fn recipient_notes(posted: &Posted, locale: Locale) -> String {
     let mut out = String::new();
-    for note in posted.notes.iter().filter(|note| note.away) {
+    for note in &posted.notes {
         let who = note.who.in_text();
+        if let (Some(now), Some(c)) = (&note.chair_now, note.who.committee()) {
+            let now = Address::senator(now).in_text();
+            out.push('\n');
+            out.push_str(&match locale {
+                Locale::Zh => format!(
+                    "注意：{who} 已不是 `{c}` 的主席（chair），现在是 {now}。这个 thread 仍然只到 {who}；\
+                     要找现任主席，重新向 `{c}::chair` 提问。"
+                ),
+                Locale::En => format!(
+                    "Note: {who} no longer chairs `{c}`; {now} does. This thread stays with \
+                     {who}: to reach the chair, ask `{c}::chair` afresh."
+                ),
+            });
+        }
+        if !note.away {
+            continue;
+        }
         let seen = note.last_seen.map(|t| t.format("%Y-%m-%d %H:%M UTC"));
         out.push('\n');
         out.push_str(&match (note.paused, seen, locale) {
@@ -4542,6 +4559,7 @@ mod tests {
             away: true,
             last_seen,
             paused,
+            chair_now: None,
         };
         let seen = chrono::Utc.with_ymd_and_hms(2026, 11, 24, 10, 3, 0).unwrap();
         let mut posted = Posted {
@@ -4571,6 +4589,30 @@ mod tests {
         let zh = recipient_notes(&posted, Locale::Zh);
         assert!(zh.contains("[senator::reviewer] 没有打开的会话（最后一次联络 2026-11-24 10:03 UTC）"));
         assert!(zh.contains("[senator::docs] 已暂停"), "{zh}");
+
+        // A thread opened with a committee's chair stays with who chaired
+        // it then (52 answers went to a former chair): the receipt says
+        // who chairs now, whether or not the former chair is still there.
+        let former = |away| RecipientNote {
+            away,
+            chair_now: Some("codex-new".parse().unwrap()),
+            ..note("/acme::commons::senator::claude-old", None, false)
+        };
+        posted.notes = vec![former(false)];
+        assert_eq!(
+            recipient_notes(&posted, Locale::En),
+            "\nNote: [/acme::commons::senator::claude-old] no longer chairs `commons`; \
+             [senator::codex-new] does. This thread stays with \
+             [/acme::commons::senator::claude-old]: to reach the chair, ask `commons::chair` \
+             afresh."
+        );
+        posted.notes = vec![former(true)];
+        let both = recipient_notes(&posted, Locale::En);
+        assert!(both.contains("no longer chairs `commons`"), "{both}");
+        assert!(both.contains("has no session open"), "{both}");
+        let zh = recipient_notes(&posted, Locale::Zh);
+        assert!(zh.contains("已不是 `commons` 的主席"), "{zh}");
+        assert!(zh.contains("`commons::chair`"), "{zh}");
     }
 
     /// search and catch_up cut bodies; `thread` is where one is read whole.
