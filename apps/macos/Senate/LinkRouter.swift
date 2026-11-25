@@ -114,6 +114,9 @@ final class LinkRouter {
         let outcome = await resolve(link)
         Log.app.notice("link routed: \(String(describing: outcome), privacy: .private)")
         routed.append(outcome)
+        // A thread a link opens without the person's click is shown unread:
+        // only their own action moves its read marker.
+        if case let .shown(.thread(key)) = outcome { store?.unreadShown = gesture ? nil : key }
         show(outcome, link: link)
         bringForward(gesture: gesture)
     }
@@ -181,9 +184,11 @@ final class LinkRouter {
             if store.state.inbox.contains(where: { $0.committee == committee && $0.root == root }) {
                 return .shown(.thread("\(committee):\(root)"))
             }
-            // Not waiting on you: there only if it can be read.
+            // Not waiting on you: there only if it can be read. Probed without
+            // reading it (the read marker stays put); the person reads it when
+            // the page is shown.
             guard let core = store.core,
-                  (try? await core.thread(committee: committee, thread: root)) != nil
+                  (try? await core.threadPeek(committee: committee, thread: root)) != nil
             else { return .unavailable }
             return .shown(.thread("\(committee):\(root)"))
         case let .session(selector):
@@ -214,7 +219,8 @@ final class LinkRouter {
                 native = found
             }
             if store.session(native) != nil { return .shown(.past(native)) }
-            if store.history.row(native) == nil { await store.history.find(native) }
+            // A link looks a little way back, not through the whole History.
+            if store.history.row(native) == nil { await store.history.find(native, pages: 3) }
             return store.history.row(native) != nil ? .shown(.past(native)) : .unavailable
         }
     }

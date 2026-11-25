@@ -387,13 +387,15 @@ final class CoreStore {
             }
             return
         }
+        // Anywhere else, the next thread the person opens is theirs to read.
+        if case let .thread(key) = place, key == unreadShown {} else { unreadShown = nil }
         if case let .thread(key) = place, !state.inbox.contains(where: { $0.key == key }),
            thread.map({ "\($0.committee):\($0.root)" }) != key,
            let colon = key.lastIndex(of: ":"), let root = UInt64(key[key.index(after: colon)...]) {
             threadError = nil
             Task { await loadThread(committee: String(key[..<colon]), root: root) }
         }
-        if case let .thread(key) = place { threads.markSeen(key) }
+        if case let .thread(key) = place, unreadShown != key { threads.markSeen(key) }
         if old != place { syncTimeline() }
     }
 
@@ -714,12 +716,18 @@ final class CoreStore {
         await loadThread(committee: row.committee, root: row.root)
     }
 
+    /// A thread a link showed without the person's click: read without
+    /// moving its read marker, until they open it themselves.
+    @ObservationIgnored var unreadShown: String?
+
     func loadThread(committee: String, root: UInt64) async {
         guard let core else { return }
         let key = "\(committee):\(root)"
+        let peek = unreadShown == key
         do {
             let view = try await Perf.measure("thread", "#\(root)") {
-                try await core.thread(committee: committee, thread: root)
+                peek ? try await core.threadPeek(committee: committee, thread: root)
+                    : try await core.thread(committee: committee, thread: root)
             }
             guard selectedThread == key else { return }
             thread = view

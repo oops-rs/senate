@@ -265,6 +265,20 @@ import SenateCore
 
     // MARK: Navigation only
 
+    /// A thread link probes the thread without reading it: the read marker
+    /// stays where it was (review 2, L1).
+    @Test func aThreadLinkDoesNotMarkItRead() async throws {
+        let store = try await store()
+        store.links.open("senate://open/v1/thread/payments/12", provenance: .system)
+        await store.links.flush()
+        #expect(core.calls.contains("peek payments 12"))
+        // Neither the router nor the page it shows reads it (moves the marker).
+        for _ in 0..<50 where !core.calls.contains(where: { $0.hasPrefix("peek payments 12") }) { try await Task.sleep(for: .milliseconds(5)) }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!core.calls.contains { $0.hasPrefix("thread ") }, "a link read a thread")
+        #expect(store.place == .thread("payments:12"))
+    }
+
     @Test func noLinkSendsApprovesAttachesStopsClosesOrEdits() async throws {
         let store = try await store()
         let routes = [

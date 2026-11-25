@@ -461,10 +461,17 @@ impl Drop for FakeDaemon {
 /// and SSE a Senate serves) on a loopback port, playing a recording
 /// (`FAKE_OBSERVE_RECORDING=<file>`, else the protocol's synthetic demo).
 /// Its grant registry lives under `$SENATE_HOME/observe-fake`.
+/// The fake's one Observe (made by the first grant): later grants, the
+/// identity, the list and revocations go to it.
+static OBSERVED: std::sync::OnceLock<Arc<senate_observe::Registry>> = std::sync::OnceLock::new();
+
 async fn observe_serve(
     grant: senate_observe::CreateGrant,
 ) -> Result<senate_observe::IssuedGrant, Box<dyn std::error::Error + Send + Sync>> {
     use senate_observe::Recording;
+    if let Some(registry) = OBSERVED.get() {
+        return Ok(registry.create(grant, Default::default())?);
+    }
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let home = senate_bridge::Paths::from_env()?
         .home()
@@ -477,6 +484,7 @@ async fn observe_serve(
     };
     recording.attach(&registry);
     let issued = registry.create(grant, Default::default())?;
+    let _ = OBSERVED.set(Arc::clone(&registry));
     let app = senate_observe::router(registry)
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
     tokio::spawn(async move {
@@ -649,6 +657,27 @@ async fn serve(conn: UnixStream, world: Arc<Mutex<World>>, events: broadcast::Se
             let l = serde_json::to_string(&reply).unwrap();
             w.write_all(format!("{l}\n").as_bytes()).await.unwrap();
             continue;
+        }
+        // Once the fake serves Observe, its identity, list and revocations are that registry's.
+        if let (Some(registry), Request::ObserveAdmin { command }) = (OBSERVED.get(), &request) {
+            let reply = match command {
+                senate_observe::AdminRequest::Identity => Some(match registry.installation() {
+                    Ok(i) => Reply::ok(&i),
+                    Err(e) => Reply::err(IpcError::bad_request(e.to_string())),
+                }),
+                senate_observe::AdminRequest::List => Some(Reply::ok(&registry.list())),
+                senate_observe::AdminRequest::Revoke { id } => Some(match registry.revoke(id) {
+                    Ok(()) => Reply::ok(&()),
+                    Err(e) => Reply::err(IpcError::bad_request(e.to_string())),
+                }),
+                _ => None,
+            };
+            if let Some(reply) = reply {
+                world.lock().unwrap().requests.push(request.clone());
+                let l = serde_json::to_string(&reply).unwrap();
+                w.write_all(format!("{l}\n").as_bytes()).await.unwrap();
+                continue;
+            }
         }
         if let Request::TimelineWatch { session_id, after } = &request {
             world.lock().unwrap().requests.push(request.clone());
