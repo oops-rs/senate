@@ -102,9 +102,10 @@ impl Shared {
             }
             Runtime::Agy | Runtime::Acp => return Err(self.nothing_pending(&host, &session)),
         };
+        let alias = self.shown_session_name(&session.session_id);
         let subject = session.committee().map_or_else(
-            || session.agent.to_string(),
-            |committee| format!("{committee}::{}", session.agent),
+            || alias.clone(),
+            |committee| format!("{committee}::{alias}"),
         );
         Ok(HostedApprovalTarget {
             session_id: session.session_id,

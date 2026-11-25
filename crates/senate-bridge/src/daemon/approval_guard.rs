@@ -493,6 +493,15 @@ impl Front {
             },
         );
         let mut reason = crate::app_confirmation::request_reason(&request, &requester);
+        if let Some(host) = &view
+            && let Ok(Some(session_id)) = self.primary().store.session_for_host(host)
+        {
+            let alias = self.primary().shown_session_name(&session_id);
+            reason = format!(
+                "Open a writable terminal for {:?} — requested by {requester}",
+                alias
+            );
+        }
         let relay_prompt = if let Request::Approve { id, decision } = &request {
             let Some(approval) = self
                 .primary()
@@ -514,9 +523,10 @@ impl Front {
                 .map_or_else(
                     || approval.session_id.clone(),
                     |session| {
+                        let alias = self.primary().shown_session_name(&session.session_id);
                         session.committee().map_or_else(
-                            || session.agent.to_string(),
-                            |committee| format!("{committee}::{}", session.agent),
+                            || alias.clone(),
+                            |committee| format!("{committee}::{alias}"),
                         )
                     },
                 );

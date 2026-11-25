@@ -848,7 +848,7 @@ impl Shared {
 
     /// What a person names the senator of `session_id` by: its alias on its
     /// committee, as last read, else its short senator name.
-    fn shown_session_name(&self, session_id: &str) -> String {
+    pub(super) fn shown_session_name(&self, session_id: &str) -> String {
         let Ok(Some(session)) = self.store.session(session_id) else {
             return "<name>".to_owned();
         };
