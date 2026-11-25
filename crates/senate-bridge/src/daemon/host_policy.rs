@@ -22,6 +22,23 @@ pub(super) struct HostAuthority {
     locale: Locale,
 }
 
+/// Why a session cannot be started on `committee`, which nothing has been
+/// written to yet, and how the committee comes to exist: spawn never
+/// creates one, `senate join` by a person does.
+pub(super) fn unknown_committee(committee: &CommitteeId, locale: Locale) -> String {
+    match locale {
+        Locale::Zh => format!(
+            "unknown committee {committee}：还没有人往这个委员会写过东西，spawn 不会创建委员会。\
+             先由人在它的项目目录里运行 `senate join {committee}` 把它开出来，再 spawn。"
+        ),
+        Locale::En => format!(
+            "unknown committee {committee}: nothing has been written to it yet, and spawn does \
+             not create a committee. A person opens it first with `senate join {committee}` in \
+             its project directory; then spawn again."
+        ),
+    }
+}
+
 impl HostAuthority {
     pub(super) fn check_target(
         &self,
@@ -46,8 +63,9 @@ impl HostAuthority {
             )));
         }
         if !self.committees.contains(committee) {
-            return Err(IpcError::bad_request(format!(
-                "unknown committee {committee}"
+            return Err(IpcError::bad_request(unknown_committee(
+                committee,
+                self.locale,
             )));
         }
         Ok(())

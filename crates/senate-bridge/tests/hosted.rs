@@ -4144,6 +4144,11 @@ async fn joining_a_new_committee_opens_it_so_a_spawn_works() {
         refused.to_string().contains("unknown committee fresh-work"),
         "{refused}"
     );
+    // The refusal says how the committee comes to exist.
+    assert!(
+        refused.to_string().contains("`senate join fresh-work`"),
+        "{refused}"
+    );
 
     let join = || {
         let mut cmd = tokio::process::Command::new(BIN);
