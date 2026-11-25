@@ -1688,7 +1688,12 @@ async fn restoring_into_a_removed_directory_is_refused_with_the_way_on() {
     )
     .await;
     // The session records the directory by its real path.
-    let project = fixture.project.canonicalize().unwrap().display().to_string();
+    let project = fixture
+        .project
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
     std::fs::remove_dir_all(&fixture.project).unwrap();
     let error = ipc::request::<SpawnReply>(
         &fixture.h.socket(),

@@ -208,10 +208,9 @@ impl Shared {
             .map_err(|_| IpcError::new(codes::SERVER, "could not confirm the committee in time"))?
             .map_err(server_error)?;
         if !me.committees.contains(&committee) {
-            return Err(IpcError::bad_request(super::host_policy::unknown_committee(
-                &committee,
-                self.locale,
-            )));
+            return Err(IpcError::bad_request(
+                super::host_policy::unknown_committee(&committee, self.locale),
+            ));
         }
         on_heap(|| {
             self.launch_host(

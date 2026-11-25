@@ -4549,7 +4549,7 @@ mod tests {
                 threads: board.threads(None).into_iter().cloned().collect(),
                 settled: 0,
                 seen: Vec::new(),
-            at_desk: Vec::new(),
+                at_desk: Vec::new(),
             };
             render_inbox(&reply, locale, ShowAll::Flag)
         };
@@ -4626,7 +4626,9 @@ mod tests {
     #[test]
     fn the_inbox_shows_what_the_agent_has_lying_on_the_desk_and_for_how_long() {
         use chrono::{Duration, TimeZone};
-        let now = chrono::Utc.with_ymd_and_hms(2026, 11, 25, 12, 0, 0).unwrap();
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 11, 25, 12, 0, 0)
+            .unwrap();
         let item = |seq: u64, ago: Duration| ipc::DeskParked {
             seq: Seq(seq),
             kind: Kind::Request,
@@ -4655,8 +4657,12 @@ mod tests {
             ),
             "{en}"
         );
-        assert!(en.contains("seq 111 · request · meant for [feishu-botd::chair] · 2 h 14 min on the desk"));
-        assert!(en.contains("seq 112 · request · meant for [feishu-botd::chair] · <1 min on the desk"));
+        assert!(en.contains(
+            "seq 111 · request · meant for [feishu-botd::chair] · 2 h 14 min on the desk"
+        ));
+        assert!(
+            en.contains("seq 112 · request · meant for [feishu-botd::chair] · <1 min on the desk")
+        );
         assert!(en.contains("sending it again does not speed it"), "{en}");
         let zh = render_desk_parked(&[item(111, Duration::minutes(14))], now, Locale::Zh);
         assert!(zh.contains("已在办公桌上 14 分钟"), "{zh}");
@@ -4667,8 +4673,8 @@ mod tests {
     /// sender was told: the receipt now says who will not read it soon.
     #[test]
     fn a_receipt_says_which_recipients_have_no_session_open() {
-        use chrono::TimeZone;
         use crate::ipc::RecipientNote;
+        use chrono::TimeZone;
         let note = |who: &str, last_seen, paused| RecipientNote {
             who: who.parse().unwrap(),
             away: true,
@@ -4676,7 +4682,9 @@ mod tests {
             paused,
             chair_now: None,
         };
-        let seen = chrono::Utc.with_ymd_and_hms(2026, 11, 24, 10, 3, 0).unwrap();
+        let seen = chrono::Utc
+            .with_ymd_and_hms(2026, 11, 24, 10, 3, 0)
+            .unwrap();
         let mut posted = Posted {
             committee: CommitteeId::new("senate").unwrap(),
             seq: Seq(1437),
@@ -4702,7 +4710,9 @@ mod tests {
              \nNote: [senator::docs] is paused; this waits for it until it is resumed."
         );
         let zh = recipient_notes(&posted, Locale::Zh);
-        assert!(zh.contains("[senator::reviewer] 没有打开的会话（最后一次联络 2026-11-24 10:03 UTC）"));
+        assert!(
+            zh.contains("[senator::reviewer] 没有打开的会话（最后一次联络 2026-11-24 10:03 UTC）")
+        );
         assert!(zh.contains("[senator::docs] 已暂停"), "{zh}");
 
         // A thread opened with a committee's chair stays with who chaired
@@ -4757,9 +4767,8 @@ mod tests {
                 event(114, Kind::Answer, "THIRD", 10),
             ],
         };
-        let read = |seq: u64, only, budget| {
-            render_thread_read(&reply, Seq(seq), only, budget, Locale::En)
-        };
+        let read =
+            |seq: u64, only, budget| render_thread_read(&reply, Seq(seq), only, budget, Locale::En);
         let has = |text: &str, mark: &str| text.contains(&format!("{mark}{}", "x".repeat(2_000)));
 
         let whole = read(113, false, THREAD_READ_CHARS);
@@ -4831,7 +4840,10 @@ mod tests {
         // And nothing is claimed when there is no one to name.
         posted.to.clear();
         posted.intended = None;
-        assert_eq!(receipt(&posted), "Answered thread 311 on commons (seq 326).");
+        assert_eq!(
+            receipt(&posted),
+            "Answered thread 311 on commons (seq 326)."
+        );
     }
 
     #[test]

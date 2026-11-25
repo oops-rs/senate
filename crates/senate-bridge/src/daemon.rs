@@ -5465,13 +5465,11 @@ impl Shared {
         let mut pages: HashMap<CommitteeId, Option<api::PresencePage>> = HashMap::new();
         for (committee, agent, who) in seats {
             if !pages.contains_key(&committee) {
-                let page = tokio::time::timeout(
-                    RECIPIENT_NOTE_TIMEOUT,
-                    self.api.presence(&committee),
-                )
-                .await
-                .ok()
-                .and_then(Result::ok);
+                let page =
+                    tokio::time::timeout(RECIPIENT_NOTE_TIMEOUT, self.api.presence(&committee))
+                        .await
+                        .ok()
+                        .and_then(Result::ok);
                 pages.insert(committee.clone(), page);
             }
             let Some(Some(page)) = pages.get(&committee) else {

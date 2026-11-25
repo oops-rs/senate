@@ -77,7 +77,11 @@ fn a_bump_changes_every_place_and_only_the_version() {
 
     let out = bump(root, &["--no-lock", "9.8.7"]);
     assert!(out.status.success(), "{}", said(&out));
-    assert!(said(&out).contains(&format!("{old} -> 9.8.7")), "{}", said(&out));
+    assert!(
+        said(&out).contains(&format!("{old} -> 9.8.7")),
+        "{}",
+        said(&out)
+    );
     let check = bump(root, &["--check"]);
     assert!(check.status.success(), "{}", said(&check));
     assert!(said(&check).starts_with("9.8.7 ("), "{}", said(&check));
@@ -123,12 +127,15 @@ fn a_bad_version_or_a_disagreement_changes_nothing() {
     // One place left behind by hand: the check names it, and a bump
     // refuses to paper over it.
     let app = root.join("apps/macos/project.yml");
-    let stale = read(root, "apps/macos/project.yml")
-        .replace(env!("CARGO_PKG_VERSION"), "0.0.1");
+    let stale = read(root, "apps/macos/project.yml").replace(env!("CARGO_PKG_VERSION"), "0.0.1");
     std::fs::write(&app, &stale).unwrap();
     let check = bump(root, &["--check"]);
     assert!(!check.status.success(), "{}", said(&check));
-    assert!(said(&check).contains("MARKETING_VERSION: \"0.0.1\""), "{}", said(&check));
+    assert!(
+        said(&check).contains("MARKETING_VERSION: \"0.0.1\""),
+        "{}",
+        said(&check)
+    );
     let out = bump(root, &["--no-lock", "9.8.7"]);
     assert!(!out.status.success(), "{}", said(&out));
     assert_eq!(read(root, "apps/macos/project.yml"), stale);

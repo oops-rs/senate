@@ -1199,14 +1199,26 @@ mod tests {
         };
         let mut log = Log(Vec::new());
         let ago = |minutes| now - Duration::minutes(minutes);
-        log.push_at(cp("senator::main", Some("- merge order: perf first")), ago(50));
+        log.push_at(
+            cp("senator::main", Some("- merge order: perf first")),
+            ago(50),
+        );
         log.push_at(cp("senator::docs", Some("- old note")), ago(40));
         log.push_at(cp("senator::perf", Some(&"x".repeat(2_000))), ago(30));
-        log.push_at(cp("senator::app", Some("- ship the town behind a flag\n\n- no push")), ago(20));
+        log.push_at(
+            cp(
+                "senator::app",
+                Some("- ship the town behind a flag\n\n- no push"),
+            ),
+            ago(20),
+        );
         log.push_at(cp("senator::quiet", None), ago(10));
         // Its latest checkpoint has no notes: the earlier ones are not shown.
         log.push_at(cp("senator::docs", Some("  \n")), ago(5));
-        let third = log.push_at(cp("senator::main", Some("- release waits for Wendell")), ago(3));
+        let third = log.push_at(
+            cp("senator::main", Some("- release waits for Wendell")),
+            ago(3),
+        );
 
         let brief = Brief::from_events(c(), &log.0);
         let agents: Vec<String> = brief
@@ -1214,7 +1226,11 @@ mod tests {
             .iter()
             .map(|n| n.agent.to_string())
             .collect();
-        assert_eq!(agents, ["main", "app", "perf"], "newest first, three at most");
+        assert_eq!(
+            agents,
+            ["main", "app", "perf"],
+            "newest first, three at most"
+        );
         assert_eq!(brief.decision_notes[0].seq, third);
         assert_eq!(
             brief.decision_notes[2].notes.chars().count(),
@@ -1232,7 +1248,10 @@ mod tests {
             ),
             "{en}"
         );
-        assert!(!en.contains("merge order"), "an agent's latest notes only: {en}");
+        assert!(
+            !en.contains("merge order"),
+            "an agent's latest notes only: {en}"
+        );
         assert!(!en.contains("old note"), "{en}");
         let zh = brief.to_markdown_at(Locale::Zh, DEFAULT_MARKDOWN_CHARS, now);
         assert!(zh.contains("未经任何人确认"), "{zh}");

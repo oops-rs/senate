@@ -996,7 +996,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 thread: None,
                 duplicate: false,
                 intended: None,
-        notes: Vec::new(),
+                notes: Vec::new(),
                 unseen_escalation: None,
             })
         }

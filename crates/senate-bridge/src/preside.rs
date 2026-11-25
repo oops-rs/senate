@@ -673,7 +673,10 @@ mod tests {
         };
         let en = render_chair_docket(&reply, Locale::En);
         for kept in ["live", "owing", "paused", "noted"] {
-            assert!(en.contains(&format!("- [senator::{kept}] · ")), "{kept}: {en}");
+            assert!(
+                en.contains(&format!("- [senator::{kept}] · ")),
+                "{kept}: {en}"
+            );
         }
         assert!(!en.contains("gone"), "{en}");
         assert!(
