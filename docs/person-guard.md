@@ -92,7 +92,7 @@ the existing thread before publishing it.
 
 ## Sensitive requests
 
-Permission answers, desk decisions, Observe grant creation and revocation,
+IPC permission answers, desk decisions, Observe grant creation and revocation,
 line publication and withdrawal, native-seat authorization, rebind, chair,
 secretary, role-alias and seat changes, committee archive and unarchive,
 remote-machine administration and pairing, card writes, and operator-only
@@ -107,7 +107,11 @@ the viewer's process generation and the read or write mode. The daemon
 issues read-only tickets after verifying the operator. A locally authenticated
 writable viewer can reuse the authorization within the same controlling
 TTY and live session-leader instance for at most 12 hours. Missing kernel
-identity disables reuse. Programs sharing that same TTY share the scope.
+identity or a background requester disables reuse. Programs sharing that same
+TTY share the scope, including automation in an already authorized pane.
+Detaching from tmux can leave the pane, its kernel TTY, and its authorization
+alive. An authorized interactive viewer can still type directly into a
+terminal prompt.
 Existing hosts must be restarted to pick up the host socket checks. On
 macOS a replacement daemon needs the installed daemon code pin to regain
 control of an existing host. Recovery after an unsigned or Linux daemon
