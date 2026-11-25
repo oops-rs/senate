@@ -101,6 +101,17 @@ uniffi = "=0.32.2"
 # Tests.
 tempfile = "3"
 
+# Debug builds and tests keep line tables for the workspace's own crates: a
+# backtrace and a panic still name the file and line, and a dependency's
+# frames still show by name. Full debug info (every variable and type, for
+# a debugger) is what filled target/: a workspace test build was 22 GB with
+# it. For a session in a debugger: CARGO_PROFILE_DEV_DEBUG=2 on the command.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 # The benchmark fixture's build (scripts/perf): optimised as a release is,
 # with debug assertions on, since an unsigned daemon takes a person's
 # requests only as a debug fixture confined to a temp home, and with line
