@@ -1,6 +1,6 @@
 # Observe a Senate
 
-Approved design for the machine-hosted Senate, based on `197aa192`. Creating a lines grant requires one confirmation in the signed macOS Senate app. Linux, WSL, and headless installations refuse lines grants. See [caller authorization](person-guard.md) for platform coverage and the limits of the routine guard used for metadata grants and card administration.
+Approved design for the machine-hosted Senate, based on `197aa192`. Grant creation and revocation, line publication and withdrawal, and card writes require local user presence on macOS. The CLI uses system authentication and an explicit action in the pinned desktop app can use its own UI confirmation. Linux, WSL, and headless installations refuse these operations. Read-only administration stays on the routine operator path. See [caller authorization](person-guard.md) for platform coverage.
 
 An observation answers what is happening in one Senate. It gives a scene enough information to place committees and senators, show work moving, and recover when it disconnects. Scope is decided by the person who runs the machine. The Senate's log remains authoritative for filed messages. The bridge is authoritative for what happened on this machine, including whether a delivery or terminal attachment actually occurred. A scene never infers a delivery from an append or an idle agent from a connected machine.
 

@@ -17,7 +17,7 @@
 //! as well, marked as such.
 
 use super::*;
-use crate::ipc::{DocketReply, PresidesReply, Presiding, SenateDocket};
+use crate::ipc::{DocketReply, NativeAuthorityDetails, PresidesReply, Presiding, SenateDocket};
 
 pub(crate) struct Front {
     senates: Vec<Arc<Shared>>,
@@ -176,6 +176,72 @@ impl Front {
         Ok(())
     }
 
+    fn native_runtime_path(&self, runtime: Runtime) -> Option<PathBuf> {
+        let paths = Paths::new(&self.primary().home);
+        let path = std::env::var("PATH").ok();
+        crate::service::agent_programs(&paths.config(), path.as_deref())
+            .into_iter()
+            .find(|entry| entry.name == runtime.as_str())
+            .and_then(|entry| match entry.found {
+                crate::service::Found::Configured(path) | crate::service::Found::Resolved(path) => {
+                    path.canonicalize().ok()
+                }
+                crate::service::Found::Missing => None,
+            })
+    }
+
+    pub(super) fn pending_native_details(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<NativeAuthorityDetails>, IpcError> {
+        let store = &self.primary().store;
+        let Some((approval, pid)) = store.pending_native_process(session_id).map_err(internal)?
+        else {
+            return Ok(None);
+        };
+        let Some(runtime) = store
+            .session(session_id)
+            .map_err(internal)?
+            .map(|session| session.runtime)
+        else {
+            return Ok(None);
+        };
+        let Some(expected) = self.native_runtime_path(runtime) else {
+            return Ok(None);
+        };
+        let Ok(executable) = kernel_process::executable(pid) else {
+            return Ok(None);
+        };
+        if executable != expected {
+            return Ok(None);
+        }
+        #[cfg(target_os = "macos")]
+        let signing_team = crate::app_confirmation::macos::signing_team(pid);
+        #[cfg(not(target_os = "macos"))]
+        let signing_team = None;
+        let hosted = self.hosted_actor(session_id, runtime)?.is_some();
+        #[cfg(target_os = "macos")]
+        let hosted = hosted
+            || self
+                .scope
+                .as_ref()
+                .is_some_and(|scope| scope.contains_process(pid));
+        let details = NativeAuthorityDetails {
+            approval,
+            pid,
+            executable,
+            signing_team,
+            cwd: kernel_process::cwd(pid).ok(),
+            hosted,
+            started_at: kernel_process::started_at(pid),
+        };
+        Ok(store
+            .pending_native_process(session_id)
+            .map_err(internal)?
+            .filter(|(id, current)| id == &details.approval && *current == pid)
+            .map(|_| details))
+    }
+
     pub(super) fn record_hook_owner(
         &self,
         peer: Option<u32>,
@@ -233,7 +299,16 @@ impl Front {
             Some(process)
         } else {
             let ancestry = kernel_process::ancestors(peer, 64).map_err(|_| no_owner())?;
-            let candidate = if report.runtime == Runtime::Acp {
+            let candidate = if privileged {
+                let expected = self
+                    .native_runtime_path(report.runtime)
+                    .ok_or_else(no_owner)?;
+                ancestry.into_iter().find(|candidate| {
+                    kernel_process::executable(candidate.pid).is_ok_and(|path| path == expected)
+                        && kernel_process::inspect(candidate.pid)
+                            .is_ok_and(|process| process.identity == *candidate)
+                })
+            } else if report.runtime == Runtime::Acp {
                 kernel_process::inspect(peer)
                     .ok()
                     .map(|process| process.identity)
@@ -302,27 +377,37 @@ impl Front {
     }
 
     pub(crate) async fn dispatch(self: &Arc<Self>, request: Request) -> Reply {
-        if crate::app_confirmation::required(&request) {
+        if crate::app_confirmation::required(&request)
+            && (!self.scope_fixture
+                || crate::app_confirmation::fixture_requires_confirmation(&request))
+        {
             return Reply::err(IpcError::new(
                 codes::NOT_A_PERSON,
                 approval_guard::APP_CONFIRMATION,
             ));
         }
+        self.dispatch_authorized(request).await
+    }
+
+    async fn dispatch_authorized(self: &Arc<Self>, request: Request) -> Reply {
         match request {
-            Request::NativeAuthorityCandidate { session_id } => wrap(
-                self.primary()
-                    .store
-                    .pending_native_process(&session_id)
-                    .map_err(internal),
-            ),
+            Request::NativeAuthorityCandidate { session_id } => {
+                wrap(self.pending_native_details(&session_id))
+            }
             Request::AuthorizeNativeAuthority {
                 session_id,
                 approval,
             } => wrap(
-                self.primary()
-                    .store
-                    .authorize_native_process(&session_id, &approval)
-                    .map_err(internal),
+                self.pending_native_details(&session_id)
+                    .and_then(|candidate| {
+                        if candidate.is_none_or(|candidate| candidate.approval != approval) {
+                            return Ok(false);
+                        }
+                        self.primary()
+                            .store
+                            .authorize_native_process(&session_id, &approval)
+                            .map_err(internal)
+                    }),
             ),
             Request::ObserveAdmin { command } => self.on_observe_admin(command).await,
             Request::SetCard {
@@ -335,9 +420,18 @@ impl Front {
             Request::SetCard { .. } => Reply::err(IpcError::bad_request(
                 "Card writes require a verified session",
             )),
-            Request::RemoteControl { .. } => Reply::err(IpcError::bad_request(
-                "remote control requires the local person socket",
-            )),
+            Request::RemoteControl { command } => self.dispatch_remote_control(command),
+            Request::DeskDecide {
+                committee,
+                seq,
+                item_id,
+                id,
+                decision,
+            } => wrap(
+                self.primary()
+                    .on_desk_decide(committee, seq, item_id, id, decision)
+                    .await,
+            ),
             Request::Status => {
                 // The office, the chairs and the children as the server says
                 // now, bounded: a server that does not answer leaves what
@@ -490,6 +584,25 @@ impl Front {
         }
     }
 
+    pub(super) fn dispatch_remote_control(&self, command: crate::remote::Control) -> Reply {
+        match command {
+            crate::remote::Control::PrepareEnable { listen } => wrap(
+                crate::remote::prepare_enable(&Paths::new(&self.primary().home), listen)
+                    .map_err(|error| IpcError::bad_request(error.to_string())),
+            ),
+            command => match &self.remote {
+                Some(remote) => wrap(
+                    remote
+                        .control(command)
+                        .map_err(|error| IpcError::bad_request(error.to_string())),
+                ),
+                None => Reply::err(IpcError::bad_request(
+                    "remote access is disabled on this machine",
+                )),
+            },
+        }
+    }
+
     #[cfg(target_os = "macos")]
     pub(super) fn set_observe_consent(
         &mut self,
@@ -500,8 +613,9 @@ impl Front {
 
     #[cfg(target_os = "macos")]
     pub(super) async fn dispatch_app_confirmation(
-        &self,
+        self: &Arc<Self>,
         request: crate::app_confirmation::ConfirmedRequest,
+        session_peer: Option<u32>,
     ) -> Reply {
         match request.into_request() {
             Request::RebindHost { host, to } => {
@@ -531,7 +645,32 @@ impl Front {
                     Err(error) => Reply::err(IpcError::internal(error)),
                 }
             }
-            _ => Reply::err(IpcError::bad_request("Unexpected app confirmation request")),
+            Request::SetCard {
+                session,
+                target,
+                document,
+            } if session != SessionSelector::default() => {
+                let _binding = self.primary().session_bindings.read().await;
+                let session = match self.primary().resolve_with_activity(&session, false) {
+                    Ok(session) => session,
+                    Err(error) => return Reply::err(error),
+                };
+                if let Err(error) = self.verify_session_instance(session_peer, &session) {
+                    return Reply::err(error);
+                }
+                wrap(
+                    self.set_observer_card(Some(session), target, &document)
+                        .await,
+                )
+            }
+            request => {
+                if let Some(selector) = approval_guard::role_selector(&request)
+                    && let Err(error) = self.verify_role_owner(session_peer, selector)
+                {
+                    return Reply::err(error);
+                }
+                self.dispatch_authorized(request).await
+            }
         }
     }
 

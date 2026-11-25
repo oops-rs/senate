@@ -772,6 +772,9 @@ enum ServiceCmd {
         /// on PATH).
         #[arg(long, value_name = "PATH")]
         senated: Option<PathBuf>,
+        /// The installed macOS app whose code may answer presence requests.
+        #[arg(long, value_name = "PATH")]
+        app: Option<PathBuf>,
     },
     /// Stop the service and remove its file. Dry run without --yes.
     Uninstall {
@@ -1763,7 +1766,7 @@ async fn daemon_call<T: serde::de::DeserializeOwned>(
     request: &Request,
 ) -> anyhow::Result<T> {
     let timeout = if cfg!(target_os = "macos") && crate::app_confirmation::required(request) {
-        eprintln!("Confirm this command in the signed Senate app.");
+        eprintln!("Authenticate this command on the hosting Mac.");
         crate::app_confirmation::LIFETIME + Duration::from_secs(5)
     } else {
         Duration::from_secs(20)
@@ -3239,6 +3242,8 @@ fn run_doctor(json: bool) -> anyhow::Result<()> {
         wsl: wsl.as_ref(),
     });
     checks.extend(completion::doctor(locale));
+    #[cfg(target_os = "macos")]
+    checks.push(crate::app_confirmation::macos::pin_doctor(paths.home()));
     checks.extend(crate::remote::authority::installation_checks());
     if let Some(line) = crate::remote::authority::latest_history(&paths) {
         checks.push(crate::doctor::Check::ok("remote.last_administration", line));
@@ -3344,7 +3349,7 @@ async fn service_readiness_requires_a_pong_before_the_deadline() {
 fn run_service(command: ServiceCmd, output: Output) -> anyhow::Result<()> {
     let (spec, locale) = service_spec()?;
     match command {
-        ServiceCmd::Install { yes, senated } => {
+        ServiceCmd::Install { yes, senated, app } => {
             let senated = match senated {
                 Some(path) => std::path::absolute(path)?,
                 None => {
@@ -3356,6 +3361,18 @@ fn run_service(command: ServiceCmd, output: Output) -> anyhow::Result<()> {
             };
             let plan = service::plan_install(&spec, &senated);
             if yes {
+                #[cfg(target_os = "macos")]
+                {
+                    let paths = Paths::new(&spec.senate_home);
+                    paths.ensure_home()?;
+                    let default_app = std::path::Path::new("/Applications/Senate.app");
+                    let app = app
+                        .as_deref()
+                        .or_else(|| default_app.is_dir().then_some(default_app));
+                    crate::app_confirmation::macos::install_pins(paths.home(), app, &senated)?;
+                }
+                #[cfg(not(target_os = "macos"))]
+                anyhow::ensure!(app.is_none(), "--app requires macOS");
                 service::apply_install(&plan, &senated, &service::SystemManager)?;
                 let paths = Paths::new(&spec.senate_home);
                 if !runtime(false)?.block_on(wait_for_service(&paths, Duration::from_secs(5))) {
@@ -4320,28 +4337,56 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             ))
         }
         SessionCmd::Authorize { session_id } => {
+            use std::io::IsTerminal as _;
+
             let paths = Paths::from_env()?;
             runtime(false)?.block_on(async {
-                let candidate: Option<(EventId, u32)> = daemon_call(
+                let candidate: Option<ipc::NativeAuthorityDetails> = daemon_call(
                     &paths,
                     &Request::NativeAuthorityCandidate {
                         session_id: session_id.clone(),
                     },
                 )
                 .await?;
-                let Some((approval, pid)) = candidate else {
+                let Some(candidate) = candidate else {
                     anyhow::bail!("No live process is waiting for authorization for this session");
                 };
+                anyhow::ensure!(
+                    std::io::stdin().is_terminal(),
+                    "Confirm this candidate from an interactive terminal on the hosting Mac"
+                );
+                eprintln!("Native seat {session_id:?}, PID {}", candidate.pid);
+                eprintln!("  Executable  {:?}", candidate.executable);
+                eprintln!(
+                    "  Signing team  {}",
+                    candidate.signing_team.as_deref().unwrap_or("none verified")
+                );
+                eprintln!("  Directory  {:?}", candidate.cwd);
+                eprintln!("  Hosted  {}", candidate.hosted);
+                eprintln!(
+                    "  Started  {}",
+                    candidate
+                        .started_at
+                        .map_or_else(|| "unavailable".into(), |time| time.to_rfc3339())
+                );
+                eprint!("Authorize this exact candidate? Type yes: ");
+                std::io::stderr().flush()?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                anyhow::ensure!(input.trim() == "yes", "Authorization declined");
                 let accepted: bool = daemon_call(
                     &paths,
                     &Request::AuthorizeNativeAuthority {
                         session_id: session_id.clone(),
-                        approval,
+                        approval: candidate.approval,
                     },
                 )
                 .await?;
                 anyhow::ensure!(accepted, "The pending process changed before authorization");
-                println!("Authorized session {session_id} for process {pid}");
+                println!(
+                    "Authorized session {session_id} for process {}",
+                    candidate.pid
+                );
                 Ok(())
             })
         }

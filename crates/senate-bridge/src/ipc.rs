@@ -309,6 +309,17 @@ pub struct RebindHostReply {
     pub threads: Vec<RebindThread>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeAuthorityDetails {
+    pub approval: EventId,
+    pub pid: u32,
+    pub executable: PathBuf,
+    pub signing_team: Option<String>,
+    pub cwd: Option<PathBuf>,
+    pub hosted: bool,
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RebindThread {
     pub committee: CommitteeId,
@@ -2907,6 +2918,8 @@ pub async fn request_line(socket: &Path, request: &Request) -> Result<Vec<u8>, C
             || crate::daemon::approval_guard::role_selector(request).is_some()
         {
             Some(ProofKind::Session)
+        } else if crate::app_confirmation::required(request) {
+            Some(ProofKind::Operator)
         } else {
             None
         };

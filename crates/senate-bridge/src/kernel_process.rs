@@ -173,6 +173,88 @@ fn mac_path_bytes(chars: impl IntoIterator<Item = libc::c_char>) -> Vec<u8> {
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
+pub(crate) fn executable(pid: u32) -> io::Result<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let pid = libc::pid_t::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid process ID"))?;
+    let mut path = [0; 4096];
+    let len = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), path.len() as u32) };
+    if len <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let bytes = path.into_iter().take_while(|&byte| byte != 0).collect();
+    Ok(std::ffi::OsString::from_vec(bytes).into())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn executable(pid: u32) -> io::Result<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn executable(_pid: u32) -> io::Result<PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "process executable unavailable",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub(crate) fn started_at(pid: u32) -> Option<chrono::DateTime<chrono::Utc>> {
+    let info = unsafe { mac_info::<libc::proc_bsdinfo>(pid, libc::PROC_PIDTBSDINFO) }.ok()?;
+    chrono::DateTime::from_timestamp(
+        info.pbi_start_tvsec.try_into().ok()?,
+        u32::try_from(info.pbi_start_tvusec)
+            .ok()?
+            .checked_mul(1_000)?,
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn started_at(_pid: u32) -> Option<chrono::DateTime<chrono::Utc>> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub(crate) fn running_pids() -> Vec<u32> {
+    let capacity = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) }.max(0) as usize;
+    let mut pids = vec![0_i32; capacity + 64];
+    let size = i32::try_from(std::mem::size_of_val(pids.as_slice())).unwrap_or_default();
+    let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), size) }.max(0) as usize;
+    pids.truncate(count);
+    pids.into_iter()
+        .filter_map(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 1)
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub(crate) fn terminal(pid: u32) -> Option<String> {
+    use std::ffi::{CStr, c_char};
+    unsafe extern "C" {
+        fn devname_r(
+            dev: libc::dev_t,
+            kind: libc::mode_t,
+            name: *mut c_char,
+            len: i32,
+        ) -> *mut c_char;
+    }
+    let info = unsafe { mac_info::<libc::proc_bsdinfo>(pid, libc::PROC_PIDTBSDINFO) }.ok()?;
+    let mut name = [0; 256];
+    let kind = libc::mode_t::try_from(libc::S_IFCHR).ok()?;
+    let result = unsafe { devname_r(info.e_tdev as libc::dev_t, kind, name.as_mut_ptr(), 256) };
+    (!result.is_null()).then(|| {
+        unsafe { CStr::from_ptr(result) }
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 pub(crate) fn cwd(pid: u32) -> io::Result<PathBuf> {
     use std::os::unix::ffi::OsStringExt;
     // proc_vnodepathinfo is the integer-only layout for this kernel flavor.
