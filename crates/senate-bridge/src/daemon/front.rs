@@ -386,7 +386,7 @@ impl Front {
                 approval_guard::APP_CONFIRMATION,
             ));
         }
-        self.dispatch_authorized(request).await
+        Box::pin(self.dispatch_authorized(request)).await
     }
 
     async fn dispatch_authorized(self: &Arc<Self>, request: Request) -> Reply {
@@ -579,7 +579,7 @@ impl Front {
                     .and_then(|selector| self.locate(selector))
                     .map(|(shared, _)| shared)
                     .unwrap_or_else(|| self.primary().clone());
-                target.dispatch(other).await
+                Box::pin(target.dispatch(other)).await
             }
         }
     }
@@ -669,7 +669,7 @@ impl Front {
                 {
                     return Reply::err(error);
                 }
-                self.dispatch_authorized(request).await
+                Box::pin(self.dispatch_authorized(request)).await
             }
         }
     }
