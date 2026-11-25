@@ -3747,14 +3747,13 @@ async fn spawn_attempt_resumes_with_original_order_after_profile_is_removed() {
     let (mut h, project, _) = fixture_daemon(2).await;
     let missing = project.join("not-yet-created");
     h.stop().await;
-    h.config.profiles.insert(
-        "review".into(),
-        senate_bridge::config::LaunchProfile {
-            runtime: HostedRuntime::Claude,
-            model: Default::default(),
-            note: "Review".into(),
-        },
-    );
+    // The profile is in the file, where the daemon reads it at each launch.
+    let without = std::fs::read_to_string(h.paths.config()).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!("{without}\n[profiles.review]\nruntime = \"claude\"\nnote = \"Review\"\n"),
+    )
+    .unwrap();
     start(&mut h).await;
     let mut request = tracked_spawn(missing.clone(), None);
     let Request::Spawn {
@@ -3777,7 +3776,7 @@ async fn spawn_attempt_resumes_with_original_order_after_profile_is_removed() {
     assert_eq!(error.code, ipc::codes::BAD_REQUEST);
     assert!(h.store().all_sessions().unwrap().is_empty());
     h.stop().await;
-    h.config.profiles.clear();
+    std::fs::write(h.paths.config(), &without).unwrap();
     std::fs::create_dir(missing).unwrap();
     start(&mut h).await;
 

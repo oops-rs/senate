@@ -226,15 +226,16 @@ impl Shared {
 
     /// The launch profiles as the configuration file has them now, so an
     /// added or edited profile needs no restart and `senate profiles`
-    /// (which reads the file) and the daemon never disagree. A file that
-    /// no longer parses is an error naming what is wrong, not the old
-    /// profiles; with no file at all (a daemon configured in memory) they
-    /// are the ones it started with.
+    /// (which reads the file) and the daemon never disagree. Only the
+    /// file's profiles are read, so a mistake elsewhere in it does not
+    /// stand in the way of a launch; profiles that no longer parse are an
+    /// error naming what is wrong, not the old ones. With no file at all (a
+    /// daemon configured in memory) they are the ones it started with.
     pub(super) fn launch_profiles(
         &self,
     ) -> Result<BTreeMap<String, crate::config::LaunchProfile>, IpcError> {
-        match crate::config::BridgeConfig::load_unchecked(&Paths::new(&self.home).config()) {
-            Ok(config) => Ok(config.profiles),
+        match crate::config::BridgeConfig::profiles_at(&Paths::new(&self.home).config()) {
+            Ok(profiles) => Ok(profiles),
             Err(crate::config::ConfigError::Missing(_)) => Ok(self.config.profiles.clone()),
             Err(error) => Err(IpcError::bad_request(format!(
                 "cannot read the launch profiles: {error}"

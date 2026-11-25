@@ -866,6 +866,36 @@ impl BridgeConfig {
         Ok(config)
     }
 
+    /// The launch profiles the file at `path` has now. Only its
+    /// `[profiles.*]` tables are read: the daemon asks at each launch, and
+    /// nothing else in the file has to be complete or even known to this
+    /// version for a profile to be used.
+    pub fn profiles_at(path: &Path) -> Result<BTreeMap<String, LaunchProfile>, ConfigError> {
+        #[derive(Deserialize)]
+        struct Profiles {
+            #[serde(default, deserialize_with = "deserialize_profiles")]
+            profiles: BTreeMap<String, LaunchProfile>,
+        }
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ConfigError::Missing(path.to_path_buf()));
+            }
+            Err(source) => {
+                return Err(ConfigError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        toml::from_str::<Profiles>(&text)
+            .map(|file| file.profiles)
+            .map_err(|source| ConfigError::Parse {
+                path: path.to_path_buf(),
+                source,
+            })
+    }
+
     /// Read and parse, without [`BridgeConfig::validate`]: for `senated
     /// --machine`, which fills in the Senate it hosts itself before the
     /// configuration is complete.
@@ -1024,6 +1054,38 @@ note = "Use for diagnosis."
         .unwrap();
 
         let config = BridgeConfig::load_unchecked(&path).unwrap();
+        // The daemon reads the profiles alone at each launch, and the same
+        // ones; what else the file holds, or lacks, is not its concern.
+        assert_eq!(BridgeConfig::profiles_at(&path).unwrap(), config.profiles);
+        let fragment = dir.path().join("fragment.toml");
+        std::fs::write(
+            &fragment,
+            "[companion]\nunknown_here = 1\n[profiles.quick]\nruntime = \"claude\"\nnote = \"Quick.\"\n",
+        )
+        .unwrap();
+        assert!(BridgeConfig::load_unchecked(&fragment).is_err());
+        assert_eq!(
+            BridgeConfig::profiles_at(&fragment)
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["quick"]
+        );
+        std::fs::write(&fragment, "[companion]\n").unwrap();
+        assert!(BridgeConfig::profiles_at(&fragment).unwrap().is_empty());
+        std::fs::write(
+            &fragment,
+            "[profiles.bad]\nruntime = \"nope\"\nnote = \"x\"\n",
+        )
+        .unwrap();
+        let error = BridgeConfig::profiles_at(&fragment)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("[profiles.bad]"), "{error}");
+        assert!(matches!(
+            BridgeConfig::profiles_at(&dir.path().join("none.toml")),
+            Err(ConfigError::Missing(_))
+        ));
         let review = &config.profiles["review"];
         assert_eq!(review.runtime, HostedRuntime::Codex);
         assert_eq!(review.model.model.as_deref(), Some("astra"));
