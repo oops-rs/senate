@@ -97,6 +97,36 @@ bool senate_guest_team(int32_t pid, char *text, size_t size) {
     return valid;
 }
 
+/* For diagnostics only: the signing identifier and team a running process
+ * presents, whether or not its signature is valid. Either may be empty. */
+void senate_guest_signing(int32_t pid, char *identifier, size_t identifier_size,
+                          char *team, size_t team_size) {
+    if (identifier_size) identifier[0] = 0;
+    if (team_size) team[0] = 0;
+    CFTypeRef value = CFNumberCreate(NULL, kCFNumberSInt32Type, &pid);
+    if (!value) return;
+    const void *key = kSecGuestAttributePid;
+    CFDictionaryRef attributes = CFDictionaryCreate(NULL, &key, &value, 1,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFRelease(value);
+    if (!attributes) return;
+    SecCodeRef guest = NULL;
+    OSStatus result = SecCodeCopyGuestWithAttributes(NULL, attributes, kSecCSDefaultFlags, &guest);
+    CFRelease(attributes);
+    if (result != errSecSuccess) return;
+    CFDictionaryRef info = NULL;
+    if (SecCodeCopySigningInformation(guest, kSecCSSigningInformation, &info) == errSecSuccess) {
+        CFStringRef found = CFDictionaryGetValue(info, kSecCodeInfoIdentifier);
+        if (found && CFGetTypeID(found) == CFStringGetTypeID())
+            CFStringGetCString(found, identifier, identifier_size, kCFStringEncodingUTF8);
+        found = CFDictionaryGetValue(info, kSecCodeInfoTeamIdentifier);
+        if (found && CFGetTypeID(found) == CFStringGetTypeID())
+            CFStringGetCString(found, team, team_size, kCFStringEncodingUTF8);
+        CFRelease(info);
+    }
+    CFRelease(guest);
+}
+
 typedef void (*senate_handle_message)(void *, const void *, size_t, void *, const uint32_t *);
 
 typedef struct {
@@ -174,9 +204,21 @@ static void release_call(senate_call *call) {
     free(call);
 }
 
+/* Why senate_xpc_call returned no reply (`status`). */
+enum {
+    SENATE_CALL_OK = 0,
+    SENATE_CALL_LOCAL = 1,       /* oversized frame, allocation, bad requirement text */
+    SENATE_CALL_LOOKUP = 2,      /* no such Mach service, or the connection was invalidated */
+    SENATE_CALL_REQUIREMENT = 3, /* the service's code did not satisfy the requirement */
+    SENATE_CALL_TIMEOUT = 4,
+    SENATE_CALL_INTERRUPTED = 5,
+    SENATE_CALL_MALFORMED = 6,
+};
+
 void *senate_xpc_call(const char *name, const char *requirement, const void *bytes,
-                      size_t len, size_t *reply_len) {
+                      size_t len, size_t *reply_len, int *status) {
     *reply_len = 0;
+    *status = SENATE_CALL_LOCAL;
     if (len > MAX_FRAME) return NULL;
     xpc_connection_t peer = xpc_connection_create_mach_service(name, NULL, 0);
     if (!peer) return NULL;
@@ -209,16 +251,27 @@ void *senate_xpc_call(const char *name, const char *requirement, const void *byt
     void *result = NULL;
     // A successful wait synchronizes with the sole writer of call->reply.
     if (dispatch_semaphore_wait(call->done,
-            dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC)) == 0 &&
-        xpc_get_type(call->reply) == XPC_TYPE_DICTIONARY) {
+            dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC)) != 0) {
+        *status = SENATE_CALL_TIMEOUT;
+    } else if (call->reply == XPC_ERROR_PEER_CODE_SIGNING_REQUIREMENT) {
+        *status = SENATE_CALL_REQUIREMENT;
+    } else if (call->reply == XPC_ERROR_CONNECTION_INVALID) {
+        *status = SENATE_CALL_LOOKUP;
+    } else if (xpc_get_type(call->reply) != XPC_TYPE_DICTIONARY) {
+        *status = SENATE_CALL_INTERRUPTED;
+    } else {
         xpc_object_t reply = call->reply;
         size_t size = 0;
         const void *data = xpc_dictionary_get_data(reply, "senate", &size);
+        *status = SENATE_CALL_MALFORMED;
         if (data && size <= MAX_FRAME) {
             result = malloc(size);
             if (result) {
                 memcpy(result, data, size);
                 *reply_len = size;
+                *status = SENATE_CALL_OK;
+            } else {
+                *status = SENATE_CALL_LOCAL;
             }
         }
     }

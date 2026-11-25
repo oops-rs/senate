@@ -532,7 +532,15 @@ pub(crate) mod macos {
             request: *const u8,
             size: usize,
             reply_size: *mut usize,
+            status: *mut i32,
         ) -> *mut u8;
+        fn senate_guest_signing(
+            pid: i32,
+            identifier: *mut c_char,
+            identifier_size: usize,
+            team: *mut c_char,
+            team_size: usize,
+        );
         fn senate_code_hash_path(
             path: *const c_char,
             requirement: *const c_char,
@@ -1022,19 +1030,50 @@ pub(crate) mod macos {
         home: &Path,
         require_pin: bool,
     ) -> Option<T> {
-        let name = CString::new(service).ok()?;
-        let mut requirement = requirement("dev.senate.daemon")?;
+        serde_json::from_slice(&exchange(service, message, home, require_pin).ok()?).ok()
+    }
+
+    /// Why the daemon's Mach service gave no reply.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum CallFailure {
+        /// This binary was built without a signing team.
+        NoTeam,
+        /// The pin is required and none is recorded.
+        NoPin,
+        /// An oversized message, an allocation failure, or a bad requirement.
+        Local,
+        /// No such Mach service, or the connection was invalidated.
+        Lookup,
+        /// The service's code did not satisfy the daemon requirement and pin.
+        Requirement,
+        TimedOut,
+        Interrupted,
+        Malformed,
+    }
+
+    /// One request and its raw reply over the daemon's Mach service. The
+    /// service must satisfy `dev.senate.daemon` with this build's team and,
+    /// when one is recorded, the installed daemon pin.
+    pub(crate) fn exchange(
+        service: &str,
+        message: &[u8],
+        home: &Path,
+        require_pin: bool,
+    ) -> Result<Vec<u8>, CallFailure> {
+        let name = CString::new(service).map_err(|_| CallFailure::Local)?;
+        let mut requirement = requirement("dev.senate.daemon").ok_or(CallFailure::NoTeam)?;
         if let Some(pin) = trusted_code(home) {
             requirement = CString::new(format!(
                 "{} and cdhash H\"{}\"",
-                requirement.to_str().ok()?,
+                requirement.to_str().map_err(|_| CallFailure::Local)?,
                 hex::encode(pin.daemon)
             ))
-            .ok()?;
+            .map_err(|_| CallFailure::Local)?;
         } else if require_pin {
-            return None;
+            return Err(CallFailure::NoPin);
         }
         let mut size = 0;
+        let mut status = 0;
         // The arguments remain live until the synchronous XPC call returns.
         let data = unsafe {
             senate_xpc_call(
@@ -1043,14 +1082,49 @@ pub(crate) mod macos {
                 message.as_ptr(),
                 message.len(),
                 &mut size,
+                &mut status,
             )
         };
-        let data = NonNull::new(data)?;
+        let Some(data) = NonNull::new(data) else {
+            return Err(match status {
+                2 => CallFailure::Lookup,
+                3 => CallFailure::Requirement,
+                4 => CallFailure::TimedOut,
+                5 => CallFailure::Interrupted,
+                6 => CallFailure::Malformed,
+                _ => CallFailure::Local,
+            });
+        };
         // C allocated the response with malloc, and `size` is its length.
-        let decoded =
-            unsafe { serde_json::from_slice(std::slice::from_raw_parts(data.as_ptr(), size)) }.ok();
+        let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr(), size) }.to_vec();
         unsafe { libc::free(data.as_ptr().cast()) };
-        decoded
+        Ok(bytes)
+    }
+
+    /// What a running process presents as its signing identifier and team,
+    /// valid or not, for diagnostics.
+    pub(crate) fn signing_of(pid: u32) -> (String, String) {
+        let Ok(pid) = i32::try_from(pid) else {
+            return Default::default();
+        };
+        let mut identifier = [0 as c_char; 256];
+        let mut team = [0 as c_char; 32];
+        // Both buffers are writable for their full sizes and NUL-terminated.
+        unsafe {
+            senate_guest_signing(
+                pid,
+                identifier.as_mut_ptr(),
+                identifier.len(),
+                team.as_mut_ptr(),
+                team.len(),
+            );
+        }
+        let text = |buffer: &[c_char]| {
+            unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        (text(&identifier), text(&team))
     }
 
     #[cfg(test)]

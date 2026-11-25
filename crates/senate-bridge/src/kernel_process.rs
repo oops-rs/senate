@@ -320,14 +320,28 @@ pub(crate) fn cwd(_pid: u32) -> io::Result<PathBuf> {
     ))
 }
 
+/// Whether the kernel refused to describe a process because another user
+/// owns it. Terminal apps start shells under the root-owned `/usr/bin/login`
+/// (Ghostty, Terminal, iTerm2 by default) and SSH under a root sshd, and
+/// macOS answers EPERM for them: the user's own chain ends there.
+pub(crate) fn foreign(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc::EPERM)
+}
+
 /// Return the verified prefix of a live process's parent chain. A reparented
-/// process has no link to its former parent through this lookup.
+/// process has no link to its former parent through this lookup, and the
+/// chain ends below a parent owned by another user ([`foreign`]): neither
+/// is something an agent can do without already being able to detach.
 pub(crate) fn ancestors(peer: u32, limit: usize) -> io::Result<Vec<ProcessIdentity>> {
     let mut child = inspect(peer)?;
     let origin = child.identity;
     let mut ancestors = Vec::new();
     while child.parent_pid > 1 && ancestors.len() < limit {
-        let parent = inspect(child.parent_pid)?;
+        let parent = match inspect(child.parent_pid) {
+            Ok(parent) => parent,
+            Err(error) if foreign(&error) => break,
+            Err(error) => return Err(error),
+        };
         if child
             .parent_birth
             .is_some_and(|birth| birth != parent.identity.birth)

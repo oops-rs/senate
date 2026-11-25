@@ -67,25 +67,158 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-fn trusted_origin(pid: u32) -> Option<ProofKind> {
-    let ancestry = kernel_process::ancestors(pid, 64).ok()?;
-    let pid = i32::try_from(pid).ok()?;
-    let responsible =
-        u32::try_from(unsafe { responsibility_get_pid_responsible_for_pid(pid) }).ok()?;
-    for owner in ancestry.iter().map(|p| p.pid).chain([responsible]) {
-        if kernel_process::executable(owner).is_ok_and(|path| {
-            matches!(
-                path.to_str(),
-                Some("/usr/sbin/sshd" | "/usr/libexec/sshd-session")
-            )
-        }) {
-            return Some(ProofKind::RemoteOperator);
+/// Why the daemon issued no proof. Sent back to the requesting process (the
+/// same user) and logged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub(crate) enum Refusal {
+    /// The claim was not a proof request this daemon understands.
+    BadClaim,
+    /// The message came from another user or from launchd.
+    WrongUser,
+    /// The kernel could not describe the requesting process or its parents.
+    ProcessUnreadable {
+        detail: String,
+    },
+    CoalitionUnreadable,
+    /// The requester runs inside a Senate-hosted agent's coalition.
+    HostedAgent,
+    /// No known terminal app, SSH login or pinned app stands behind it.
+    NoTrustedOrigin {
+        detail: String,
+    },
+    /// Only the pinned Senate app may ask for an app proof.
+    NotTheApp,
+    /// A process changed while it was being checked.
+    ProcessChanged,
+    Busy,
+}
+
+impl Refusal {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::BadClaim => "bad_claim",
+            Self::WrongUser => "wrong_user",
+            Self::ProcessUnreadable { .. } => "process_unreadable",
+            Self::CoalitionUnreadable => "coalition_unreadable",
+            Self::HostedAgent => "hosted_agent",
+            Self::NoTrustedOrigin { .. } => "no_trusted_origin",
+            Self::NotTheApp => "not_the_app",
+            Self::ProcessChanged => "process_changed",
+            Self::Busy => "busy",
         }
     }
-    let owner = kernel_process::inspect(responsible).ok()?.identity;
-    let requirement = c"((anchor apple and identifier \"com.apple.Terminal\") or (anchor apple generic and identifier \"com.mitchellh.ghostty\" and certificate leaf[subject.OU] = \"24VZTF6M5V\") or (anchor apple generic and identifier \"com.googlecode.iterm2\" and certificate leaf[subject.OU] = \"H7V7XYVQ7D\"))";
-    macos::guest_hash(None, responsible, requirement)?;
-    (kernel_process::inspect(responsible).ok()?.identity == owner).then_some(ProofKind::Operator)
+}
+
+/// The daemon's reply: a ticket as a bare string (what 0.13.0 clients
+/// decode), or why there is none.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Answer {
+    Ticket(String),
+    Refused { refused: Refusal },
+}
+
+const TERMINALS: &std::ffi::CStr = c"((anchor apple and identifier \"com.apple.Terminal\") or (anchor apple generic and identifier \"com.mitchellh.ghostty\" and certificate leaf[subject.OU] = \"24VZTF6M5V\") or (anchor apple generic and identifier \"com.googlecode.iterm2\" and certificate leaf[subject.OU] = \"H7V7XYVQ7D\"))";
+
+fn is_sshd(pid: u32) -> bool {
+    kernel_process::executable(pid).is_ok_and(|path| {
+        matches!(
+            path.to_str(),
+            Some("/usr/sbin/sshd" | "/usr/libexec/sshd-session")
+        )
+    })
+}
+
+/// Whether an SSH login stands behind `pid`: sshd among its own ancestors,
+/// as the first process above them (a root sshd ends the user's readable
+/// chain), or as the process macOS holds responsible for it. `None` when
+/// the chain cannot be read.
+pub(crate) fn behind_ssh(pid: u32) -> Option<bool> {
+    let ancestry = kernel_process::ancestors(pid, 64).ok()?;
+    Some(ssh_in(pid, &ancestry, responsible_for(pid)))
+}
+
+fn ssh_in(pid: u32, ancestry: &[ProcessIdentity], responsible: Option<u32>) -> bool {
+    let top = ancestry.last().map_or(pid, |process| process.pid);
+    let above = kernel_process::inspect(top)
+        .ok()
+        .map(|process| process.parent_pid)
+        .filter(|parent| *parent > 1);
+    ancestry
+        .iter()
+        .map(|process| process.pid)
+        .chain(above)
+        .chain(responsible)
+        .any(is_sshd)
+}
+
+fn responsible_for(pid: u32) -> Option<u32> {
+    let pid = i32::try_from(pid).ok()?;
+    // A plain query of the kernel's responsibility record for a PID.
+    u32::try_from(unsafe { responsibility_get_pid_responsible_for_pid(pid) })
+        .ok()
+        .filter(|pid| *pid > 0)
+}
+
+/// What a person reads about a process: its path, signing identifier and
+/// team, as far as they can be read.
+fn describe(pid: u32) -> String {
+    let path = kernel_process::executable(pid).map_or_else(
+        |_| "an unreadable executable".to_owned(),
+        |path| path.display().to_string(),
+    );
+    let (identifier, team) = macos::signing_of(pid);
+    let or_none = |text: String| {
+        if text.is_empty() {
+            "none".to_owned()
+        } else {
+            text
+        }
+    };
+    format!(
+        "{path} (pid {pid}, identifier {}, team {})",
+        or_none(identifier),
+        or_none(team)
+    )
+}
+
+fn trusted_origin(pid: u32) -> Result<ProofKind, Refusal> {
+    let ancestry =
+        kernel_process::ancestors(pid, 64).map_err(|error| Refusal::ProcessUnreadable {
+            detail: format!("the requesting process's parents could not be read: {error}"),
+        })?;
+    let responsible = responsible_for(pid);
+    if ssh_in(pid, &ancestry, responsible) {
+        return Ok(ProofKind::RemoteOperator);
+    }
+    let responsible = responsible.ok_or_else(|| Refusal::NoTrustedOrigin {
+        detail: format!("macOS names no process responsible for pid {pid}"),
+    })?;
+    let owner = kernel_process::inspect(responsible)
+        .map_err(|error| Refusal::NoTrustedOrigin {
+            detail: format!(
+                "the process macOS holds responsible for this shell (pid {responsible}) is gone or unreadable ({error}); \
+                 a tmux or screen server can outlive the terminal app that started it — start a new one from your terminal"
+            ),
+        })?
+        .identity;
+    if macos::guest_hash(None, responsible, TERMINALS).is_none() {
+        return Err(Refusal::NoTrustedOrigin {
+            detail: format!(
+                "the app responsible for this shell is {}, not Terminal, Ghostty or iTerm2 as signed by their developers",
+                describe(responsible)
+            ),
+        });
+    }
+    if kernel_process::inspect(responsible)
+        .ok()
+        .map(|process| process.identity)
+        != Some(owner)
+    {
+        return Err(Refusal::ProcessChanged);
+    }
+    Ok(ProofKind::Operator)
 }
 
 fn coalition(pid: i32, version: Option<u32>) -> std::io::Result<u64> {
@@ -199,43 +332,53 @@ impl Scope {
         Ok((scope, macos::Listener(listener)))
     }
 
-    fn issue(&self, token: [u32; 8], request: [u8; 32], kind: ProofKind) -> Option<String> {
+    fn issue(
+        &self,
+        token: [u32; 8],
+        request: [u8; 32],
+        kind: ProofKind,
+    ) -> Result<String, Refusal> {
         if token[1] != rustix::process::geteuid().as_raw() {
-            return None;
+            return Err(Refusal::WrongUser);
         }
-        let pid = i32::try_from(token[5]).ok().filter(|pid| *pid > 1)?;
-        let sender = kernel_process::inspect(u32::try_from(pid).ok()?)
-            .ok()?
+        let pid = i32::try_from(token[5])
+            .ok()
+            .filter(|pid| *pid > 1)
+            .ok_or(Refusal::WrongUser)?;
+        let unreadable = |error: std::io::Error| Refusal::ProcessUnreadable {
+            detail: format!("pid {pid}: {error}"),
+        };
+        let sender = kernel_process::inspect(pid.unsigned_abs())
+            .map_err(unreadable)?
             .identity;
-        let scope = coalition(pid, Some(token[7]))
-            .map_err(|error| {
-                tracing::debug!(pid, %error, "could not attest caller coalition");
-            })
-            .ok()?;
+        let scope = coalition(pid, Some(token[7])).map_err(|_| Refusal::CoalitionUnreadable)?;
         if kind != ProofKind::Session && self.hosted.contains(&scope) {
-            tracing::debug!(pid, scope, "refused person proof for hosted coalition");
-            return None;
+            return Err(Refusal::HostedAgent);
         }
         let kind = match kind {
             ProofKind::Operator | ProofKind::App if macos::trusted_app(&self.home, &token) => {
                 ProofKind::App
             }
             ProofKind::Operator => trusted_origin(sender.pid)?,
-            ProofKind::App | ProofKind::RemoteOperator => return None,
+            ProofKind::App | ProofKind::RemoteOperator => return Err(Refusal::NotTheApp),
             ProofKind::Session => ProofKind::Session,
         };
-        if kernel_process::inspect(sender.pid).ok()?.identity != sender {
-            return None;
+        if kernel_process::inspect(sender.pid)
+            .map_err(unreadable)?
+            .identity
+            != sender
+        {
+            return Err(Refusal::ProcessChanged);
         }
         let app_audit = (kind == ProofKind::App).then_some(token);
-        let mut receipts = self.receipts.lock().ok()?;
+        let mut receipts = self.receipts.lock().map_err(|_| Refusal::Busy)?;
         let now = Instant::now();
         receipts.retain(|_, proof| proof.expires > now);
         if receipts.len() >= LIMIT {
-            return None;
+            return Err(Refusal::Busy);
         }
         let mut token = [0_u8; 32];
-        getrandom::fill(&mut token).ok()?;
+        getrandom::fill(&mut token).map_err(|_| Refusal::Busy)?;
         let token = hex::encode(token);
         receipts.insert(
             token.clone(),
@@ -248,7 +391,7 @@ impl Scope {
             },
         );
         tracing::debug!(pid, scope, "issued one-time person scope proof");
-        Some(token)
+        Ok(token)
     }
 
     pub(crate) fn consume(
@@ -289,32 +432,120 @@ extern "C" fn handle(
     let bytes = unsafe { std::slice::from_raw_parts(bytes, len) };
     let audit = unsafe { *audit.cast::<[u32; 8]>() };
     tracing::debug!("received scope proof request");
-    let proof = serde_json::from_slice::<Claim>(bytes)
-        .ok()
-        .and_then(|claim| scope.issue(audit, claim.request, claim.kind));
-    if let Ok(bytes) = serde_json::to_vec(&proof) {
+    let (kind, answer) = match serde_json::from_slice::<Claim>(bytes) {
+        Ok(claim) => (
+            Some(claim.kind),
+            scope.issue(audit, claim.request, claim.kind),
+        ),
+        Err(_) => (None, Err(Refusal::BadClaim)),
+    };
+    let answer = match answer {
+        Ok(ticket) => Answer::Ticket(ticket),
+        Err(refused) => {
+            let detail = match &refused {
+                Refusal::ProcessUnreadable { detail } | Refusal::NoTrustedOrigin { detail } => {
+                    detail.as_str()
+                }
+                _ => "",
+            };
+            tracing::warn!(
+                pid = audit[5],
+                ?kind,
+                stage = refused.code(),
+                detail,
+                "refused a caller proof"
+            );
+            Answer::Refused { refused }
+        }
+    };
+    if let Ok(bytes) = serde_json::to_vec(&answer) {
         unsafe { macos::senate_xpc_send_reply(reply, bytes.as_ptr(), bytes.len()) };
     }
 }
 
-pub(crate) async fn prove(path: &Path, request: &[u8], kind: ProofKind) -> Option<String> {
-    app_confirmation::team()?;
-    let home = path.parent()?.to_owned();
+/// Why a request went without a proof of its caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProofFailure {
+    /// The socket path has no parent directory to name the service by.
+    NoHome,
+    Call(macos::CallFailure),
+    TimedOut,
+    /// The daemon answered, and declined.
+    Refused(Refusal),
+    /// The daemon declined without a reason (0.13.0 answers `null`).
+    Unexplained,
+}
+
+impl ProofFailure {
+    /// One sentence for the person, naming the stage.
+    pub(crate) fn sentence(&self, service: &str) -> String {
+        use macos::CallFailure;
+        let why = match self {
+            Self::NoHome => "the daemon socket has no home directory".to_owned(),
+            Self::Call(CallFailure::NoTeam) => {
+                "this senate was built without a signing team, so it cannot prove where it runs"
+                    .to_owned()
+            }
+            Self::Call(CallFailure::Lookup) => format!(
+                "the daemon's proof service {service} was not found: the signed daemon is not running as the launchd service for this home"
+            ),
+            Self::Call(CallFailure::Requirement | CallFailure::NoPin) => {
+                "the running daemon's code did not satisfy this build's signing requirement and the installed daemon pin; reinstall the service from your terminal"
+                    .to_owned()
+            }
+            Self::Call(CallFailure::TimedOut) | Self::TimedOut => {
+                "the daemon's proof service did not answer in time".to_owned()
+            }
+            Self::Call(failure) => format!("the daemon's proof service failed ({failure:?})"),
+            Self::Refused(Refusal::HostedAgent) => {
+                "this command runs inside a Senate-hosted agent session, and an agent cannot act as the person: ask the person to run it from their own terminal or the Senate app"
+                    .to_owned()
+            }
+            Self::Refused(Refusal::NoTrustedOrigin { detail }) => {
+                format!("your terminal could not be verified: {detail}")
+            }
+            Self::Refused(Refusal::ProcessUnreadable { detail }) => {
+                format!("the daemon could not read this process: {detail}")
+            }
+            Self::Refused(refused) => format!("the daemon refused the proof ({})", refused.code()),
+            Self::Unexplained => {
+                "the daemon refused the proof without a reason; it may be an older daemon".to_owned()
+            }
+        };
+        format!("could not prove which process sent this request: {why}")
+    }
+}
+
+/// Ask the daemon for a one-time proof binding `request` to this process.
+pub(crate) async fn prove(
+    path: &Path,
+    request: &[u8],
+    kind: ProofKind,
+) -> Result<String, (ProofFailure, String)> {
+    let home = path
+        .parent()
+        .ok_or((ProofFailure::NoHome, String::new()))?
+        .to_owned();
     let service = service(&home);
+    let named = service.clone();
     let bytes = serde_json::to_vec(&Claim {
         kind,
         request: Sha256::digest(request).into(),
     })
-    .ok()?;
-    tokio::time::timeout(
+    .map_err(|_| (ProofFailure::Unexplained, named.clone()))?;
+    let reply = tokio::time::timeout(
         Duration::from_secs(2),
-        tokio::task::spawn_blocking(move || {
-            macos::call::<Option<String>>(&service, &bytes, &home, false).flatten()
-        }),
+        tokio::task::spawn_blocking(move || macos::exchange(&service, &bytes, &home, false)),
     )
     .await
-    .ok()?
-    .ok()?
+    .map_err(|_| (ProofFailure::TimedOut, named.clone()))?
+    .map_err(|_| (ProofFailure::TimedOut, named.clone()))?
+    .map_err(|failure| (ProofFailure::Call(failure), named.clone()))?;
+    match serde_json::from_slice::<Option<Answer>>(&reply) {
+        Ok(Some(Answer::Ticket(ticket))) => Ok(ticket),
+        Ok(Some(Answer::Refused { refused })) => Err((ProofFailure::Refused(refused), named)),
+        Ok(None) | Err(_) => Err((ProofFailure::Unexplained, named)),
+    }
 }
 
 #[cfg(test)]
@@ -341,17 +572,75 @@ mod tests {
         let own_coalition = coalition(pid, Some(audit[7])).unwrap();
         let request = Sha256::digest(b"fixture").into();
         let eligible = Scope::default();
-        assert!(eligible.issue(audit, request, ProofKind::Session).is_some());
-        assert!(eligible.issue(audit, request, ProofKind::App).is_none());
+        assert!(eligible.issue(audit, request, ProofKind::Session).is_ok());
+        assert_eq!(
+            eligible.issue(audit, request, ProofKind::App),
+            Err(Refusal::NotTheApp)
+        );
 
         let hosted = Scope {
             hosted: HashSet::from([own_coalition]),
             ..Scope::default()
         };
-        assert!(hosted.issue(audit, request, ProofKind::Operator).is_none());
+        assert_eq!(
+            hosted.issue(audit, request, ProofKind::Operator),
+            Err(Refusal::HostedAgent)
+        );
 
         audit[7] ^= 1;
-        assert!(eligible.issue(audit, request, ProofKind::Session).is_none());
+        assert_eq!(
+            eligible.issue(audit, request, ProofKind::Session),
+            Err(Refusal::CoalitionUnreadable)
+        );
+    }
+
+    /// A terminal app starts its shells under the root-owned
+    /// `/usr/bin/login`, whose details the kernel withholds from the user.
+    /// The user's chain ends there instead of failing the whole check, so
+    /// a shell in Ghostty or Terminal can reach its terminal app.
+    #[test]
+    fn a_root_login_above_the_shell_ends_the_chain() {
+        let login = |pid: u32| {
+            kernel_process::executable(pid).is_ok_and(|path| path == Path::new("/usr/bin/login"))
+                && kernel_process::inspect(pid).is_err_and(|error| kernel_process::foreign(&error))
+        };
+        // Find a shell of this user whose parent is a root `login`.
+        let Some(shell) = (2..100_000_u32).find(|pid| {
+            kernel_process::inspect(*pid).is_ok_and(|process| login(process.parent_pid))
+        }) else {
+            eprintln!("no terminal shell under /usr/bin/login on this machine; skipped");
+            return;
+        };
+        let chain = kernel_process::ancestors(shell, 64).expect("readable up to login");
+        assert!(chain.is_empty(), "the chain stops at the root login");
+        assert_eq!(behind_ssh(shell), Some(false));
+    }
+
+    #[test]
+    fn answers_keep_the_bare_ticket_older_clients_decode() {
+        let ticket = serde_json::to_vec(&Answer::Ticket("abc".into())).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Option<String>>(&ticket).unwrap(),
+            Some("abc".into())
+        );
+        let refused = serde_json::to_vec(&Answer::Refused {
+            refused: Refusal::NoTrustedOrigin {
+                detail: "why".into(),
+            },
+        })
+        .unwrap();
+        assert!(serde_json::from_slice::<Option<String>>(&refused).is_err());
+        assert!(matches!(
+            serde_json::from_slice::<Option<Answer>>(&refused).unwrap(),
+            Some(Answer::Refused {
+                refused: Refusal::NoTrustedOrigin { .. }
+            })
+        ));
+        assert!(
+            serde_json::from_slice::<Option<Answer>>(b"null")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

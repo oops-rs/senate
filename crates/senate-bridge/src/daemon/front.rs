@@ -19,6 +19,18 @@
 use super::*;
 use crate::ipc::{DocketReply, NativeAuthorityDetails, PresidesReply, Presiding, SenateDocket};
 
+/// What ties a legacy session to the run it had before the upgrade.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LegacyAnchor {
+    /// Its terminal host, by id: a restore starts a new one.
+    Host(String),
+    /// Its runtime process, as recorded by the old daemon.
+    Process(kernel_process::BoundProcess),
+    /// Nothing recorded: legacy while it stays live.
+    Unanchored,
+}
+
 pub(crate) struct Front {
     senates: Vec<Arc<Shared>>,
     pub(super) observe: Option<Arc<senate_observe::Registry>>,
@@ -137,9 +149,91 @@ impl Front {
         Ok(crate::host::actor_owner(&paths, &host))
     }
 
+    /// Record each live session that has no process binding: one that a
+    /// daemon from before the bindings started (0.12.3 and earlier). It
+    /// keeps working as it did then, advisorily, until it is restarted; a
+    /// session this daemon starts is always bound. Called once at startup.
+    pub(crate) fn mark_legacy_sessions(&self) -> Result<usize, StoreError> {
+        let shared = self.primary();
+        let mut marked = 0;
+        for session in shared.store.live_sessions()? {
+            if Shared::is_companion(&session) {
+                continue;
+            }
+            let bound = self
+                .hosted_actor(&session.session_id, session.runtime)
+                .ok()
+                .flatten()
+                .is_some()
+                || shared
+                    .store
+                    .verified_native_owner(&session.session_id)?
+                    .is_some();
+            if bound {
+                continue;
+            }
+            let anchor = match shared.store.session_host(&session.session_id)? {
+                Some(host) => LegacyAnchor::Host(host.to_string()),
+                None => session
+                    .claude_pid
+                    .and_then(|pid| kernel_process::inspect(pid).ok())
+                    .and_then(|process| {
+                        kernel_process::BoundProcess::capture(process.identity).ok()
+                    })
+                    .map_or(LegacyAnchor::Unanchored, LegacyAnchor::Process),
+            };
+            let anchor = serde_json::to_string(&anchor)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            shared
+                .store
+                .mark_legacy_session(&session.session_id, &anchor)?;
+            marked += 1;
+        }
+        Ok(marked)
+    }
+
+    /// Whether `session` is one that predates process bindings and still
+    /// runs as it did then: the same host, or the same runtime process.
+    pub(crate) fn is_legacy(&self, session: &Session) -> bool {
+        self.primary().is_legacy(session)
+    }
+}
+
+impl Shared {
+    /// [`Front::is_legacy`].
+    pub(crate) fn is_legacy(&self, session: &Session) -> bool {
+        let store = &self.store;
+        let Some(anchor) = store
+            .legacy_anchor(&session.session_id)
+            .ok()
+            .flatten()
+            .and_then(|anchor| serde_json::from_str::<LegacyAnchor>(&anchor).ok())
+        else {
+            return false;
+        };
+        session.is_live()
+            && match anchor {
+                LegacyAnchor::Host(host) => store
+                    .session_host(&session.session_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|current| current.to_string() == host),
+                LegacyAnchor::Process(process) => process.live(),
+                LegacyAnchor::Unanchored => true,
+            }
+    }
+}
+
+impl Front {
+    /// The live session `selector` names, when the caller may act for it:
+    /// `peer` proved its process with a session proof, and the session's
+    /// bound process contains it. A legacy session ([`Front::is_legacy`])
+    /// is served as before the bindings, also for a caller without a
+    /// proof (`unproven`, its Unix peer): a 0.12.3 MCP server sends none.
     pub(super) fn verify_selector_owner(
         &self,
         peer: Option<u32>,
+        unproven: Option<u32>,
         selector: &SessionSelector,
     ) -> Result<String, IpcError> {
         let no_owner =
@@ -147,6 +241,9 @@ impl Front {
         let (_, session) = self
             .locate_with_activity(selector, false)
             .ok_or_else(no_owner)?;
+        if peer.or(unproven).is_some() && self.is_legacy(&session) {
+            return Ok(session.session_id);
+        }
         self.verify_session_instance(peer, &session)?;
         Ok(session.session_id)
     }
@@ -684,7 +781,7 @@ impl Front {
             request => {
                 if !approval_guard::request_effect(&request).requires_operator()
                     && let Some(selector) = approval_guard::session_selector(&request)
-                    && let Err(error) = self.verify_selector_owner(session_peer, selector)
+                    && let Err(error) = self.verify_selector_owner(session_peer, None, selector)
                 {
                     return Reply::err(error);
                 }

@@ -826,6 +826,16 @@ enum ServiceCmd {
     },
     /// Show whether the service is installed, loaded and running, and where it logs.
     Status,
+    /// Record the daemon and app code pins in the Senate home, as install
+    /// does, without touching any service: for a staged home
+    /// (deploy/stage-check.sh).
+    #[command(hide = true)]
+    Pin {
+        #[arg(long, value_name = "PATH")]
+        senated: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        app: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3605,6 +3615,24 @@ fn run_service(command: ServiceCmd, output: Output) -> anyhow::Result<()> {
                 service::apply_uninstall(&plan, &service::SystemManager)?;
             }
             print!("{}", service::render_uninstall(&plan, yes, locale));
+        }
+        ServiceCmd::Pin { senated, app } => {
+            let paths = Paths::new(&spec.senate_home);
+            paths.ensure_home()?;
+            #[cfg(target_os = "macos")]
+            {
+                crate::app_confirmation::macos::install_pins(
+                    paths.home(),
+                    app.as_deref(),
+                    &std::path::absolute(senated)?,
+                )?;
+                println!("pinned in {}", paths.home().display());
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (senated, app);
+                anyhow::bail!("code pins are macOS only");
+            }
         }
         ServiceCmd::Status => {
             let status = service::status(&spec, &service::SystemManager);

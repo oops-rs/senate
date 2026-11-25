@@ -55,16 +55,31 @@ Mach sender's process generation for five seconds and consumes it once.
 Managed launchd hosting persists its coalition before publishing the bridge.
 Existing shared Codex backends remain advisory until restored to dedicated mode.
 
-From an operator terminal in this worktree, with the signed fixture binaries
-built from the same revision, run:
+Terminal apps start shells under the root-owned `/usr/bin/login`, and SSH
+under a root sshd. macOS withholds their process details from the user
+(EPERM), so the user's verified chain ends below them, as it does at a
+reparenting. The SSH check also looks at the process just above that chain.
+
+When the daemon refuses a proof it answers with the stage (hosted agent, no
+trusted origin with the responsible app's path, identifier and team,
+unreadable process) and logs it at WARN. The CLI names the stage (no signing
+team, service lookup, the daemon's code requirement, timeout, refusal) and
+does not send a request that needs a proof without one.
+
+Before installing a release, run from your own terminal, in a checkout of the
+same revision:
 
 ```sh
-python3 deploy/check-person-terminal.py target/person-guard-scope-fixture
+deploy/stage-check.sh build/release [~/.senate/bin/senate]
 ```
 
-Expect `PASS: person terminal accepted; isolated grant list is empty`.
-The check uses a fresh home and loopback port, and unloads the disposable
-launchd job on exit.
+It starts the signed daemon as a disposable launchd job with its own label
+and home under /tmp, next to the live daemon, and never touches `~/.senate`.
+It checks an operator request, a sensitive request that asks you to
+authenticate, a staged hosted session's MCP tools, that chair spawning a
+member through MCP, and a 0.12.3-shaped session's hook and tools (with the
+old client when given). It cleans up by label and recorded PIDs and ends
+with `READY TO INSTALL` or `NOT READY: <step>`.
 
 Build the launcher as a normal user with
 `sh deploy/build-host-guard.sh target/host-guard`. An administrator explicitly
@@ -102,9 +117,14 @@ authorization. Routine CLI speech uses the operator proof without a presence
 prompt. A verified session selector grants the authority of that session.
 An explicit person byline, memory correction or deletion, and thread takeover
 require operator proof even when a session is named. The daemon checks the
-final author before posting. Adding or removing a secretary, changing roles
-or seats, and stopping or restoring a hosted terminal require presence.
-Creating an ordinary hosted seat requires operator proof.
+final author before posting. As the person, adding or removing a secretary,
+changing roles or seats, and stopping or restoring a hosted terminal require
+presence, and creating an ordinary hosted seat requires operator proof.
+A role holder's act within its role is not the person's: a chair spawning,
+restoring or stopping its committee's members, and the Speaker's office's
+desk tools (forward, refuse, alias, unseat, naming a chair, opening a
+committee) run on the verified session's proof and the handlers' role and
+scope checks. Appointing a desk secretary still requires presence.
 
 New terminal hosts admit daemon control commands by process instance and
 check one-use viewer tickets with a five-second lifetime. The ticket binds
@@ -120,6 +140,13 @@ terminal prompt.
 Writable attach from a paired device requires fresh local authentication
 on the hosting Mac. The host binds it to the requested hosted terminal and
 names the paired device. A watch still uses the device's read-only scope.
+
+An upgrade does not strand running sessions. At startup the daemon records
+each live session with no process binding (one started before bindings
+existed) as legacy, tied to its host or runtime process. It is served as
+0.12.3 served it, also for clients that attach no proof, until it restarts;
+status and doctor say how many. A rollback opens the same state database:
+the new tables are additions 0.12.3 ignores.
 
 Existing pre-ticket hosts keep their old sockets until they restart. The
 installer, session list, app, status and doctor identify that condition.

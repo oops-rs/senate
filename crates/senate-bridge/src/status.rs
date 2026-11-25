@@ -496,6 +496,23 @@ fn advisories(view: &StatusView) -> Vec<String> {
             "A Codex session that was live before restore stays live when the hosted terminal closes because the daemon cannot tell whether a native client remains.",
         ).into());
     }
+    // One line for every host that needs a restart; `senate session list
+    // --verbose` names them.
+    let restart = view
+        .sessions
+        .iter()
+        .filter(|session| view.host_health.contains_key(&session.session_id))
+        .count();
+    if restart > 0 {
+        lines.push(match l {
+            Locale::Zh => format!(
+                "{restart} 个托管宿主需要重启才受保护（senate session list --verbose 列出）：senate session restart --all-outdated --dry-run"
+            ),
+            Locale::En => format!(
+                "{restart} hosted terminal(s) need a restart to be protected (senate session list --verbose names them): senate session restart --all-outdated --dry-run"
+            ),
+        });
+    }
     for session in &view.sessions {
         let seat = &session.agent;
         if let Some(at) = view
@@ -508,9 +525,6 @@ fn advisories(view: &StatusView) -> Vec<String> {
                 format!("托管 Claude 席位 {seat} 可能漏掉了工具授权或上下文钩子。最近一次钩子上报丢弃于 {last}。"),
                 format!("Hosted Claude seat {seat} may have missed an approval or context hook. Its last hook report was dropped at {last}."),
             ));
-        }
-        if let Some(health) = view.host_health.get(&session.session_id) {
-            lines.push(format!("{seat}: {}.", health.notice()));
         }
         if view.hosted_viewer_unavailable.contains(&session.session_id) {
             lines.push(l.pick(

@@ -27,6 +27,12 @@ use crate::host;
 /// The most ancestors walked; a deeper chain is refused.
 const DEPTH: usize = 64;
 pub(super) const APP_CONFIRMATION: &str = "This operation requires confirmation in the signed Senate app or local user authentication on the hosting Mac. Use the signed app there";
+/// A person-only request arrived without a caller proof. A current CLI
+/// does not send one so; an older or unsigned client does.
+#[cfg(target_os = "macos")]
+const NO_PROOF: &str = "the daemon could not tell which process sent this request: it carried no caller proof (an unsigned or older senate CLI?). Run this senate's own CLI from your terminal, or use the Senate app";
+#[cfg(not(target_os = "macos"))]
+const NO_PROOF: &str = "the daemon could not tell which process sent this request";
 /// Executable names of the coding runtimes.
 const RUNTIMES: [&str; 3] = ["claude", "codex", "agy"];
 
@@ -126,6 +132,29 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
         Request::Take { .. } | Request::MemoryEdit { .. } | Request::Say { .. } => PersonWrite,
 
         Request::OpenCommittee { .. } | Request::Seen { .. } | Request::Watch { .. } => Operator,
+
+        // A role holder's act within its role: a chair spawning, restoring
+        // or stopping its committee's members; the Speaker's office (its
+        // agent or a secretary) working the desk. The session's verified
+        // process carries the authority, and each handler checks the role
+        // and its scope. Without a session the same request is the person's.
+        Request::Spawn {
+            session,
+            secretary: false,
+            ..
+        }
+        | Request::Restore { session, .. }
+        | Request::Stop { session, .. }
+        | Request::DeskOpenCommittee { session, .. }
+        | Request::SetChair { session, .. }
+        | Request::SpeakerAlias { session, .. }
+        | Request::SpeakerUnseat { session, .. }
+        | Request::Forward { session, .. }
+        | Request::Refuse { session, .. }
+            if session != &SessionSelector::default() =>
+        {
+            SessionOrRead
+        }
 
         Request::DeskWorker { .. }
         | Request::AuthorizeNativeAuthority { .. }
@@ -663,20 +692,15 @@ impl Front {
                 )
                 .await;
         }
-        if peer.remote_operator
-            || requester_pid.is_none_or(|pid| {
-                kernel_process::ancestors(pid, DEPTH).map_or(true, |ancestors| {
-                    ancestors.into_iter().any(|process| {
-                        kernel_process::executable(process.pid).is_ok_and(|path| {
-                            matches!(
-                                path.to_str(),
-                                Some("/usr/sbin/sshd" | "/usr/libexec/sshd-session")
-                            )
-                        })
-                    })
-                })
-            })
-        {
+        let Some(requester) = requester_pid else {
+            tracing::warn!("refused a confirmation: the request carried no proof of its caller");
+            return Reply::err(refusal(NO_PROOF));
+        };
+        if peer.remote_operator || crate::mac_scope::behind_ssh(requester) != Some(false) {
+            tracing::warn!(
+                pid = requester,
+                "refused a confirmation: the requester is behind SSH or unreadable"
+            );
             return Reply::err(refusal(APP_CONFIRMATION));
         }
         let view = match &request {
@@ -939,9 +963,8 @@ impl Front {
         guidance: &str,
     ) -> Result<(), IpcError> {
         let Some(peer) = peer else {
-            return Err(refusal(
-                "the daemon could not tell which process sent this request",
-            ));
+            tracing::warn!(guidance, "refused person-only IPC: no caller proof");
+            return Err(refusal(NO_PROOF));
         };
         let me = std::process::id();
         // The daemon's own in-process clients (tests drive it so).
@@ -964,7 +987,7 @@ impl Front {
         let chain = match ancestry(peer, process).await {
             Ok(chain) => chain,
             Err(ProcessLookup::Descriptors) => return Err(fd_refusal(peer)),
-            Err(ProcessLookup::Unreadable) => {
+            Err(ProcessLookup::Unreadable | ProcessLookup::Foreign) => {
                 tracing::warn!(
                     peer,
                     guidance,
@@ -1037,12 +1060,16 @@ impl Shared {
 enum ProcessLookup {
     Unreadable,
     Descriptors,
+    /// Owned by another user (a root `login` or `sshd` above a shell).
+    Foreign,
 }
 
 impl From<std::io::Error> for ProcessLookup {
     fn from(error: std::io::Error) -> Self {
         if crate::fd::exhausted(&error) {
             Self::Descriptors
+        } else if kernel_process::foreign(&error) {
+            Self::Foreign
         } else {
             Self::Unreadable
         }
@@ -1084,7 +1111,12 @@ where
             chain.push((pid, String::new()));
             return Ok(chain);
         }
-        let (parent, name) = read(pid).await?;
+        let (parent, name) = match read(pid).await {
+            // The user's own chain ends below another user's process, as
+            // the kernel's own ancestry walk does.
+            Err(ProcessLookup::Foreign) if pid != start => return Ok(chain),
+            result => result?,
+        };
         chain.push((pid, name));
         pid = parent;
     }
@@ -1276,6 +1308,18 @@ mod tests {
             async move { found.ok_or(ProcessLookup::Unreadable) }
         };
         assert_eq!(ancestry(40, read).await, Err(ProcessLookup::Unreadable));
+        // Another user's process (a root `login` under a terminal app) ends
+        // the user's chain; the caller itself must still be readable.
+        let read = |pid: u32| async move {
+            match pid {
+                40 => Ok((30, "senate".to_owned())),
+                30 => Ok((20, "zsh".to_owned())),
+                _ => Err(std::io::Error::from_raw_os_error(libc::EPERM).into()),
+            }
+        };
+        assert_eq!(pids(ancestry(40, read).await.unwrap()), vec![40, 30]);
+        let read = |_| async move { Err(std::io::Error::from_raw_os_error(libc::EPERM).into()) };
+        assert_eq!(ancestry(40, read).await, Err(ProcessLookup::Foreign));
     }
 
     #[tokio::test]
@@ -1296,6 +1340,8 @@ mod tests {
         let me = std::process::id();
         let chain = ancestry(me, process).await.unwrap();
         assert_eq!(chain.first().map(|(pid, _)| *pid), Some(me));
-        assert_eq!(chain.last().map(|(pid, _)| *pid), Some(1));
+        // To launchd, or to a root `login` when run from a terminal app.
+        let (top, _) = chain.last().unwrap();
+        assert!(*top == 1 || process(*top).await.is_ok());
     }
 }
