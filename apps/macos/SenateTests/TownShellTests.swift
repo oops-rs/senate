@@ -35,6 +35,17 @@ import SenateCore
         }
     }
 
+    // N3 (review 3): a hostile Retry-After never reaches a sleep that traps.
+    @Test func retryAfterIsParsedDefensively() {
+        #expect(ObserveClient.retryAfterSeconds("5") == 5)
+        #expect(ObserveClient.retryAfterSeconds(" 0 ") == 1)
+        #expect(ObserveClient.retryAfterSeconds("99999") == 300)
+        for bad in ["nan", "NaN", "inf", "-inf", "-5", "1e9", "4.5", "Wed, 21 Oct 2015 07:28:00 GMT", "", "9999999999999999999", "٣"] {
+            #expect(ObserveClient.retryAfterSeconds(bad) == nil, "\(bad)")
+        }
+        #expect(ObserveClient.retryAfterSeconds(nil) == nil)
+    }
+
     // L3: a grant planted in the Keychain is not used unless the daemon issued it to Town.
     @Test func aPlantedGrantIsIgnored() {
         let live = ObserveGrantInfo(id: "g1", name: "Town", expiresAt: "2099-01-01T00:00:00Z")
