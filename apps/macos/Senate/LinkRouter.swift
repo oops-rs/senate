@@ -91,7 +91,9 @@ final class LinkRouter {
             return false
         }
         let now = clock()
-        let gesture = provenance == .gesture || (pending?.gesture ?? false)
+        // Each link carries its own gesture evidence: the burst's last link
+        // is routed, and it inherits none from the links it replaced.
+        let gesture = provenance == .gesture
         pending = (link, gesture)
         let start = burstStart ?? now
         burstStart = start

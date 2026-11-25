@@ -105,6 +105,21 @@ import SenateCore
         #expect(store.links.activations == 0)
     }
 
+    /// A gesture does not carry over: a burst whose last link came with no
+    /// click activates nothing (review 3, N5).
+    @Test func aBurstDoesNotInheritAGesture() async throws {
+        let store = try await store()
+        store.links.open("senate://open/v1/inbox", provenance: .gesture)
+        store.links.open("senate://open/v1/approvals", provenance: .system)
+        await store.links.flush()
+        #expect(store.place == .section(.approvals))
+        #expect(store.links.activations == 0)
+        // Its own gesture still counts.
+        store.links.open("senate://open/v1/inbox", provenance: .gesture)
+        await store.links.flush()
+        #expect(store.links.activations == 1)
+    }
+
     // MARK: Destinations
 
     @Test func everyDestinationResolvesToItsPage() async throws {

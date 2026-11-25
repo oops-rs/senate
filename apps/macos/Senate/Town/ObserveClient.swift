@@ -14,6 +14,11 @@ import SenateCore
 /// installation the grant was issued by, on a numeric loopback address, with
 /// no redirects. A process that takes the port while the daemon is down gets
 /// nothing: without the daemon's answer there is no request at all.
+///
+/// That answer is as trustworthy as the app's IPC to the daemon (bridge.sock).
+/// Review 3 (N4): the socket's peer is not yet authenticated; once `guard`'s
+/// socket identity lands, the app verifies the daemon end of that IPC as it
+/// specifies, and this client inherits it.
 @MainActor
 final class ObserveClient {
     enum Status { case ready, accessNeeded, unavailable, versionMismatch }
@@ -86,9 +91,17 @@ final class ObserveClient {
 
     /// Seconds a 429/503 asks to wait (`Retry-After`), bounded.
     private static func retryAfter(_ response: URLResponse) -> Double? {
-        guard let http = response as? HTTPURLResponse, http.statusCode == 429 || http.statusCode == 503,
-              let value = http.value(forHTTPHeaderField: "Retry-After"), let seconds = Double(value) else { return nil }
-        return min(max(seconds, 1), 300)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 429 || http.statusCode == 503 else { return nil }
+        return retryAfterSeconds(http.value(forHTTPHeaderField: "Retry-After"))
+    }
+
+    /// A `Retry-After` value as whole seconds, 1–300, or nil: parsed
+    /// defensively (only digits; `nan`, `inf`, negatives, dates and huge
+    /// numbers never reach a sleep, which would trap on them).
+    nonisolated static func retryAfterSeconds(_ value: String?) -> Double? {
+        guard let value = value?.trimmingCharacters(in: .whitespaces), !value.isEmpty, value.count <= 6,
+              value.allSatisfy(\.isASCII), value.allSatisfy(\.isNumber), let seconds = Int(value) else { return nil }
+        return Double(min(max(seconds, 1), 300))
     }
 
     private func run() async {
