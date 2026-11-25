@@ -233,7 +233,11 @@ where
             };
             let mut profile: LaunchProfile =
                 value.try_into().map_err(|error| profile_error(&error))?;
-            profile.model = HostedModel::new(profile.model.model, profile.model.effort);
+            profile.model = HostedModel::new(
+                profile.model.model,
+                profile.model.effort,
+                profile.model.speed,
+            );
             profile
                 .model
                 .check(profile.runtime)
@@ -1006,6 +1010,7 @@ person = "alice"
 runtime = "codex"
 model = "astra"
 effort = "high"
+speed = "ultrafast"
 note = "Use for independent diff review."
 [profiles.investigate]
 runtime = "claude"
@@ -1019,6 +1024,7 @@ note = "Use for diagnosis."
         assert_eq!(review.runtime, HostedRuntime::Codex);
         assert_eq!(review.model.model.as_deref(), Some("astra"));
         assert_eq!(review.model.effort.as_deref(), Some("high"));
+        assert_eq!(review.model.speed.as_deref(), Some("ultrafast"));
         assert_eq!(review.note, "Use for independent diff review.");
         assert!(config.profiles["investigate"].model.is_default());
         let encoded = toml::to_string(&config).unwrap();
@@ -1029,14 +1035,24 @@ note = "Use for diagnosis."
     fn launch_profile_errors_name_the_profile_even_in_local_mode() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("senate.toml");
-        for (runtime, effort, expected) in [
-            ("acp", "high", "unknown variant"),
-            ("claude", "minimal", "claude does not take the effort"),
+        for (runtime, setting, expected) in [
+            ("acp", "effort = \"high\"", "unknown variant"),
+            (
+                "claude",
+                "effort = \"minimal\"",
+                "claude does not take the effort",
+            ),
+            (
+                "claude",
+                "speed = \"fast\"",
+                "claude does not take a speed (\"fast\"); only codex does",
+            ),
+            ("agy", "speed = \"ultrafast\"", "agy does not take a speed"),
         ] {
             std::fs::write(
                 &path,
                 format!(
-                    "person = \"alice\"\n[local]\n[profiles.review]\nruntime = {runtime:?}\neffort = {effort:?}\nnote = \"Review\"\n"
+                    "person = \"alice\"\n[local]\n[profiles.review]\nruntime = {runtime:?}\n{setting}\nnote = \"Review\"\n"
                 ),
             )
             .unwrap();

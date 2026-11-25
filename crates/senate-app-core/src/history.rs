@@ -89,7 +89,7 @@ impl From<SessionHistoryRow> for HistoryRow {
             label,
             committee: r.committee.map(|c| c.to_string()),
             runtime: r.runtime.as_str().to_string(),
-            model: text::model_label(r.model.model.as_deref(), r.model.effort.as_deref()),
+            model: text::model_label(&r.model),
             dir: r.dir.display().to_string(),
             branch: r.branch,
             title: r.title,

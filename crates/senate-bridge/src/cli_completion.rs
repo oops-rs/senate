@@ -267,6 +267,16 @@ pub(super) fn efforts() -> Vec<CompletionCandidate> {
     candidates(values.into_iter().map(str::to_owned))
 }
 
+/// The speeds Codex documents today. Codex judges the value, so any other
+/// one it adds can still be typed.
+pub(super) fn speeds() -> Vec<CompletionCandidate> {
+    candidates(
+        ["fast", "ultrafast", "flex", "default"]
+            .into_iter()
+            .map(str::to_owned),
+    )
+}
+
 fn effort_runtime(args: &clap::ArgMatches) -> Option<HostedRuntime> {
     if let Some(spawn) = args.subcommand_matches("spawn") {
         return spawn

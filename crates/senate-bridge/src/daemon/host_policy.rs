@@ -246,7 +246,7 @@ impl Shared {
                 ))
             })?,
         };
-        let model = HostedModel::new(model.model, model.effort);
+        let model = HostedModel::new(model.model, model.effort, model.speed);
         Ok((
             profile.runtime,
             Some(alias),
@@ -281,7 +281,7 @@ impl Shared {
             model,
         } = order;
         // Nothing starts for an effort the runtime would not take.
-        let model = HostedModel::new(model.model, model.effort);
+        let model = HostedModel::new(model.model, model.effort, model.speed);
         model.check(runtime).map_err(IpcError::bad_request)?;
         let prompt = prompt.filter(|p| !p.trim().is_empty());
         if appoint_chair && appoint_secretary {
@@ -401,7 +401,7 @@ impl Shared {
             .resolve_restore(senator, auth.committee_scope.as_ref())
             .await?;
         // The record, with what this restore changes of it.
-        let model = HostedModel::new(model.model, model.effort);
+        let model = HostedModel::new(model.model, model.effort, model.speed);
         target
             .model
             .overridden_by(&model)

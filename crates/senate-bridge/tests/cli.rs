@@ -104,6 +104,7 @@ person = "alice"
 runtime = "codex"
 model = "astra"
 effort = "high"
+speed = "ultrafast"
 note = "Use for independent diff review."
 [profiles.investigate]
 runtime = "claude"
@@ -116,24 +117,32 @@ note = "Use for diagnosis."
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
         concat!(
-            "investigate\tclaude\tdefault\tdefault\tUse for diagnosis.\n",
-            "review\tcodex\tastra\thigh\tUse for independent diff review.\n"
+            "investigate\tclaude\tdefault\tdefault\tdefault\tUse for diagnosis.\n",
+            "review\tcodex\tastra\thigh\tultrafast\tUse for independent diff review.\n"
         )
     );
 
-    std::fs::write(paths.config(), config.replace("high", "unsupported")).unwrap();
-    let out = command()
-        .args(["setup", "doctor", "--json"])
-        .env("PATH", dir.path())
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "{out:?}");
-    let report = String::from_utf8(out.stdout).unwrap();
-    assert!(report.contains("[profiles.review]"), "{report}");
-    assert!(
-        report.contains("codex does not take the effort"),
-        "{report}"
-    );
+    for (broken, expected) in [
+        (
+            config.replace("high", "unsupported"),
+            "codex does not take the effort",
+        ),
+        (
+            config.replace("runtime = \"codex\"", "runtime = \"claude\""),
+            "claude does not take a speed",
+        ),
+    ] {
+        std::fs::write(paths.config(), broken).unwrap();
+        let out = command()
+            .args(["setup", "doctor", "--json"])
+            .env("PATH", dir.path())
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{out:?}");
+        let report = String::from_utf8(out.stdout).unwrap();
+        assert!(report.contains("[profiles.review]"), "{report}");
+        assert!(report.contains(expected), "{report}");
+    }
 }
 
 #[test]

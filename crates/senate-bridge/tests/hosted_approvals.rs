@@ -575,7 +575,11 @@ while IFS= read -r line; do :; done
     let args_without_model_settings = || {
         std::fs::read_to_string(project.join("argv"))
             .ok()
-            .filter(|args| !args.contains("--model=") && !args.contains("model_reasoning_effort"))
+            .filter(|args| {
+                !args.contains("--model=")
+                    && !args.contains("model_reasoning_effort")
+                    && !args.contains("service_tier")
+            })
             .map(|_| ())
     };
     let fake = h.codex();
@@ -594,6 +598,8 @@ while IFS= read -r line; do :; done
                 requested,
                 "--effort",
                 "xhigh",
+                "--speed",
+                "fast",
             ]);
         cmd
     };
@@ -613,7 +619,9 @@ while IFS= read -r line; do :; done
             .iter()
             .any(|(method, params)| method == "thread/settings/update"
                 && params["model"] == resolved
-                && params["effort"] == "xhigh")
+                && params["effort"] == "xhigh"
+                // Codex's Fast goes on the wire as its catalog id.
+                && params["serviceTier"] == "priority")
     );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("requested effort xhigh, running with low")
@@ -640,7 +648,11 @@ while IFS= read -r line; do :; done
     let list_count = || fake.methods().iter().filter(|m| *m == "model/list").count();
     let mut queries = list_count();
     let mut guard = None;
-    for (override_id, expected) in [(None, resolved), (Some("sol"), "gpt-6-sol")] {
+    // Restored as recorded, then with another model and speed.
+    for (override_id, expected, speed, tier) in [
+        (None, resolved, "fast", "priority"),
+        (Some("sol"), "gpt-6-sol", "ultrafast", "ultrafast"),
+    ] {
         let _: senate_bridge::ipc::StopReply = ipc::request(
             &h.socket(),
             &Request::Stop {
@@ -660,7 +672,11 @@ while IFS= read -r line; do :; done
             &Request::Restore {
                 session: Default::default(),
                 senator: senator.clone().into(),
-                model: senate_bridge::ipc::HostedModel::new(override_id.map(str::to_string), None),
+                model: senate_bridge::ipc::HostedModel::new(
+                    override_id.map(str::to_string),
+                    None,
+                    override_id.map(|_| speed.to_string()),
+                ),
             },
             WAIT,
             WAIT,
@@ -682,9 +698,9 @@ while IFS= read -r line; do :; done
                 .iter()
                 .rev()
                 .find(|(method, _)| method == "thread/settings/update")
-                .is_some_and(
-                    |(_, params)| params["model"] == expected && params["effort"] == "xhigh"
-                )
+                .is_some_and(|(_, params)| params["model"] == expected
+                    && params["effort"] == "xhigh"
+                    && params["serviceTier"] == tier)
         );
         let listing: senate_bridge::ipc::SessionsReply =
             ipc::request(&h.socket(), &Request::Sessions, WAIT, WAIT)
@@ -692,6 +708,7 @@ while IFS= read -r line; do :; done
                 .unwrap();
         assert_eq!(listing.rows[0].model.model.as_deref(), Some(expected));
         assert_eq!(listing.rows[0].model.effort.as_deref(), Some("xhigh"));
+        assert_eq!(listing.rows[0].model.speed.as_deref(), Some(speed));
         assert!(listing.rows[0].model.verification_warning.is_none());
         // The next iteration stops this host through IPC.
         guard = Some(terminal);

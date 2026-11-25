@@ -102,7 +102,7 @@ impl From<&SessionRow> for HostedSession {
             mention: Address::senator(&r.primary).in_text(),
             committee: r.committee.as_ref().map(ToString::to_string),
             runtime: r.runtime.as_str().to_string(),
-            model: text::model_label(r.model.model.as_deref(), r.model.effort.as_deref()),
+            model: text::model_label(&r.model),
             dir: r.dir.display().to_string(),
             running: r.is_running(),
             started_at: r.started_at.map(Into::into),

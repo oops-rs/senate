@@ -414,15 +414,20 @@ pub struct SpawnProfile {
     pub runtime: Option<HostedRuntime>,
 }
 
-/// The requested model and reasoning effort for a hosted session. An omitted
-/// setting leaves the runtime in control. Some runtimes resolve model aliases
-/// through their live catalog ([`HostedRuntime::efforts`] covers effort).
+/// The requested model, reasoning effort and speed for a hosted session. An
+/// omitted setting leaves the runtime in control. Some runtimes resolve model
+/// aliases through their live catalog ([`HostedRuntime::efforts`] covers
+/// effort).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostedModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Codex's service tier (`fast`, `ultrafast`, `flex`, or `default` for
+    /// standard speed); only Codex takes one ([`HostedModel::check`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<String>,
     /// A launch-time mismatch or an unavailable verification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification_warning: Option<String>,
@@ -584,7 +589,7 @@ pub struct SessionRow {
     pub last_activity: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// The model and effort it was last started with.
+    /// The model, effort and speed it was last started with.
     #[serde(default, skip_serializing_if = "HostedModel::is_default")]
     pub model: HostedModel,
     pub dir: PathBuf,
