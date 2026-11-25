@@ -65,7 +65,7 @@ pub enum Refresh {
 pub enum Notice {
     ApprovalArrived(Approval),
     /// A permission prompt waits in a hosted terminal (first sight only).
-    PromptWaiting(SessionRow),
+    PromptWaiting(Box<SessionRow>),
     /// Something came back to the person: an answer, a note, an escalation
     /// addressed to them. The app posts the notification itself, and the
     /// daemon stays quiet while the app is connected.
@@ -355,7 +355,7 @@ impl Model {
                     .prompts_notified
                     .insert((row.session_id.clone(), prompt.since.timestamp()))
             {
-                notices.push(Notice::PromptWaiting(row.clone()));
+                notices.push(Notice::PromptWaiting(Box::new(row.clone())));
             }
         }
         self.sessions = Some(reply);
