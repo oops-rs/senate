@@ -683,6 +683,7 @@ async fn streams_follow_sessions_and_configured_committees() {
             sessions: status.sessions.clone(),
             hosted: Default::default(),
             hosted_unbound: Default::default(),
+            host_health: Default::default(),
             hosted_viewer_unavailable: Default::default(),
             dropped_hooks: None,
             queue: status.queue,

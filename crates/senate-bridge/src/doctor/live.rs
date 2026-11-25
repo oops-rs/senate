@@ -12,7 +12,9 @@ use super::{Check, SERVICE_INSTALL};
 use crate::client::ApiClient;
 use crate::config::Hosted;
 use crate::delivery::codex::{AppServer, CodexConfig, DAEMON_BOOTSTRAP, Transport};
-use crate::ipc::{self, Registration, Request, SessionsReply, StatusReply, UplinkStatus};
+use crate::ipc::{
+    self, Registration, Request, ServerHealthReply, SessionsReply, StatusReply, UplinkStatus,
+};
 use crate::paths::HOSTED_KEY;
 use crate::state::Store;
 use crate::{BridgeConfig, Paths, binding};
@@ -123,13 +125,10 @@ async fn probe(url: &str, token: &str) -> Probe {
     }
 }
 
-/// The address and token of the Senate this machine hosts, as `senated
-/// --machine` last wrote them.
-fn hosted_address(paths: &Paths) -> Option<(String, String)> {
-    let dir = paths.hosted(HOSTED_KEY);
-    let listen = std::fs::read_to_string(dir.join("listen")).ok()?;
-    let token = std::fs::read_to_string(dir.join("token")).ok()?;
-    Some((format!("http://{}", listen.trim()), token.trim().to_owned()))
+/// The loopback address is display metadata only.
+fn hosted_address(paths: &Paths) -> Option<String> {
+    let listen = std::fs::read_to_string(paths.hosted(HOSTED_KEY).join("listen")).ok()?;
+    Some(format!("http://{}", listen.trim()))
 }
 
 /// Ask everything [`live`] judges.
@@ -195,9 +194,11 @@ pub async fn gather(paths: &Paths) -> Live {
     live.hosted = hosted.local.is_some();
     let served = if live.hosted {
         // The machine's own Senate runs inside the daemon.
-        hosted_address(paths).filter(|_| live.daemon.is_ok())
+        hosted_address(paths)
+            .filter(|_| live.daemon.is_ok())
+            .map(|url| (url, None))
     } else {
-        Some((config.server_url.clone(), config.token.clone()))
+        Some((config.server_url.clone(), Some(config.token.clone())))
     };
     if hosted.under_a_parent(&config) {
         live.parent = Some(probe(&config.server_url, &config.token).await);
@@ -206,31 +207,57 @@ pub async fn gather(paths: &Paths) -> Live {
     let Some((url, token)) = served else {
         return live;
     };
-    live.served = Some(probe(&url, &token).await);
+    live.served = Some(match &token {
+        Some(token) => probe(&url, token).await,
+        None => {
+            let me = ipc::request::<ServerHealthReply>(
+                &paths.socket(),
+                &Request::ServerHealth,
+                Duration::from_millis(500),
+                ASK,
+            )
+            .await
+            .map(|reply| {
+                live.ahead = reply.ahead;
+                reply.me
+            })
+            .map_err(|error| error.to_string());
+            Probe {
+                url: url.clone(),
+                me,
+            }
+        }
+    });
     let Ok(store) = Store::open_read_only(&paths.state_db()) else {
         return live;
     };
     live.epoch = store.epoch(&url).ok().flatten();
+    if let Some(token) = token
+        && let Ok(client) = ApiClient::new(&url, &token)
+    {
+        live.ahead = cursors_ahead(&client, &store).await;
+    }
+    live
+}
+
+pub(crate) async fn cursors_ahead(client: &ApiClient, store: &Store) -> Vec<(CommitteeId, Seq)> {
     // The furthest any agent's cursor got, by committee.
     let mut furthest: BTreeMap<CommitteeId, Seq> = BTreeMap::new();
     for (_, committee, cursor) in store.cursors().unwrap_or_default() {
         let seq = furthest.entry(committee).or_insert(Seq::ZERO);
         *seq = (*seq).max(cursor.delivered);
     }
-    if let Ok(client) = ApiClient::new(&url, &token) {
-        for (committee, seq) in furthest {
-            if seq == Seq::ZERO {
-                continue;
-            }
-            if let Ok(Err(e)) =
+    let mut ahead = Vec::new();
+    for (committee, seq) in furthest {
+        if seq != Seq::ZERO
+            && let Ok(Err(error)) =
                 tokio::time::timeout(ASK, client.events(&committee, seq, Some(1))).await
-                && e.is_cursor_ahead()
-            {
-                live.ahead.push((committee, seq));
-            }
+            && error.is_cursor_ahead()
+        {
+            ahead.push((committee, seq));
         }
     }
-    live
+    ahead
 }
 
 /// `(major, minor, patch)` of a version like `0.4.0` or `0.4.0-dev`.
@@ -484,6 +511,46 @@ fn session_checks(sessions: &SessionsReply, l: Locale) -> Vec<Check> {
             format!("{running} hosted sessions running, {stopped} stopped"),
         ),
     )];
+    let outdated = sessions
+        .rows
+        .iter()
+        .filter(|row| {
+            row.host_health
+                .as_ref()
+                .is_some_and(|health| health.outdated)
+        })
+        .count();
+    if outdated > 0 {
+        let versions: std::collections::BTreeSet<_> = sessions
+            .rows
+            .iter()
+            .filter_map(|row| {
+                row.host_health
+                    .as_deref()
+                    .filter(|health| health.outdated)
+                    .map(|health| health.started_by.as_str())
+            })
+            .collect();
+        checks.push(Check::warn(
+            "sessions.outdated_hosts",
+            format!(
+                "{outdated} running host(s) need restart to be protected (started by {})",
+                versions.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+            Some("senate session restart --all-outdated"),
+        ));
+    }
+    for row in sessions.rows.iter().filter(|row| {
+        row.host_health
+            .as_ref()
+            .is_some_and(|health| health.daemon_unverified)
+    }) {
+        checks.push(Check::warn(
+            format!("sessions.daemon_identity.{}", row.session_id),
+            format!("{} has not verified the current daemon", row.label()),
+            Some("Check the daemon installation and save work before restarting the host"),
+        ));
+    }
     if !sessions.orphans.is_empty() {
         checks.push(Check::warn(
             "sessions.orphans",

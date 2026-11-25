@@ -74,6 +74,7 @@ impl Server {
             built_in: None,
             simulator: None,
             observe: None,
+            local_person: None,
         }
     }
 }
@@ -96,9 +97,15 @@ pub struct ServerBuilder {
     built_in: Option<SenatorName>,
     simulator: Option<Arc<dyn ChatSimulator>>,
     observe: Option<Arc<senate_observe::Registry>>,
+    local_person: Option<senate_core::Name>,
 }
 
 impl ServerBuilder {
+    /// Permit this persona on the in-memory router only.
+    pub fn local_person(mut self, person: senate_core::Name) -> Self {
+        self.local_person = Some(person);
+        self
+    }
     /// Mount the machine-owned observer on its embedded loopback listener.
     pub fn observe(mut self, registry: Arc<senate_observe::Registry>) -> Self {
         self.observe = Some(registry);
@@ -177,6 +184,7 @@ impl ServerBuilder {
             built_in,
             simulator,
             observe,
+            local_person,
         } = self;
         config.validate_intervals()?;
         let auth: Arc<dyn Authenticate> = match auth {
@@ -256,6 +264,9 @@ impl ServerBuilder {
         .await
         .map_err(|e| ServerError::Spawn(e.to_string()))?;
         tracing::info!(%epoch, "log epoch");
+        let workers = local_person
+            .as_ref()
+            .map(|_| Arc::new(http::worker::Book::new(store.clone())));
         let hub = Arc::new(ServerHub::new(HubParts {
             store,
             epoch,
@@ -305,12 +316,19 @@ impl ServerBuilder {
         })?;
 
         let mut app = http::router(AppState {
+            machine: local_person.is_some(),
+            workers,
             hub: hub.clone(),
             auth,
             epoch: epoch_header,
             ping_every: config.sse_ping_interval(),
             triaged,
             simulator,
+        });
+        let local_bridge = local_person.map(|person| LocalBridge {
+            app: app
+                .clone()
+                .layer(axum::Extension(http::LocalPerson(person))),
         });
         let observe = observe.filter(|registry| embedded && registry.address() == local_addr);
         let observe_enabled = observe.is_some();
@@ -341,6 +359,7 @@ impl ServerBuilder {
         tracing::info!(%local_addr, "senate server listening");
 
         Ok(Running {
+            local_bridge,
             hub,
             local_addr,
             supervisor: supervisor.get_cell(),
@@ -485,6 +504,7 @@ async fn serve_embedded_http(
 /// A started server. Dropping it stops the server without waiting; prefer
 /// [`Running::shutdown`].
 pub struct Running {
+    pub local_bridge: Option<LocalBridge>,
     pub hub: Arc<ServerHub>,
     pub local_addr: SocketAddr,
     /// The root of the supervision tree.
@@ -492,6 +512,53 @@ pub struct Running {
     stop_http: Option<oneshot::Sender<()>>,
     http_task: Option<JoinHandle<std::io::Result<()>>>,
     supervisor_task: Option<JoinHandle<()>>,
+}
+
+/// A handle to the machine-private router. No socket or bearer grants access.
+#[derive(Clone)]
+pub struct LocalBridge {
+    app: axum::Router,
+}
+
+impl LocalBridge {
+    pub async fn send(
+        &self,
+        request: reqwest::Request,
+    ) -> Result<reqwest::Response, std::io::Error> {
+        use tower::ServiceExt as _;
+        let url = request.url();
+        let mut target = url.path().to_owned();
+        if let Some(query) = url.query() {
+            target.push('?');
+            target.push_str(query);
+        }
+        let body = match request.body() {
+            None => axum::body::Body::empty(),
+            Some(body) => axum::body::Body::from(
+                body.as_bytes()
+                    .ok_or_else(|| {
+                        std::io::Error::other("The local bridge expects a buffered request body")
+                    })?
+                    .to_vec(),
+            ),
+        };
+        let mut local = axum::http::Request::builder()
+            .method(request.method())
+            .uri(target)
+            .body(body)
+            .map_err(std::io::Error::other)?;
+        *local.headers_mut() = request.headers().clone();
+        local
+            .headers_mut()
+            .remove(axum::http::header::AUTHORIZATION);
+        let response = match self.app.clone().oneshot(local).await {
+            Ok(response) => response,
+            Err(never) => match never {},
+        };
+        Ok(response
+            .map(|body| reqwest::Body::wrap_stream(body.into_data_stream()))
+            .into())
+    }
 }
 
 impl Running {

@@ -858,6 +858,7 @@ mod tests {
             sessions: Vec::new(),
             hosted: Default::default(),
             hosted_unbound: Default::default(),
+            host_health: Default::default(),
             hosted_viewer_unavailable: Default::default(),
             dropped_hooks: None,
             queue: Default::default(),

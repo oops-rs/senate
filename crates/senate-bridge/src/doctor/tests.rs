@@ -560,6 +560,7 @@ fn me(version: Option<&str>, epoch: &str, committees: &[&str]) -> Me {
 
 fn session(label: &str, running: bool, prompt: bool) -> SessionRow {
     SessionRow {
+        host_health: None,
         codex_scope_advisory: false,
         paused: false,
         chair: false,

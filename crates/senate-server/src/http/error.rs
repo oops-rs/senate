@@ -43,6 +43,14 @@ impl ApiFailure {
         )
     }
 
+    pub(crate) fn machine_unauthorized() -> Self {
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            code::UNAUTHORIZED,
+            "This machine Senate uses the local Senate CLI or app. Its former person token no longer authorizes HTTP.",
+        )
+    }
+
     pub(crate) fn forbidden(message: impl Into<String>) -> Self {
         Self::new(StatusCode::FORBIDDEN, code::FORBIDDEN, message)
     }

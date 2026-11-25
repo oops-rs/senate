@@ -156,6 +156,11 @@ enum MemoryCmd {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Issue or revoke scoped desk-worker credentials on this machine.
+    DeskWorker {
+        #[command(subcommand)]
+        command: DeskWorkerCmd,
+    },
     /// Issue or manage read-only observation grants.
     Observe(cli_observe::Observe),
     /// Replace or clear a profile card.
@@ -759,6 +764,24 @@ impl DisplayScope {
 }
 
 #[derive(Subcommand)]
+enum DeskWorkerCmd {
+    /// Issue a worker credential and print its secret once.
+    Issue {
+        /// A distinct service label, not a person or senator identity.
+        #[arg(long)]
+        worker: Name,
+        /// Existing committee granted to the worker. Repeat to add a committee.
+        #[arg(long = "committee", required = true)]
+        committees: Vec<CommitteeId>,
+    },
+    /// Revoke a previously issued worker credential.
+    Revoke {
+        /// The public credential ID returned by issue.
+        id: EventId,
+    },
+}
+
+#[derive(Subcommand)]
 enum ServiceCmd {
     /// Write the service file and load the service. Dry run without --yes.
     ///
@@ -984,6 +1007,21 @@ enum SessionCmd {
         /// Seconds to wait for each session's checkpoint (default 90).
         #[arg(long, value_name = "SECS")]
         timeout: Option<u64>,
+    },
+    /// Checkpoint, stop, and restart the same hosted sessions.
+    Restart {
+        /// Running sessions by name, alias, or role.
+        #[arg(required_unless_present = "all_outdated", add = ArgValueCandidates::new(completion::sessions))]
+        names: Vec<String>,
+        /// Select every running host that needs a protocol upgrade.
+        #[arg(long, conflicts_with = "names")]
+        all_outdated: bool,
+        /// Restart despite recent typing or an active or unknown turn.
+        #[arg(long)]
+        force: bool,
+        /// Show the selection and activity checks without restarting.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Resume paused hosted sessions in the same conversation.
     ///
@@ -2184,6 +2222,91 @@ async fn resume_sessions(
     Ok(())
 }
 
+async fn restart_hosts(
+    paths: &Paths,
+    names: Vec<String>,
+    all_outdated: bool,
+    force: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    use crate::sessions::{StopSelector, TYPED_WINDOW_SECS, select_for_stop};
+    let sessions: ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
+    let rows: Vec<_> = if all_outdated {
+        sessions
+            .rows
+            .iter()
+            .filter(|row| {
+                row.is_running()
+                    && row
+                        .host_health
+                        .as_ref()
+                        .is_some_and(|health| health.outdated)
+            })
+            .collect()
+    } else {
+        select_for_stop(&sessions.rows, &StopSelector::Named(names), true)
+            .map_err(anyhow::Error::msg)?
+            .stop
+    };
+    if rows.is_empty() {
+        println!("No running outdated hosts.");
+    }
+    let mut failures = 0;
+    for row in rows {
+        let label = row.label();
+        let busy = row.working
+            || row
+                .typed_secs_ago
+                .is_some_and(|age| age < TYPED_WINDOW_SECS);
+        if busy && !force {
+            eprintln!("{label}: recently typed into or working. Use --force to restart.");
+            failures += 1;
+            continue;
+        }
+        if dry_run {
+            println!("{label}: would request a checkpoint and restart the terminal");
+            continue;
+        }
+        let request = Request::RestartHost {
+            senator: AliasName::bare(row.primary.clone()),
+            host: row.host_id.clone(),
+            force,
+        };
+        match ipc::request::<ipc::RestartHostReply>(
+            &paths.socket(),
+            &request,
+            Duration::from_secs(1),
+            REPLACE_TIMEOUT + crate::app_confirmation::LIFETIME,
+        )
+        .await
+        {
+            Ok(reply) => {
+                let checkpoint = reply.checkpoint.map_or_else(
+                    || "no new checkpoint".into(),
+                    |seq| format!("checkpoint {seq}"),
+                );
+                let conversation = if reply.started_empty {
+                    "no saved Claude transcript; started empty under the same ID"
+                } else {
+                    "restored saved runtime conversation"
+                };
+                println!(
+                    "{label}: restarted same seat ({checkpoint}; {conversation}). Unsent drafts, terminal screen, pending dialogs and in-flight turns do not carry over."
+                );
+            }
+            Err(error) => {
+                eprintln!("{label}: {error}");
+                failures += 1;
+            }
+        }
+    }
+    anyhow::ensure!(
+        failures == 0,
+        "{failures} session(s) could not be restarted"
+    );
+    Ok(())
+}
+
 /// Return the picker choice's native session, including paused and stopped rows.
 fn pick_attach_session() -> anyhow::Result<Option<ipc::AttachTarget>> {
     let paths = Paths::from_env()?;
@@ -3250,6 +3373,17 @@ fn run_doctor(json: bool) -> anyhow::Result<()> {
         manager: &service::SystemManager,
         wsl: wsl.as_ref(),
     });
+    if paths
+        .hosted(crate::paths::HOSTED_KEY)
+        .join("token")
+        .exists()
+    {
+        checks.push(crate::doctor::Check::warn(
+            "server.legacy_person_token",
+            "A legacy machine person-token file remains on disk",
+            Some("Upgrade the machine daemon and use Senate CLI or app IPC"),
+        ));
+    }
     checks.extend(completion::doctor(locale));
     #[cfg(target_os = "macos")]
     checks.push(crate::app_confirmation::macos::pin_doctor(paths.home()));
@@ -3376,6 +3510,18 @@ fn run_service(command: ServiceCmd, output: Output) -> anyhow::Result<()> {
             };
             let plan = service::plan_install(&spec, &senated);
             if yes {
+                let paths = Paths::new(&spec.senate_home);
+                crate::config::check_legacy_person_token_consumers(&paths)
+                    .map_err(anyhow::Error::msg)?;
+                if paths
+                    .hosted(crate::paths::HOSTED_KEY)
+                    .join("token")
+                    .exists()
+                {
+                    eprintln!(
+                        "The legacy machine person token will be revoked. Check external integrations and use Senate CLI or app IPC for person actions."
+                    );
+                }
                 #[cfg(target_os = "macos")]
                 {
                     let paths = Paths::new(&spec.senate_home);
@@ -3407,6 +3553,31 @@ fn run_service(command: ServiceCmd, output: Output) -> anyhow::Result<()> {
             );
             if let Some(distro) = crate::wsl::distro() {
                 print!("{}", crate::wsl::notes(&distro, locale));
+            }
+            if yes {
+                let paths = Paths::new(&spec.senate_home);
+                match runtime(false)?.block_on(daemon_call::<ipc::SessionsReply>(
+                    &paths,
+                    &Request::Sessions,
+                )) {
+                    Ok(sessions) => {
+                        let outdated = sessions
+                            .rows
+                            .iter()
+                            .filter(|row| {
+                                row.host_health
+                                    .as_ref()
+                                    .is_some_and(|health| health.outdated)
+                            })
+                            .count();
+                        println!(
+                            "{outdated} running host(s) need restart to be protected. Review with senate session restart --all-outdated --dry-run."
+                        );
+                    }
+                    Err(error) => eprintln!(
+                        "Could not check the host protocol after install: {error}. Run senate setup doctor."
+                    ),
+                }
             }
         }
         ServiceCmd::Uninstall { yes } => {
@@ -3450,6 +3621,25 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         Cmd::Secretary(args) => cli_secretary::run(args),
         Cmd::Desk(args) => cli_desk::run(args),
         Cmd::Chat(args) => cli_chat::run(args),
+        Cmd::DeskWorker { command } => {
+            let paths = Paths::from_env()?;
+            let command = match command {
+                DeskWorkerCmd::Issue { worker, committees } => senate_core::worker::Admin::Issue {
+                    worker,
+                    committees: committees.into_iter().collect(),
+                },
+                DeskWorkerCmd::Revoke { id } => senate_core::worker::Admin::Revoke { id },
+            };
+            let issued: Option<senate_core::worker::Issued> =
+                runtime(false)?.block_on(daemon_call(&paths, &Request::DeskWorker { command }))?;
+            match issued {
+                Some(issued) => print_json(&issued),
+                None => {
+                    println!("Desk-worker credential revoked.");
+                    Ok(())
+                }
+            }
+        }
         Cmd::Observe(args) => cli_observe::run(args),
         Cmd::Card(args) => cli_observe::run_card(args),
         Cmd::Open(args) => cli_open::run(args),
@@ -4364,6 +4554,15 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             runtime(false)?.block_on(pause_sessions(
                 &paths, &selector, force, dry_run, timeout, locale,
             ))
+        }
+        SessionCmd::Restart {
+            names,
+            all_outdated,
+            force,
+            dry_run,
+        } => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(restart_hosts(&paths, names, all_outdated, force, dry_run))
         }
         SessionCmd::Authorize { session_id } => {
             use std::io::IsTerminal as _;

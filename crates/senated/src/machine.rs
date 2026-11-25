@@ -55,7 +55,6 @@
 //! | `senate.toml` | the machine's configuration |
 //! | `senates/top/` | the machine's Senate (`[local]`) |
 //! | `senates/top/log.db` | its log |
-//! | `senates/top/token` | the person's token there, generated here |
 //! | `senates/top/listen` | the loopback address it serves, kept for restarts |
 //! | `senates/top/OFFICE-NOTE` | the compatibility note on `[local] speaker`, said once |
 //! | `senates/top/uplink.json` | the registration with the Senate above, for `senate status` |
@@ -110,9 +109,26 @@ pub struct HostedSenate {
     pub name: Name,
     /// `http://127.0.0.1:<port>`.
     pub url: String,
-    /// The person's token there.
+    /// A disposable HTTP fixture credential. Empty in a real machine.
     pub token: String,
     pub daemon: Senated,
+}
+
+impl HostedSenate {
+    /// The co-resident bridge capability. External clients use Senate IPC.
+    pub fn local_api(&self) -> anyhow::Result<senate_bridge::client::ApiClient> {
+        let routes = self
+            .daemon
+            .local_bridge()
+            .ok_or_else(|| anyhow::anyhow!("No in-process bridge; use Senate IPC"))?;
+        Ok(senate_bridge::client::ApiClient::with_local_transport(
+            &self.url,
+            Arc::new(move |request| {
+                let routes = routes.clone();
+                Box::pin(async move { routes.send(request).await })
+            }),
+        )?)
+    }
 }
 
 /// A developer machine's `senated`: the Senate it hosts and its side of the
@@ -272,13 +288,27 @@ impl Machine {
             plans.push(p);
         }
 
+        if fixture
+            && cfg!(debug_assertions)
+            && paths.home().canonicalize().is_ok_and(|home| {
+                std::env::temp_dir()
+                    .canonicalize()
+                    .is_ok_and(|tmp| home.starts_with(tmp))
+                    || home.starts_with("/private/tmp")
+                    || home.starts_with("/tmp")
+            })
+        {
+            for plan in &mut plans {
+                plan.token = format!("fixture-{}{}", EventId::new(), EventId::new());
+            }
+        }
         // The developer-machine side serves the Senate this machine hosts,
         // or the one at `server_url`; under a parent, the Senate above is
         // its uplink.
         let mut bridge = config.clone();
         if let Some(p) = plans.first() {
             bridge.server_url = format!("http://{}", p.listen);
-            bridge.token = p.token.clone();
+            bridge.token.clear();
             if under {
                 bridge.uplink = Some(Uplink {
                     url: config.server_url.clone(),
@@ -299,7 +329,9 @@ impl Machine {
                 poll: uplink::POLL.min(timing.sweep),
                 locale,
             });
-        bridge.validate().map_err(MachineError::Invalid)?;
+        if plans.is_empty() {
+            bridge.validate().map_err(MachineError::Invalid)?;
+        }
         let pauser = Pauser::default();
         // A separate grant store belongs to the carrier Senate. A broken
         // observer store must not prevent deliberation on an existing Senate.
@@ -322,7 +354,9 @@ impl Machine {
                 }
             })
             .unwrap_or_default();
+        let local_link = Arc::new(std::sync::OnceLock::new());
         let side = Arc::new(DeveloperMachine {
+            local_link: local_link.clone(),
             in_process: !plans.is_empty(),
             fixture,
             observe: observe.clone(),
@@ -380,7 +414,9 @@ impl Machine {
                 ));
             }
             if carries {
-                assembly = assembly.component_arc(side.clone());
+                assembly = assembly
+                    .local_machine(bridge.person.clone(), local_link.clone())
+                    .component_arc(side.clone());
                 if let Some(registry) = &observe {
                     assembly = assembly.observe(registry.clone());
                 }
@@ -548,15 +584,19 @@ async fn plan(
         .create(&dir)
         .map_err(io(&dir))?;
     let token_file = dir.join("token");
-    let token = match std::fs::read_to_string(&token_file) {
-        Ok(token) if !token.trim().is_empty() => token.trim().to_owned(),
-        _ => {
-            // Two ULIDs: 160 random bits, never written anywhere else.
-            let token = format!("local-{}{}", EventId::new(), EventId::new()).to_lowercase();
-            write_private(&token_file, &token).map_err(io(&token_file))?;
-            token
-        }
-    };
+    senate_bridge::config::check_legacy_person_token_consumers(paths)
+        .map_err(MachineError::Invalid)?;
+    let migrating = token_file.exists();
+    if migrating
+        && tokio::net::UnixStream::connect(paths.socket())
+            .await
+            .is_ok()
+    {
+        return Err(MachineError::Invalid(
+            "An existing machine daemon still serves this home. Stop or replace it before revoking its legacy token.".into(),
+        ));
+    }
+    let token = String::new();
     let listen_file = dir.join("listen");
     let listener = match listen {
         Some(listen) => {
@@ -586,6 +626,13 @@ async fn plan(
             }
         }
     };
+    match std::fs::remove_file(&token_file) {
+        Ok(()) => tracing::info!(
+            "Removed a legacy machine person token. Use Senate CLI or app IPC for this machine."
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io(&token_file)(error)),
+    }
     let listen = listener.local_addr().map_err(io(&dir))?;
     write_private(&listen_file, &listen.to_string()).map_err(io(&listen_file))?;
     Ok(Plan {
@@ -759,10 +806,14 @@ fn senate_config(plan: &Plan, machine: &BridgeConfig) -> Result<SenatedConfig, M
     };
     let mut server = ServerConfig::new(
         roster,
-        vec![TokenConfig::with_token(
-            machine.person.clone(),
-            plan.token.clone(),
-        )],
+        if plan.token.is_empty() {
+            Vec::new()
+        } else {
+            vec![TokenConfig::with_token(
+                machine.person.clone(),
+                plan.token.clone(),
+            )]
+        },
     );
     server.name = Some(plan.name.clone());
     server.parent = plan.parent.clone();
@@ -830,6 +881,7 @@ pub fn nested_notice(agent: &str, dir: &Path, locale: Locale) -> String {
 /// socket taken by another daemon, say) is a failure, retried under the
 /// assembly's supervision.
 struct DeveloperMachine {
+    local_link: Arc<std::sync::OnceLock<senate_server::LocalBridge>>,
     in_process: bool,
     fixture: bool,
     observe: Option<Arc<senate_observe::Registry>>,
@@ -846,28 +898,38 @@ impl Component for DeveloperMachine {
 
     async fn run(&self, ctx: ComponentContext) -> anyhow::Result<()> {
         let options = self.options.clone();
-        let handle = match (self.in_process, self.fixture) {
-            (true, false) => {
-                daemon::start_in_process(
-                    options,
-                    self.observe.clone(),
-                    self.observe_consent.clone(),
-                )
-                .await?
-            }
-            (true, true) => {
+        let handle = if self.in_process {
+            let routes = self
+                .local_link
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("Machine-private router is unavailable"))?
+                .clone();
+            let local: senate_bridge::client::LocalTransport = Arc::new(move |request| {
+                let routes = routes.clone();
+                Box::pin(async move { routes.send(request).await })
+            });
+            if self.fixture {
                 daemon::start_in_process_fixture(
                     options,
                     self.observe.clone(),
                     self.observe_consent.clone(),
+                    local,
+                )
+                .await?
+            } else {
+                daemon::start_in_process(
+                    options,
+                    self.observe.clone(),
+                    self.observe_consent.clone(),
+                    local,
                 )
                 .await?
             }
-            (false, true) => {
-                let host_binary = std::env::current_exe()?.with_file_name("senate");
-                daemon::start_with_host_binary(options, host_binary).await?
-            }
-            (false, false) => daemon::start(options).await?,
+        } else if self.fixture {
+            let host_binary = std::env::current_exe()?.with_file_name("senate");
+            daemon::start_with_host_binary(options, host_binary).await?
+        } else {
+            daemon::start(options).await?
         };
         let set = |pauser| {
             *self
@@ -885,9 +947,7 @@ impl Component for DeveloperMachine {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
 
-    use senate_bridge::client::ApiClient;
     use senate_core::{Hub, Name, SenatorName, SpeakerSeat};
 
     use super::*;
@@ -925,6 +985,153 @@ mod tests {
             }
         }
         anyhow::bail!("observation stream closed before the committed event")
+    }
+
+    #[tokio::test]
+    async fn desk_worker_authority_is_revocable_and_thread_scoped() -> anyhow::Result<()> {
+        use senate_core::worker::{Admin, Issued, Question, Receipt, Replies};
+        use senate_core::{Address, EventId, Kind, NewEvent};
+        let dir = tempfile::tempdir()?;
+        let paths = Paths::new(dir.path().join("senate"));
+        let machine = Machine::start_with(
+            paths,
+            toml::from_str("person = \"alice\"\n")?,
+            toml::from_str("[local]\nname = \"desk-test\"\n")?,
+            quiet(),
+        )
+        .await?;
+        let top = machine
+            .senate()
+            .ok_or_else(|| anyhow::anyhow!("no machine Senate"))?;
+        let allowed: senate_core::CommitteeId = "allowed".parse()?;
+        let denied: senate_core::CommitteeId = "denied".parse()?;
+        let alice = Address::senior(&Name::new("alice")?);
+        for committee in [&allowed, &denied] {
+            top.daemon
+                .hub
+                .append(NewEvent::new(
+                    committee.clone(),
+                    Kind::Note,
+                    alice.clone(),
+                    "fixture",
+                ))
+                .await?;
+        }
+        let http = reqwest::Client::builder().no_proxy().build()?;
+        let local = top
+            .daemon
+            .local_bridge()
+            .ok_or_else(|| anyhow::anyhow!("missing local router"))?;
+        let issue = || {
+            http.post(format!("{}{}", top.url, senate_core::worker::ADMIN_PATH))
+                .json(&Admin::Issue {
+                    worker: "commons-dial".parse().expect("known worker name"),
+                    committees: [allowed.clone()].into_iter().collect(),
+                })
+        };
+        assert_eq!(issue().send().await?.status(), 404);
+        let issued: Issued = local
+            .send(issue().build()?)
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(
+            http.get(format!("{}/v1/me", top.url))
+                .bearer_auth(&issued.token)
+                .send()
+                .await?
+                .status(),
+            401
+        );
+        let send = |question: &Question| {
+            http.post(format!(
+                "{}{}",
+                top.url,
+                senate_core::worker::QUESTIONS_PATH
+            ))
+            .bearer_auth(&issued.token)
+            .json(question)
+        };
+        let mut question = Question {
+            id: EventId::new(),
+            committee: denied,
+            question: "fixture question".into(),
+            caller: Some("Example\nCaller".into()),
+        };
+        assert_eq!(send(&question).send().await?.status(), 403);
+        question.committee = allowed.clone();
+        let receipt: Receipt = send(&question)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let replay: Receipt = send(&question)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(receipt.seq, replay.seq);
+        assert_eq!(receipt.caller.as_deref(), Some("Example Caller"));
+        let event = top
+            .daemon
+            .hub
+            .read(&allowed, senate_core::Seq(receipt.seq.0 - 1), 1)
+            .await?
+            .remove(0);
+        assert!(matches!(event.from, Address::Guest(_)));
+        assert!(
+            event
+                .body
+                .contains("Asked through commons-dial on behalf of Example Caller")
+        );
+        let docket = top.local_api()?.docket(&allowed).await?;
+        assert!(docket.items.iter().any(|item| item.event.seq == receipt.seq
+            && item.event.from == event.from
+            && item.event.body == event.body));
+        top.daemon
+            .hub
+            .append(
+                NewEvent::new(allowed.clone(), Kind::Answer, Address::Speaker, "reply")
+                    .in_thread(receipt.seq),
+            )
+            .await?;
+        let poll = |token: &str| {
+            http.get(format!("{}{}", top.url, senate_core::worker::REPLIES_PATH))
+                .bearer_auth(token)
+                .query(&senate_core::worker::RepliesQuery {
+                    committee: allowed.clone(),
+                    root: receipt.seq,
+                    after: receipt.seq,
+                })
+        };
+        let replies: Replies = poll(&issued.token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(replies.events.len(), 1);
+        let other: Issued = local
+            .send(issue().build()?)
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(poll(&other.token).send().await?.status(), 404);
+        local
+            .send(
+                http.post(format!("{}{}", top.url, senate_core::worker::ADMIN_PATH))
+                    .json(&Admin::Revoke { id: issued.id })
+                    .build()?,
+            )
+            .await?
+            .error_for_status()?;
+        assert_eq!(poll(&issued.token).send().await?.status(), 401);
+        machine.shutdown().await;
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1084,10 +1291,20 @@ mod tests {
         };
         assert_eq!(resume(&other.token).send().await?.status(), 409);
 
-        let committed = top
-            .daemon
-            .hub
-            .append(append(visible.clone(), "first-line-canary\nbody-canary"))
+        let committed: senate_bridge::ipc::Posted = ipc
+            .call(
+                &Request::Say {
+                    session: Default::default(),
+                    committee: Some(visible.clone()),
+                    kind: senate_bridge::ipc::SayKind::Question,
+                    to: vec![senate_core::Address::Speaker],
+                    at: None,
+                    body: "first-line-canary\nbody-canary".into(),
+                    thread: None,
+                    id: None,
+                },
+                wait,
+            )
             .await?;
         top.daemon
             .hub
@@ -1099,23 +1316,35 @@ mod tests {
                 &Request::ObserveAdmin {
                     command: AdminRequest::Preview {
                         committee: visible.clone(),
-                        seq: committed.event.seq,
+                        seq: committed.seq,
                     },
                 },
                 wait,
             )
             .await?;
         assert_eq!(candidate.line, "first-line-canary");
-        let expected = committed.event.seq;
+        let expected = committed.seq;
         let pong = first_observed_event(&mut stream, expected, false).await?;
         let Event::MessagePosted(message) = pong.event else {
             anyhow::bail!("expected message event");
         };
         assert_eq!(message.line, None);
         assert_eq!(pong.committee_id.as_deref(), Some("visible"));
+        let threaded: Snapshot = http
+            .get(&state)
+            .bearer_auth(&issued.token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert!(
+            !threaded.threads.is_empty(),
+            "the bridge question contributes a thread row"
+        );
         assert_eq!(
             http.get(&state)
-                .bearer_auth(&top.token)
+                .bearer_auth("legacy-fixture-token")
                 .send()
                 .await?
                 .status(),
@@ -1188,11 +1417,7 @@ mod tests {
         assert_ne!(listen.port(), 0);
         assert_eq!(top.url, format!("http://{listen}"));
         // Its name is what the Senate says it is.
-        let me = ApiClient::new(&top.url, &top.token)
-            .unwrap()
-            .me()
-            .await
-            .unwrap();
+        let me = top.local_api().unwrap().me().await.unwrap();
         assert_eq!(me.person.as_str(), "alice");
         assert_eq!(me.senate.as_str(), "north-desk");
         assert_eq!(me.parent, None);
@@ -1214,20 +1439,20 @@ mod tests {
             !paths.hosted("top").join("OFFICE-NOTE").exists(),
             "written in full: nothing to note"
         );
-        // The token is private, and the only person is alice.
+        // The hosted server never publishes a person credential.
         let token_file = paths.hosted("top").join("token");
-        let mode = std::fs::metadata(&token_file).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        assert!(!token_file.exists());
         assert!(roster.principal(&alice).is_some());
         assert_eq!(roster.principals().len(), 1);
         // The developer-machine side serves it.
         let bridge = machine.bridge_config();
         assert_eq!(bridge.server_url, top.url);
         assert_eq!(bridge.token, top.token);
-        let (top_url, top_token) = (top.url.clone(), top.token.clone());
+        let top_url = top.url.clone();
         machine.shutdown().await;
 
-        // A restart finds the same address and token.
+        // A restart finds the same address without reinstating the old bearer.
+        std::fs::write(&token_file, "legacy-fixture-token").unwrap();
         let config: BridgeConfig = toml::from_str("person = \"alice\"\n").unwrap();
         let hosted: Hosted =
             toml::from_str("[local]\nname = \"north-desk\"\nspeaker = \"senator::claude\"\n")
@@ -1238,12 +1463,16 @@ mod tests {
         assert_eq!(again.bridge_config().server_url, top_url);
         let top = again.senate().unwrap();
         assert_eq!(top.url, top_url);
-        assert_eq!(top.token, top_token);
-        let me = ApiClient::new(&top_url, &top_token)
-            .unwrap()
-            .me()
+        assert!(!token_file.exists());
+        let revoked = reqwest::Client::new()
+            .get(format!("{top_url}/v1/me"))
+            .bearer_auth("legacy-fixture-token")
+            .send()
             .await
             .unwrap();
+        assert_eq!(revoked.status(), 401);
+        assert!(revoked.text().await.unwrap().contains("local Senate CLI"));
+        let me = top.local_api().unwrap().me().await.unwrap();
         assert_eq!(me.person.as_str(), "alice");
         again.shutdown().await;
     }
@@ -1277,12 +1506,12 @@ mod tests {
             .unwrap();
         assert_eq!(contender.unwrap_err().kind(), std::io::ErrorKind::AddrInUse);
         assert_eq!(daemon.base_url(), format!("http://{}", plan.listen));
-        let me = ApiClient::new(&daemon.base_url(), &plan.token)
-            .unwrap()
-            .me()
+        let response = reqwest::Client::new()
+            .get(format!("{}/v1/me", daemon.base_url()))
+            .send()
             .await
             .unwrap();
-        assert_eq!(me.person.as_str(), "alice");
+        assert_eq!(response.status(), 401);
         daemon.shutdown().await.unwrap();
     }
 
@@ -1369,11 +1598,7 @@ mod tests {
             .unwrap();
         let top = machine.senate().unwrap();
         assert_eq!(top.name.as_str(), "alice-desk");
-        let me = ApiClient::new(&top.url, &top.token)
-            .unwrap()
-            .me()
-            .await
-            .unwrap();
+        let me = top.local_api().unwrap().me().await.unwrap();
         assert_eq!(me.senate.as_str(), "alice-desk");
         assert_eq!(top.daemon.hub.speaker_seat(), None);
         // The person presides, and no one works the desk: it waits on her.
@@ -1396,11 +1621,7 @@ mod tests {
         };
         let machine = start("en").await.expect("never refused");
         let top = machine.senate().unwrap();
-        let me = ApiClient::new(&top.url, &top.token)
-            .unwrap()
-            .me()
-            .await
-            .unwrap();
+        let me = top.local_api().unwrap().me().await.unwrap();
         let office = me.office.expect("an office");
         assert_eq!(office.speaker.to_string(), "senator::alice");
         assert_eq!(office.kind, senate_core::SenatorKind::Person);

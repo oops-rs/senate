@@ -180,3 +180,5 @@ pub(crate) mod testing {
         assert_senate_vocabulary("[senator::claude] on senate/refund-v2/alice");
     }
 }
+
+pub mod worker;

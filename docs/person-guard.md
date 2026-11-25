@@ -112,10 +112,35 @@ TTY share the scope, including automation in an already authorized pane.
 Detaching from tmux can leave the pane, its kernel TTY, and its authorization
 alive. An authorized interactive viewer can still type directly into a
 terminal prompt.
-Existing hosts must be restarted to pick up the host socket checks. On
-macOS a replacement daemon needs the installed daemon code pin to regain
-control of an existing host. Recovery after an unsigned or Linux daemon
-restart requires a fresh host at present.
+Existing pre-ticket hosts keep their old sockets until they restart. The
+installer, session list, app, status and doctor identify that condition.
+Versions that never recorded their version are displayed as unrecorded.
+Attach can still open a legacy terminal to save work and prints a warning
+before connecting.
+
+Signed macOS requires the installed daemon pin for a replacement serving
+the same home's bridge socket. Unsigned and unprovisioned Linux or WSL
+also check the UID, active bridge peer and daemon executable path. This
+is advisory. Provisioned Linux additionally verifies both connections
+with pidfds and rejects a daemon in a hosted cgroup. Doctor probes a host
+with an unverified daemon binding and reports any that still do not
+recognize the current process.
+
+Review the migration with
+`senate session restart --all-outdated --dry-run`, then run
+`senate session restart --all-outdated` or name one session at a time.
+Restart requests a checkpoint, stops the terminal, and resumes the
+recorded seat. It refuses recent interactive use or an active turn known
+to the daemon unless forced. When Codex turn state cannot be verified it
+also refuses without force. Pause timeout can leave no new checkpoint.
+Save drafts and finish active work first.
+
+Restart replaces the TUI and PTY. For Claude, Codex and agy it loses unsent
+input, on-screen state and pending dialogs, and an in-flight turn does
+not continue automatically. Saved runtime conversations remain the
+restore target. Claude without a saved transcript starts empty under its
+original ID. Dedicated Codex returns an error if it cannot load the
+recorded thread. It never opens a substitute thread.
 
 These viewer checks cover the terminal host's control, input and screen
 sockets. For dedicated Codex sessions, the supervisor owns the Unix RPC
@@ -163,6 +188,35 @@ release option. This branch does not establish usability of any particular
 private signing key by a hosted agent. Doctor reports a missing, changed, or
 inactive app pin. Unsigned development appliances have no trusted presence
 path.
+
+## The machine server's credentials
+
+The machine's person and native Senate seats use verified local bridge IPC.
+Their machine-server requests go through the private in-process router.
+The public loopback router has no person bearer for the production machine.
+Upgrade revokes the old `senates/top/token` credential and removes the file.
+An old copy gets 401 directing its client to the local Senate CLI or app.
+Doctor warns if the file is still present. Standalone servers and separately
+configured parent connections keep their configured credentials.
+
+No machine Senate seat has a general-purpose server bearer saved on disk.
+Native Claude inbox credentials can be recorded with the session in
+`state.db`. They authenticate delivery into that runtime's inbox, so a
+same-user reader can potentially inject input there. They cannot authorize
+server event writes or substitute for another runtime's verified IPC identity.
+External desk intake uses [separate scoped worker credentials](worker-credentials.md).
+
+An agent that can drive a user's running tmux or screen pane can act with
+the operator proof available in that pane. It can speak through routine
+person IPC and share writable viewer authorization already cached for the
+pane. A detached pane can remain alive. Attachment and foreground process
+group facts do not reliably identify the user's focused pane across
+multiplexers, nor distinguish synthetic input in the same pane. Restrict
+access to terminal automation and check which terminal tools have it.
+
+Committee logs, including thread, memory, search and brief data on disk,
+are protected by the filesystem like transcripts. IPC verification restricts
+the daemon endpoints and does not provide a separate filesystem boundary.
 
 ## Writable trust records
 

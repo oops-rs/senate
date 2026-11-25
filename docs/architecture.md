@@ -512,8 +512,9 @@ The daemon is the same at every level: `senated`.
 - `senated --config senated.toml`: a Senate server.
 - `senated --machine`: a developer machine, from `senate.toml` in the
   Senate home. It hosts exactly one Senate, the machine's (`[local]`), its
-  log in SQLite under `senates/top/`, on loopback only, with a token
-  generated there and never sent elsewhere. Every session of the machine
+  log in SQLite under `senates/top/`. The bridge authenticates machine person
+  actions through a private in-process router. The CLI and app use local IPC.
+  External desk intake uses [scoped worker credentials](worker-credentials.md). Every session of the machine
   sits in it (`claude`, `codex`, and whatever names sessions are pinned
   to). With `server_url` and `token` as well, it is a child of the Senate
   there: it registers upward with the person as its Speaker. It runs the

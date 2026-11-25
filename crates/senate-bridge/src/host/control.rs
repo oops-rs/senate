@@ -146,7 +146,7 @@ pub(super) async fn next_stop(
 ) -> UnixStream {
     loop {
         let (mut stream, _) = accept(listener).await;
-        if !admission.is_daemon(&stream).await {
+        if !admission.is_daemon(&stream, host).await {
             tracing::warn!(%host, "refused a terminal control request from an unverified daemon peer");
             continue;
         }
@@ -157,6 +157,10 @@ pub(super) async fn next_stop(
         };
         if let Ok(GrantViewer { viewer }) = serde_json::from_str::<GrantViewer>(&line) {
             let _ = stream.write_u8(u8::from(admission.grant(viewer))).await;
+            continue;
+        }
+        if line == r#"{"protocol_probe":true}"# {
+            let _ = stream.write_u8(1).await;
             continue;
         }
         if let Ok(NudgeRequest { nudge }) = serde_json::from_str::<NudgeRequest>(&line) {
@@ -226,6 +230,15 @@ pub(super) async fn next_stop(
         let _ = stream.write_u8(ACCEPTED).await;
         return stream;
     }
+}
+
+pub(crate) async fn refresh_daemon_identity(paths: &Paths, id: &EventId) {
+    let _ = tokio::time::timeout(Duration::from_millis(300), async {
+        let mut stream = UnixStream::connect(socket(paths, id)).await?;
+        stream.write_all(b"{\"protocol_probe\":true}\n").await?;
+        stream.read_u8().await
+    })
+    .await;
 }
 
 #[derive(Deserialize, Serialize)]
@@ -500,6 +513,7 @@ pub(crate) async fn begin_stop(
     force: bool,
     unconfirmed_audit: NewEvent,
     codex: Option<(&crate::delivery::codex::Transport, &str)>,
+    idle_only: bool,
 ) -> Result<UnixStream, IpcError> {
     let mut payload = serde_json::to_vec(&StopRequest {
         prepare_interrupt: codex.is_some(),
@@ -526,10 +540,19 @@ pub(crate) async fn begin_stop(
         // Hosts from before the handshake already committed on ACCEPTED. Still
         // interrupt their shared thread before reporting a successful stop.
         let interrupt = async {
+            use crate::delivery::codex::ThreadState;
             let mut server = crate::delivery::codex::AppServer::connect(transport).await?;
-            server.interrupt_for_stop(thread).await
+            if idle_only {
+                // An unforced restart must not interrupt a turn that began
+                // after preflight. A dropped stream cancels a staged stop.
+                return server
+                    .thread_state(thread)
+                    .await
+                    .map(|state| matches!(state, ThreadState::Idle | ThreadState::NotLoaded));
+            }
+            server.interrupt_for_stop(thread).await.map(|()| true)
         };
-        tokio::time::timeout(INTERRUPT_LIMIT, interrupt)
+        let ready = tokio::time::timeout(INTERRUPT_LIMIT, interrupt)
             .await
             .map_err(|_| {
                 IpcError::internal(format!(
@@ -541,6 +564,11 @@ pub(crate) async fn begin_stop(
                     "could not confirm Codex thread {thread} stopped: {e}"
                 ))
             })?;
+        if !ready {
+            return Err(IpcError::bad_request(
+                "Codex started a turn before restart could stop the host. Use --force to interrupt it.",
+            ));
+        }
     }
     let reply = if first == READY_FOR_INTERRUPT && codex.is_some() {
         stream

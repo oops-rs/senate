@@ -112,7 +112,7 @@ pub(crate) async fn supervise(
     program: &Path,
     cwd: &Path,
 ) -> Result<()> {
-    let daemon = bind_process(std::os::unix::process::parent_id())?;
+    let daemon = super::DaemonIdentity::capture(std::os::unix::process::parent_id())?;
     let executable = std::env::current_exe()?.canonicalize()?;
     let dir = directory(paths, id);
     ensure!(
@@ -172,7 +172,7 @@ pub(crate) async fn supervise(
     let mut byte = [0];
     let (mut attached, host) = tokio::select! {
         biased;
-        result = tokio::time::timeout(HOST_LEASE, accept_host(&lease, &daemon, &executable)) => {
+        result = tokio::time::timeout(HOST_LEASE, accept_host(&lease, &daemon.process, &executable)) => {
             result.context("terminal host did not acquire its Codex backend")??
         }
         _ = publication.read(&mut byte) => return Ok(()),
@@ -255,7 +255,7 @@ type OwnerWatch = tokio::sync::watch::Receiver<Option<BoundProcess>>;
 async fn serve_rpc(
     paths: &Paths,
     listener: &UnixListener,
-    daemon: &BoundProcess,
+    daemon: &super::DaemonIdentity,
     backend: &BoundProcess,
     upstream: SocketAddrV4,
     token: &str,
@@ -268,15 +268,7 @@ async fn serve_rpc(
             accepted = listener.accept(), if clients.len() < 64 => {
                 let (stream, _) = accepted?;
                 let Some(pid) = super::Admission::peer(&stream) else { continue };
-                let local_daemon = if daemon.live() {
-                    pid == daemon.pid
-                } else {
-                    #[cfg(target_os = "macos")]
-                    let trusted = super::replacement_daemon(paths, pid).await;
-                    #[cfg(not(target_os = "macos"))]
-                    let trusted = { let _ = paths; false };
-                    trusted
-                };
+                let local_daemon = daemon.admits(paths, &stream).await;
                 let terminal = host.borrow().as_ref().is_some_and(|host| is_child(pid, host));
                 if !local_daemon && !terminal { continue }
                 let Ok(peer) = bind_process(pid) else { continue };

@@ -7,6 +7,7 @@ mod error;
 mod roles;
 mod secretary_work;
 mod sse;
+pub(crate) mod worker;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +39,8 @@ pub(crate) use error::ApiFailure;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
+    pub(crate) machine: bool,
+    pub(crate) workers: Option<std::sync::Arc<worker::Book>>,
     pub hub: Arc<ServerHub>,
     pub auth: Arc<dyn Authenticate>,
     /// The log's epoch, stamped on every response.
@@ -53,6 +56,10 @@ pub(crate) fn router(state: AppState) -> Router {
     let epoch = state.epoch.clone();
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route(senate_core::worker::ADMIN_PATH, post(worker::admin))
+        .route(senate_core::worker::IDENTITY_PATH, get(worker::identity))
+        .route(senate_core::worker::QUESTIONS_PATH, post(worker::question))
+        .route(senate_core::worker::REPLIES_PATH, get(worker::replies))
         .route("/v1/me", get(me))
         .route("/v1/aliases", get(list_aliases))
         .route("/v1/committee-aliases", get(committee_aliases))
@@ -139,6 +146,10 @@ async fn stamp_epoch(State(epoch): State<HeaderValue>, mut response: Response) -
 /// does as an agent names it in the request (see [`AppState::act_as`]).
 struct Person(Name);
 
+/// A capability installed only on the private router cloned by the server.
+#[derive(Clone)]
+pub(crate) struct LocalPerson(pub Name);
+
 impl FromRequestParts<AppState> for Person {
     type Rejection = ApiFailure;
 
@@ -146,18 +157,28 @@ impl FromRequestParts<AppState> for Person {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        if let Some(person) = parts.extensions.get::<LocalPerson>() {
+            return Ok(Person(person.0.clone()));
+        }
+        let refused = || {
+            if state.machine {
+                ApiFailure::machine_unauthorized()
+            } else {
+                ApiFailure::unauthorized()
+            }
+        };
         let token = parts
             .headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(bearer_token)
-            .ok_or_else(ApiFailure::unauthorized)?;
+            .ok_or_else(refused)?;
         state
             .auth
             .authenticate(token)
             .await
             .map(Person)
-            .ok_or_else(ApiFailure::unauthorized)
+            .ok_or_else(refused)
     }
 }
 
@@ -423,11 +444,13 @@ async fn me(State(state): State<AppState>, person: Person) -> Result<Json<Me>, A
 async fn append(
     State(state): State<AppState>,
     person: Person,
+    local: Option<axum::Extension<LocalPerson>>,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<NewEvent>, JsonRejection>,
 ) -> Result<Json<AppendResponse>, ApiFailure> {
     let committee = committee_path(path)?;
     let event = json_body(body)?;
+    crate::rules::check_bridge_origin(&event, local.is_some()).map_err(ApiFailure::forbidden)?;
     if event.committee != committee {
         return Err(ApiFailure::bad_request(format!(
             "body committee {} does not match path committee {committee}",

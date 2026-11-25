@@ -173,7 +173,7 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
             .await
             .unwrap()
             .event;
-        let client = ApiClient::new(&bridge.server_url, &bridge.token).unwrap();
+        let client = top.local_api().unwrap();
         let forwarded = client
             .append(
                 &NewEvent::new(committee.clone(), Kind::Request, Address::Speaker, "review")
@@ -377,7 +377,7 @@ async fn a_machine_under_a_parent_hosts_its_senate_and_registers_it_there() {
             .event;
         let incoming = wait_for_event(top.daemon.hub.as_ref(), &committee, "review").await;
         assert_eq!(incoming.uplink_chat_sender(), Some(&alice));
-        let local = ApiClient::new(&bridge.server_url, &bridge.token).unwrap();
+        let local = top.local_api().unwrap();
         let forwarded = local
             .append(
                 &NewEvent::new(committee.clone(), Kind::Request, Address::Speaker, "review")
@@ -593,7 +593,7 @@ async fn a_parent_that_comes_up_after_the_child_is_learned_and_registered_with()
         let client = client.clone();
         async move { client.me().await.unwrap() }
     };
-    let here = ApiClient::new(&top.url, &top.token).unwrap();
+    let here = top.local_api().unwrap();
     assert_eq!(me(&here).await.parent, None);
 
     // The Senate above comes up, on the address the child was told.

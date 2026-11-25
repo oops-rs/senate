@@ -385,7 +385,7 @@ func prompting(_ name: String, tool: String = "cargo publish", waited: TimeInter
         committee: "refund-v2", runtime: "claude", model: nil, dir: "/work",
         running: true, startedAt: nil, attached: false, typedSecsAgo: nil,
         promptTool: tool, promptSince: Date.now.addingTimeInterval(-waited), promptAnswerable: true,
-        paused: false)
+        paused: false, hostWarning: nil)
 }
 
 /// A Codex approval request received `waited` seconds ago.

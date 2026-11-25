@@ -18,8 +18,12 @@ axum = { workspace = true }
 hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "service", "tokio"] }
 chrono = { workspace = true }
 futures = { workspace = true }
+getrandom = "0.4"
+subtle = { workspace = true }
 hex = { workspace = true }
 ractor = { workspace = true }
+reqwest = { workspace = true }
+tower = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -33,7 +37,6 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 tempfile = { workspace = true }
 eventsource-stream = { workspace = true }
-reqwest = { workspace = true }
 sqlx = { workspace = true }
 
 [lints]

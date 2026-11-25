@@ -147,6 +147,11 @@ impl Shared {
                 ),
             ));
         };
+        if host::legacy_viewer(&Paths::new(&self.home), &host_id) {
+            return Err(IpcError::bad_request(
+                "The terminal host needs restart to be protected. Save work, then run senate session restart.",
+            ));
+        }
         let who = Address::senator(&session.agent).in_text();
         let committee = session
             .committee()
