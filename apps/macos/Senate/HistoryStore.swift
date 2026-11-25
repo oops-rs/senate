@@ -64,9 +64,9 @@ final class HistoryModel {
 
     /// Read on until this session is among the rows (it was found by a
     /// search and is further back than what has been read).
-    func find(_ sessionId: String) async {
+    func find(_ sessionId: String, pages limit: Int = 50) async {
         var pages = 0
-        while row(sessionId) == nil, next != nil || !loadedOnce, pages < 50 {
+        while row(sessionId) == nil, next != nil || !loadedOnce, pages < limit {
             await loadMore()
             pages += 1
         }

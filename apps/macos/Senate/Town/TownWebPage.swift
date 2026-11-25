@@ -63,11 +63,18 @@ final class TownWebPage: NSObject {
     /// The page said `ready`.
     private(set) var ready = false
     private var opens: [ContinuousClock.Instant] = []
-    /// The scene's own settings (`storage.*`), kept across launches for this scene.
-    private var storage: [String: String] = UserDefaults.standard.dictionary(forKey: TownWebPage.storageKey) as? [String: String] ?? [:] {
-        didSet { UserDefaults.standard.set(storage, forKey: TownWebPage.storageKey) }
+    /// The scene's own settings (`storage.*`), kept across launches, one store
+    /// per Senate profile and scene bundle (as the contract says).
+    private var storageKey: String { "scene.storage.\(senateKey).\(Self.bundle)" }
+    private var storage: [String: String] {
+        get { UserDefaults.standard.dictionary(forKey: storageKey) as? [String: String] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: storageKey) }
     }
-    private static let storageKey = "town.scene.storage"
+    /// The scene bundle's identity: its manifest's name.
+    private static let bundle = "town"
+    /// When the person last clicked or pressed a key in the page (real user activation, seen natively).
+    private var activatedAt: ContinuousClock.Instant?
+    private var monitor: Any?
     private var colorScheme = "light"
     private var reduceMotion = false
     private var visible = false
@@ -104,6 +111,7 @@ final class TownWebPage: NSObject {
         web.allowsMagnification = false
         web.allowsLinkPreview = false
         watchWindow()
+        watchActivation()
         Self.noNetwork { [weak self] list in
             guard let self else { return }
             guard let list else {
@@ -138,16 +146,42 @@ final class TownWebPage: NSObject {
         if now { subscribe() } else { client?.stop(); client = nil }
     }
 
-    /// Subscribe with the grant kept for this Senate, or say access is needed.
+    /// Subscribe with the grant kept for this Senate, once the daemon has
+    /// vouched for it (it issued it to Town, it is live, by the installation
+    /// that answers now), or say access is needed.
+    private var checking = false
     private func subscribe() {
-        guard client == nil, ready, sentOnScreen, demo == nil else { return }
-        guard let grant = ObserveAccess.load(senateKey) else {
-            accessNeeded = true
-            send("status", ["state": "access_needed"])
-            return
+        guard client == nil, !checking, ready, sentOnScreen, demo == nil, let core = store?.core else { return }
+        guard let grant = ObserveAccess.load(senateKey) else { return needAccess() }
+        checking = true
+        Task { [weak self] in
+            let endpoint = try? await core.observeEndpoint()
+            let grants = try? await core.observeGrants()
+            guard let self else { return }
+            checking = false
+            guard let endpoint, let grants else {
+                // No Observe here now (daemon down, or older): try again later.
+                send("status", ["state": "data_unavailable"])
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.subscribe() }
+                return
+            }
+            guard ObserveAccess.vouched(grant, grants: grants, installation: endpoint.id) else {
+                ObserveAccess.forget(senateKey)
+                return needAccess()
+            }
+            start(grant, core: core)
         }
+    }
+
+    private func needAccess() {
+        accessNeeded = true
+        send("status", ["state": "access_needed"])
+    }
+
+    private func start(_ grant: ObserveAccess.Grant, core: any AppCoreProtocol) {
+        guard client == nil, sentOnScreen, demo == nil else { return }
         accessNeeded = false
-        let client = ObserveClient(grant: grant)
+        let client = ObserveClient(grant: grant) { try await core.observeEndpoint() }
         client.onSnapshot = { [weak self] in self?.deliver(snapshot: $0) }
         client.onFrame = { [weak self] in self?.deliver(frame: $0) }
         client.onStatus = { [weak self] status in
@@ -157,10 +191,9 @@ final class TownWebPage: NSObject {
             case .unavailable: send("status", ["state": "data_unavailable"])
             case .versionMismatch: send("status", ["state": "version_mismatch"])
             case .accessNeeded:
-                ObserveAccess.forget(senateKey)
                 self.client = nil
-                accessNeeded = true
-                send("status", ["state": "access_needed"])
+                forgetAccess()
+                needAccess()
             }
         }
         self.client = client
@@ -172,16 +205,25 @@ final class TownWebPage: NSObject {
     /// Keychain. Then the town comes alive.
     func grantAccess() async throws {
         guard let core = store?.core else { throw CoreError.NotStarted }
-        let issued = try await core.observeGrant(name: "Town")
-        ObserveAccess.save(.init(url: issued.url, token: issued.token, id: issued.id, expiresAt: issued.expiresAt), senateKey)
+        let issued = try await core.observeGrant(name: ObserveAccess.name)
+        // The installation that issued it (the grant is bound to it).
+        let endpoint = try await core.observeEndpoint()
+        ObserveAccess.save(.init(token: issued.token, id: issued.id, installation: endpoint.id, expiresAt: issued.expiresAt), senateKey)
+        // One live Town grant per Senate: the earlier ones are revoked.
+        for old in (try? await core.observeGrants()) ?? [] where old.name == ObserveAccess.name && old.id != issued.id {
+            try? await core.observeRevoke(id: old.id)
+        }
         accessNeeded = false
         watchLive()
     }
 
-    /// Drop the grant kept for this Senate (the snapshot hook cleans up after itself).
+    /// Drop the grant kept for this Senate, and revoke it on the daemon.
     func forgetAccess() {
         client?.stop()
         client = nil
+        if let grant = ObserveAccess.load(senateKey), let core = store?.core {
+            Task { try? await core.observeRevoke(id: grant.id) }
+        }
         ObserveAccess.forget(senateKey)
     }
 
@@ -320,6 +362,39 @@ final class TownWebPage: NSObject {
         subscribe()
     }
 
+    /// The person clicked or typed in the page within the last second (seen
+    /// by the app, not claimed by the page).
+    private var userActivated: Bool {
+        guard let at = activatedAt else { return false }
+        return ContinuousClock.now - at < .seconds(1)
+    }
+
+    /// Watch real clicks and keys in the page's window, over the page.
+    private func watchActivation() {
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp, .keyDown]) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self, let window = self.web.window, event.window === window else { return }
+                let point = self.web.convert(event.locationInWindow, from: nil)
+                if event.type == .keyDown || self.web.bounds.contains(point) { self.activatedAt = .now }
+            }
+            return event
+        }
+    }
+
+    /// JSON the page may store: strings, finite numbers, booleans, null, and
+    /// arrays and objects of those (nesting bounded).
+    nonisolated static func plainJSON(_ value: Any, depth: Int = 0) -> Bool {
+        guard depth < 16 else { return false }
+        switch value {
+        case is NSNull, is String: return true
+        case let n as NSNumber:
+            return CFGetTypeID(n) == CFBooleanGetTypeID() || n.doubleValue.isFinite
+        case let a as [Any]: return a.allSatisfy { plainJSON($0, depth: depth + 1) }
+        case let o as [String: Any]: return o.values.allSatisfy { plainJSON($0, depth: depth + 1) }
+        default: return false
+        }
+    }
+
     func evaluate(_ js: String, _ args: [String: Any] = [:]) async -> Any? {
         guard ready else { return nil }
         return try? await web.callAsyncJavaScript(js, arguments: args, in: nil, contentWorld: .page)
@@ -373,8 +448,11 @@ final class TownWebPage: NSObject {
                 if let request { send("result", ["ok": false, "code": "quota"], request: request) }
                 return
             }
-            // The app's one router validates and routes; a message carries no proof of a click.
-            let accepted = store?.links.open(url, provenance: .system) ?? false
+            // The app's one router validates the original string and routes. A
+            // click the app itself saw in the page just now counts as the
+            // person's gesture; anything else is a system delivery (no activation).
+            let accepted = store?.links.open(url, provenance: userActivated ? .gesture : .system) ?? false
+            activatedAt = nil
             if let request { send("result", accepted ? ["ok": true] : ["ok": false, "code": "invalid_request"], request: request) }
         case "storage.get", "storage.set", "storage.delete":
             guard let request else { return }
@@ -386,7 +464,11 @@ final class TownWebPage: NSObject {
                 let value = storage[key].flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8), options: .fragmentsAllowed) }
                 send("result", ["ok": true, "value": value ?? NSNull()], request: request)
             case "storage.set":
-                guard let value = data["value"], let json = try? JSONSerialization.data(withJSONObject: value, options: .fragmentsAllowed),
+                // Never trust the page: only plain JSON values (no NaN, no dates),
+                // checked before serialising (which would otherwise throw an
+                // Objective-C exception and take the app down).
+                guard let value = data["value"], Self.plainJSON(value), JSONSerialization.isValidJSONObject([value]),
+                      let json = try? JSONSerialization.data(withJSONObject: value, options: .fragmentsAllowed),
                       json.count <= 16 * 1024,
                       storage.filter({ $0.key != key }).values.reduce(json.count, { $0 + $1.utf8.count }) <= 64 * 1024
                 else { return send("result", ["ok": false, "code": "quota"], request: request) }
@@ -423,12 +505,10 @@ final class TownWebPage: NSObject {
 
 extension TownWebPage: WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
-        // A clicked `senate:` link: cancelled here, handed to the app's one router.
-        if let url = action.request.url, url.scheme == "senate", action.targetFrame?.isMainFrame == true,
-           action.navigationType == .linkActivated {
-            store?.links.open(url: url, provenance: .gesture)
-            return .cancel
-        }
+        // Links from the page go only through `open {url}` (the original string,
+        // validated as sent, with the activation the app saw). A `senate:`
+        // navigation here has already been normalised by WebKit and may come
+        // from a script's click: it is refused, not routed.
         // The page itself; nothing else.
         return action.request.url == page && action.targetFrame?.isMainFrame == true ? .allow : .cancel
     }

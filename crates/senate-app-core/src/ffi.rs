@@ -465,6 +465,34 @@ impl AppCore {
         Ok(reads::thread_view(reply, person.as_ref(), locale))
     }
 
+    /// The thread as [`AppCore::thread`] shows it, without reading it: the
+    /// read marker does not move. For a link resolving its target, and a
+    /// thread shown by a link the person did not click.
+    pub async fn thread_peek(
+        &self,
+        committee: String,
+        thread: u64,
+    ) -> Result<ThreadView, CoreError> {
+        let committee = self.committee_id(&committee)?;
+        let request = Request::Thread {
+            session: SessionSelector::default(),
+            committee: Some(committee),
+            thread: Seq(thread),
+            mark_seen: false,
+        };
+        let locale = self.locale();
+        let reply: ThreadReply = self
+            .on_runtime(move |driver| async move { driver.read::<ThreadReply>(&request).await })
+            .await?;
+        let person = self
+            .driver()?
+            .model()
+            .senates()
+            .next()
+            .map(|s| s.person.clone());
+        Ok(reads::thread_view(reply, person.as_ref(), locale))
+    }
+
     pub async fn desk_item(&self, committee: String, seq: u64) -> Result<DeskItemView, CoreError> {
         let committee = self.committee_id(&committee)?;
         let request = Request::DeskItem {
@@ -597,6 +625,52 @@ impl AppCore {
             id: issued.grant.id,
             expires_at: issued.grant.expires_at.to_rfc3339(),
         })
+    }
+
+    /// Where this machine's Observe is now, as the daemon says over the
+    /// app's own IPC: its installation id and base URL. A scene's client
+    /// asks on every (re)connect and sends its bearer nowhere else.
+    pub async fn observe_endpoint(&self) -> Result<ObserveEndpoint, CoreError> {
+        let request = Request::ObserveAdmin {
+            command: senate_observe::AdminRequest::Identity,
+        };
+        let installation: senate_observe::Installation = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        Ok(ObserveEndpoint {
+            id: installation.id,
+            url: installation.url,
+        })
+    }
+
+    /// The observer grants the daemon holds (ids, names, expiry; no secrets).
+    pub async fn observe_grants(&self) -> Result<Vec<ObserveGrantInfo>, CoreError> {
+        let request = Request::ObserveAdmin {
+            command: senate_observe::AdminRequest::List,
+        };
+        let grants: Vec<senate_observe::GrantInfo> = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        Ok(grants
+            .into_iter()
+            .map(|g| ObserveGrantInfo {
+                id: g.id,
+                name: g.name,
+                expires_at: g.expires_at.to_rfc3339(),
+            })
+            .collect())
+    }
+
+    /// Revoke an observer grant (its bearer stops working at once).
+    pub async fn observe_revoke(&self, id: String) -> Result<(), CoreError> {
+        let request = Request::ObserveAdmin {
+            command: senate_observe::AdminRequest::Revoke { id },
+        };
+        self.on_runtime(
+            move |driver| async move { driver.read::<serde_json::Value>(&request).await },
+        )
+        .await?;
+        Ok(())
     }
 
     /// Local personal activity for two inclusive ISO calendar dates and an
@@ -1334,6 +1408,23 @@ pub struct ObserveGrant {
     pub url: String,
     pub token: String,
     pub id: String,
+    /// RFC 3339.
+    pub expires_at: String,
+}
+
+/// Where this machine's Observe is ([`AppCore::observe_endpoint`]).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ObserveEndpoint {
+    /// The installation's public id (the grant is bound to it).
+    pub id: String,
+    pub url: String,
+}
+
+/// An observer grant as the daemon lists it ([`AppCore::observe_grants`]).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ObserveGrantInfo {
+    pub id: String,
+    pub name: String,
     /// RFC 3339.
     pub expires_at: String,
 }

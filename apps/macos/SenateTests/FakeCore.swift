@@ -228,6 +228,24 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
         if missingThreads.contains(thread) { throw CoreError.Failed(message: "no thread \(thread)") }
         return threadView ?? ThreadView(committee: committee, root: thread, title: "", state: nil, stateLabel: nil, kindLabel: "", events: [])
     }
+    func threadPeek(committee: String, thread: UInt64) async throws -> ThreadView {
+        try record("peek \(committee) \(thread)")
+        if missingThreads.contains(thread) { throw CoreError.Failed(message: "no thread \(thread)") }
+        return threadView ?? ThreadView(committee: committee, root: thread, title: "", state: nil, stateLabel: nil, kindLabel: "", events: [])
+    }
+    var observeGrantList: [ObserveGrantInfo] = []
+    func observeEndpoint() async throws -> ObserveEndpoint {
+        try record("observe endpoint")
+        return ObserveEndpoint(id: "this-mac", url: "http://127.0.0.1:1")
+    }
+    func observeGrants() async throws -> [ObserveGrantInfo] {
+        try record("observe grants")
+        return observeGrantList
+    }
+    func observeRevoke(id: String) async throws {
+        try record("observe revoke \(id)")
+        observeGrantList.removeAll { $0.id == id }
+    }
     var committeeThreadRows: [CommitteeThread] = []
     private var activityListeners: [UInt64: ActivityListener] = [:]
     private var nextActivityWatch: UInt64 = 1
