@@ -108,8 +108,9 @@ SENATE_SIGN_IDENTITY="Apple Development" scripts/release.sh --no-notarize
 Gatekeeper refuses such a build on another Mac. `scripts/release.sh --help`
 lists the same.
 
-Attach to the release for the tag: the DMG, `senate-remote-admin` and
-`senate-remote-admin.sha256`, and put the helper's checksum in the release
+Attach the DMG to the release for the tag. The remote administrator helper
+(`senate-remote-admin` and its `.sha256`) is experimental and is attached
+only when the owner says so; when it is, put its checksum in the release
 notes (the README's "Remote machines" says why).
 
 ## 7. Installing
@@ -125,7 +126,22 @@ deploy/stage-check.sh apps/macos/build/release ~/.senate/bin/senate
 
 It starts the signed daemon as a disposable service with its own home beside
 the live one, touches nothing live, and ends with `READY TO INSTALL` or
-`NOT READY` and the failing step. Install only after `READY TO INSTALL`:
-`cargo install senate senated`, then `senate setup service install --yes`,
-which replaces the running service; `senate setup doctor` says whether the
-service runs the version installed.
+`NOT READY` and the failing step. Install only after `READY TO INSTALL`.
+
+On a Mac, install the signed binaries the check ran against, not ones built
+by `cargo install`: an unsigned build cannot prove a person's terminal, so
+person-only commands would be refused.
+
+1. Back up `~/.senate/state.db` and the log database, and keep the current
+   app and binaries where they can be put back.
+2. Replace `/Applications/Senate.app` and `~/.cargo/bin/senate` with the new
+   ones. Remove the old file first, then copy: macOS kills a signed binary
+   that was overwritten in place.
+3. `senate setup service install --yes --senated apps/macos/build/release/senated --app /Applications/Senate.app`
+   replaces the running service.
+4. `senate setup doctor` says whether the service runs the version
+   installed; `senate session restart --all-outdated --dry-run` lists the
+   hosted sessions still on the old host.
+
+Elsewhere: `cargo install senate senated`, then
+`senate setup service install --yes`.
