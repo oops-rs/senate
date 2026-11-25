@@ -382,9 +382,28 @@ impl GitFacts {
     }
 }
 
-/// What git says about `cwd`, with no file read. Each git call is bounded by
-/// `timeout`; anything that fails or times out is simply absent.
+/// What git says about `cwd`, with no `.senate/` file read: from the
+/// repository's own files where they settle it ([`crate::git_read`]), and
+/// from `git` itself otherwise.
 async fn git_state(cwd: &Path, timeout: Duration) -> GitFacts {
+    let dir = cwd.to_path_buf();
+    match tokio::task::spawn_blocking(move || crate::git_read::read(&dir)).await {
+        Ok(crate::git_read::Answer::Repository(repository)) => GitFacts {
+            branch: repository.branch,
+            toplevel: Some(repository.toplevel),
+            common_dir: Some(repository.common_dir),
+            head: repository.head,
+            committee_file: None,
+            agent_file: None,
+        },
+        Ok(crate::git_read::Answer::NotARepository) => GitFacts::default(),
+        Ok(crate::git_read::Answer::Uncertain) | Err(_) => git_state_by_git(cwd, timeout).await,
+    }
+}
+
+/// [`git_state`] by asking `git`. Each call is bounded by `timeout`;
+/// anything that fails or times out is simply absent.
+async fn git_state_by_git(cwd: &Path, timeout: Duration) -> GitFacts {
     let (toplevel, branch, common, head) = tokio::join!(
         git_line(cwd, &["rev-parse", "--show-toplevel"], timeout),
         git_line(cwd, &["symbolic-ref", "--short", "-q", "HEAD"], timeout),

@@ -1356,6 +1356,8 @@ impl Shared {
             name: name.as_deref(),
             model: &model,
             prompt_quiet: self.timing.screen_prompt_quiet,
+            // A test's daemon: its hosts end with the test's process.
+            test_owner: self.scope_fixture.then(crate::testenv::fixture_owner),
         };
         let session_runtime = Runtime::from(runtime);
         let mut reply = SpawnReply {

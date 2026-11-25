@@ -14,7 +14,9 @@
 //! Every 20 s it asks for one more approval (`FAKE_APPROVAL_EVERY=<s>`,
 //! 0 for never). Ctrl-C stops it.
 //! `FAKE_THREADS=2000` adds that many threads (and a 5000-event thread 990,
-//! `FAKE_EVENTS` to change it), to measure the app with a large inbox. It only ever
+//! `FAKE_EVENTS` to change it), to measure the app with a large inbox.
+//! `FAKE_SESSIONS_EVERY_MS=50` says `sessions` that often, as twenty busy
+//! agents' hooks do (`FAKE_INBOX_EVERY_MS` likewise for an inbox line). It only ever
 //! writes under `SENATE_HOME`, which this example requires to be set.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -125,6 +127,44 @@ async fn main() {
     let world = Arc::new(Mutex::new(w));
     let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
     println!("fake daemon on {}", socket.display());
+    let every_ms = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis)
+    };
+    // FAKE_SESSIONS_EVERY_MS=<ms>: that often a hosted session did something
+    // (each in turn) and the daemon says `sessions`, as it does on every hook
+    // of every session: 50 is twenty busy agents' worth, to measure the app.
+    if let Some(every) = every_ms("FAKE_SESSIONS_EVERY_MS") {
+        let mut turn = 0;
+        daemon.emit_every(every, move |w| {
+            let rows = &mut w.sessions.rows;
+            if !rows.is_empty() {
+                turn = (turn + 1) % rows.len();
+                rows[turn].last_activity = chrono::Utc::now();
+            }
+            WatchEvent::Sessions
+        });
+        println!("a sessions line every {} ms", every.as_millis());
+    }
+    // FAKE_INBOX_EVERY_MS=<ms>: that often the daemon says something was
+    // delivered to `claude` on refund-v2 (its inbox and the docket are read
+    // again; the threads are the same ones).
+    if let Some(every) = every_ms("FAKE_INBOX_EVERY_MS") {
+        let mut seq = 100_000;
+        daemon.emit_every(every, move |_| {
+            seq += 1;
+            WatchEvent::Inbox {
+                agent: common::path("claude"),
+                committee: common::committee(),
+                seq: senate_core::Seq(seq),
+                kind: senate_core::Kind::Note,
+            }
+        });
+        println!("an inbox line every {} ms", every.as_millis());
+    }
     // FAKE_APPROVAL_EVERY=<s>: how often another approval arrives (0:
     // never, which the UI tests use so the lists hold still).
     let every = std::env::var("FAKE_APPROVAL_EVERY")

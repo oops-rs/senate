@@ -1859,6 +1859,25 @@ impl Store {
             .optional()?)
     }
 
+    /// The terminal hosts of the sessions that have not ended: the only
+    /// hosts that can have anything on their screen to report.
+    pub(crate) fn open_session_hosts(&self) -> Result<Vec<EventId>, StoreError> {
+        if !self.has_host_id {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn();
+        let mut query = conn.prepare_cached(
+            "SELECT DISTINCT host_id FROM sessions
+             WHERE host_id IS NOT NULL AND state != 'ended'",
+        )?;
+        let rows = query.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(parse_host_id(&row?)?);
+        }
+        Ok(out)
+    }
+
     /// Process ownership can survive a failed inbox push that marked the row stale.
     pub(crate) fn hosted_claude_bindings(&self) -> Result<Vec<(String, EventId)>, StoreError> {
         let conn = self.conn();

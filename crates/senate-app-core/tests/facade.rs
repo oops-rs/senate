@@ -21,6 +21,8 @@ use common::{FakeDaemon, setup};
 #[derive(Default)]
 struct Listener {
     last: Mutex<Option<AppState>>,
+    /// How many states it was handed.
+    states: std::sync::atomic::AtomicUsize,
     approvals: Mutex<Vec<ApprovalRequest>>,
     notes: Mutex<Vec<senate_app_core::ffi::PersonNote>>,
     prompts: Mutex<Vec<HostedSession>>,
@@ -28,6 +30,8 @@ struct Listener {
 
 impl CoreListener for Listener {
     fn on_state(&self, state: AppState) {
+        self.states
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.last.lock().unwrap() = Some(state);
     }
     fn on_approval_requested(&self, approval: ApprovalRequest) {
@@ -360,6 +364,96 @@ async fn snapshots_and_actions_through_the_facade() {
             ..
         }
     )));
+}
+
+/// The daemon says `sessions` on every hook of every session and sweeps
+/// every half minute; while none of it changes what the app shows, the
+/// listener is not handed the state it already has. (The names the app
+/// splits mentions with count as part of the state, and are the process's:
+/// another test may change them meanwhile, which is the one push allowed.)
+#[tokio::test]
+async fn a_state_the_listener_already_has_is_not_pushed_again() {
+    use senate_bridge::ipc::WatchEvent;
+    use std::sync::atomic::Ordering;
+
+    let (dir, socket, world) = setup();
+    world.lock().unwrap().sessions = common::hosted_sessions();
+    let daemon = FakeDaemon::start(&socket, Arc::clone(&world));
+    let core = AppCore::new(Some(dir.path().display().to_string()), Some("en".into())).unwrap();
+    let listener = Arc::new(Listener::default());
+    core.start(listener.clone()).unwrap();
+    until(&listener, "everything read", |s| {
+        s.online
+            && s.inbox.len() == 2
+            && s.approvals.len() == 1
+            && !s.docket.is_empty()
+            && s.sessions.len() == 2
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let states = || listener.states.load(Ordering::SeqCst);
+    let names = senate_app_core::ffi::mention_names_version;
+    // The names are the process's, and another test may have changed them
+    // since this listener's last state: that state is owed, and one line
+    // from the daemon brings it. Counting starts once it has come.
+    loop {
+        let version = names();
+        daemon.emit(WatchEvent::Sessions);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if names() == version {
+            break;
+        }
+    }
+
+    // Forty hooks, a status sweep and a refresh, none changing anything.
+    let (before, names_before) = (states(), names());
+    let was = listener.last.lock().unwrap().clone();
+    for _ in 0..40 {
+        daemon.emit(WatchEvent::Sessions);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let status = world.lock().unwrap().status.clone();
+    daemon.emit(WatchEvent::Status(Box::new(status)));
+    core.refresh().unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let renamed = usize::try_from(names() - names_before).unwrap();
+    let reads = |what: fn(&Request) -> bool| daemon.requests().iter().filter(|r| what(r)).count();
+    assert!(
+        reads(|r| matches!(r, Request::Sessions)) >= 2
+            && reads(|r| matches!(r, Request::Inbox { .. })) >= 4,
+        "the hooks and the sweep were read"
+    );
+    if states() - before > renamed {
+        // Say what differed: a state is pushed for a reason.
+        let now = listener.last.lock().unwrap().clone();
+        let (was, now) = (format!("{was:#?}"), format!("{now:#?}"));
+        let differ: Vec<_> = was
+            .lines()
+            .zip(now.lines())
+            .filter(|(a, b)| a != b)
+            .take(6)
+            .collect();
+        panic!(
+            "{} states for nothing new ({renamed} changes of names): {differ:#?}",
+            states() - before
+        );
+    }
+
+    // What does change arrives, once.
+    let (before, names_before) = (states(), names());
+    world.lock().unwrap().sessions.rows[0].working = true;
+    daemon.emit(WatchEvent::Sessions);
+    until(&listener, "the session at work", |s| {
+        s.groups.iter().flat_map(|g| &g.sessions).any(|x| x.working)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let renamed = usize::try_from(names() - names_before).unwrap();
+    assert!(
+        (1..=1 + renamed).contains(&(states() - before)),
+        "{} states for one change",
+        states() - before
+    );
 }
 
 #[tokio::test]

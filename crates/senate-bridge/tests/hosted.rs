@@ -728,6 +728,78 @@ async fn host_ready_without_publication_closes_its_tui_group() {
     .await;
 }
 
+/// A test process that aborts runs no destructor, so nothing kills its
+/// hosts: a host started for a test watches the test's process instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_started_for_a_test_ends_with_the_tests_process() {
+    use rustix::io::Errno;
+    use rustix::process::{Pid, test_kill_process_group};
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt as _;
+
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let paths = senate_bridge::Paths::new(root.path());
+    let id = senate_core::EventId::new();
+    let directory = root.path().join("hosts").join(id.to_string());
+    std::fs::create_dir_all(&directory).unwrap();
+    let program = root.path().join("fixture");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nprintf '%s\\n' \"$$\" > leader.tmp\nmv leader.tmp leader\nsleep 300\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // A process standing for the test's own: the one this host is told of.
+    let mut owner = std::process::Command::new("sleep")
+        .arg("300")
+        .spawn()
+        .unwrap();
+    let mut cmd = tokio::process::Command::new(BIN);
+    testenv::isolate_async(&mut cmd, root.path());
+    cmd.args(["session-host", &id.to_string(), "claude"])
+        .arg(root.path())
+        .args(["native-id", "--program"])
+        .arg(program)
+        .env("SENATE_HOME", paths.home())
+        .env(testenv::OWNER_ENV, owner.id().to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().unwrap();
+    let _hosts = KillHosts(paths.clone());
+    let ready = tokio::time::timeout(TIMEOUT, child.stdout.as_mut().unwrap().read_u8())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ready, 1);
+    let mut publication = child.stdin.take().unwrap();
+    publication.write_all(&[1]).await.unwrap();
+    let leader = eventually("the fixture's process", TIMEOUT, || {
+        let pid = std::fs::read_to_string(root.path().join("leader")).ok()?;
+        Pid::from_raw(pid.trim().parse().ok()?)
+    })
+    .await;
+    // Published and serving, with its owner alive: it stays.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(2500), child.wait())
+            .await
+            .is_err()
+    );
+
+    owner.kill().unwrap();
+    owner.wait().unwrap();
+    tokio::time::timeout(TIMEOUT, child.wait())
+        .await
+        .expect("the host outlived its test's process")
+        .unwrap();
+    eventually("the TUI to go with its host", TIMEOUT, || {
+        (test_kill_process_group(leader) == Err(Errno::SRCH)).then_some(())
+    })
+    .await;
+    drop(publication);
+}
+
 /// A TUI asks its terminal for colours as it starts, when nobody can have
 /// attached yet, and turns on reports a later viewer's terminal never saw.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

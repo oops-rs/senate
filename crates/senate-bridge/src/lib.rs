@@ -76,6 +76,7 @@ pub mod doctor;
 pub mod fd;
 pub mod follow;
 pub mod format;
+mod git_read;
 pub mod hook;
 pub mod host;
 mod host_approval;

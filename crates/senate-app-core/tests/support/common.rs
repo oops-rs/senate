@@ -448,6 +448,28 @@ impl FakeDaemon {
         let _ = self.events.send(event);
     }
 
+    /// Every `every`, change the world with `next` and emit the event it
+    /// returns, until the daemon stops: a steady stream, to measure the app
+    /// under one (`FAKE_SESSIONS_EVERY_MS`, `FAKE_INBOX_EVERY_MS`).
+    pub fn emit_every(
+        &self,
+        every: std::time::Duration,
+        mut next: impl FnMut(&mut World) -> WatchEvent + Send + 'static,
+    ) {
+        let world = Arc::clone(&self.world);
+        let events = self.events.clone();
+        let task = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(every);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let event = next(&mut world.lock().unwrap());
+                let _ = events.send(event);
+            }
+        });
+        self.tasks.lock().unwrap().push(task.abort_handle());
+    }
+
     pub fn requests(&self) -> Vec<Request> {
         self.world.lock().unwrap().requests.clone()
     }

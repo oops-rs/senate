@@ -399,6 +399,9 @@ pub struct SessionCommand<'a> {
     pub model: &'a HostedModel,
     /// See [`prompt::QUIET`].
     pub prompt_quiet: Duration,
+    /// Started by a test's daemon: the test's process, which the host is
+    /// not to outlive ([`crate::testenv::OWNER_ENV`]).
+    pub test_owner: Option<u32>,
 }
 
 pub(crate) const READY: u8 = 1;
@@ -776,6 +779,9 @@ pub(crate) fn start(
         .env(HOME_ENV, paths.home())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
+    if let Some(owner) = session.test_owner {
+        command.env(crate::testenv::OWNER_ENV, owner.to_string());
+    }
     if session.resume {
         command.arg("--resume");
     }
@@ -1292,11 +1298,17 @@ const DIRECTORY_POLL: Duration = Duration::from_secs(1);
 /// outlive a daemon restart, which finds it again by its directory and
 /// lock (`senate session restore`).
 async fn vanished(dir: &Path) {
+    // Started for a test: the test's process ending is the same to this
+    // host as its home being deleted, which an aborted test never does.
+    let test_owner = crate::testenv::owner();
     loop {
         tokio::time::sleep(DIRECTORY_POLL).await;
         if let Err(error) = std::fs::symlink_metadata(dir)
             && error.kind() == io::ErrorKind::NotFound
         {
+            return;
+        }
+        if test_owner.is_some_and(|pid| !crate::session::pid_alive(pid)) {
             return;
         }
     }

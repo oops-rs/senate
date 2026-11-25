@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use senate_app_core::AppState;
-use senate_app_core::link::{Backoff, Driver, Link, Sink};
+use senate_app_core::link::{Backoff, Driver, Link, PUBLISH_EVERY, Sink};
 use senate_app_core::model::{Action, Failure, Model};
 use senate_bridge::approvals::{Approval, Decision, ResolvedBy};
 use senate_bridge::ipc::{Request, WatchEvent};
@@ -23,11 +23,27 @@ use common::{FakeDaemon, World, alice, approval, committee, path, setup, suspend
 #[derive(Default, Clone)]
 struct Recorder {
     notified: Arc<Mutex<Vec<String>>>,
+    /// When the sink was handed each model, and the last one.
+    handed: Arc<Mutex<(Vec<tokio::time::Instant>, Option<Model>)>>,
+    /// Per approval notified: whether the model handed before it held it.
+    held: Arc<Mutex<Vec<bool>>>,
 }
 
 impl Sink for Recorder {
-    fn changed(&self, _model: &Model) {}
+    fn changed(&self, model: &Model) {
+        let mut handed = self.handed.lock().unwrap();
+        handed.0.push(tokio::time::Instant::now());
+        handed.1 = Some(model.clone());
+    }
     fn approval_arrived(&self, approval: &Approval) {
+        let held = self
+            .handed
+            .lock()
+            .unwrap()
+            .1
+            .as_ref()
+            .is_some_and(|m| m.approvals.contains_key(&approval.id));
+        self.held.lock().unwrap().push(held);
         self.notified.lock().unwrap().push(approval.id.clone());
     }
 }
@@ -488,6 +504,83 @@ async fn reconnect_now_cuts_a_long_wait_short() {
     let _daemon = FakeDaemon::start(&socket, world);
     driver.reconnect_now();
     until(&driver, "online at once", |s| s.online).await;
+}
+
+/// Changes that come faster than [`PUBLISH_EVERY`] share snapshots: the sink
+/// is handed the model at most that often, and always as the last change
+/// left it.
+#[tokio::test]
+async fn changes_in_a_burst_share_snapshots_and_the_last_one_is_the_latest() {
+    let (_dir, socket, world) = setup();
+    let _daemon = FakeDaemon::start(&socket, world);
+    let (driver, sink) = driver(&socket, Locale::En);
+    until(&driver, "everything read", |s| {
+        s.online && s.inbox.len() == 2 && s.approvals.len() == 1 && s.counts.docket == 2
+    })
+    .await;
+    // Quiet: the reads of connecting (the sessions, 300 ms in) are done.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let handed = || sink.handed.lock().unwrap().0.len();
+    let error = |i: usize| Some(Failure::Daemon(format!("change {i}")));
+    let last = || sink.handed.lock().unwrap().1.clone().unwrap().last_error;
+
+    // All at once: one snapshot, of the last.
+    let before = handed();
+    for i in 0..200 {
+        driver.model().last_error = error(i);
+        driver.changed();
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(handed() - before, 1, "200 changes at once");
+    assert_eq!(last(), error(199));
+
+    // One every 5 ms: a snapshot at once, then one per interval, and the
+    // last change is in the last of them.
+    let before = handed();
+    let started = tokio::time::Instant::now();
+    for i in 200..260 {
+        driver.model().last_error = error(i);
+        driver.changed();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let burst = started.elapsed();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let times = sink.handed.lock().unwrap().0[before..].to_vec();
+    let most = usize::try_from(burst.as_millis() / PUBLISH_EVERY.as_millis()).unwrap() + 2;
+    assert!(
+        (2..=most).contains(&times.len()),
+        "{} snapshots for 60 changes over {burst:?}",
+        times.len()
+    );
+    assert!(
+        times.windows(2).all(|w| w[1] - w[0] >= PUBLISH_EVERY),
+        "{times:?}"
+    );
+    assert_eq!(last(), error(259));
+}
+
+/// A notice is about something the sink already has: the state goes first,
+/// however recently one went, and the notice right behind it.
+#[tokio::test]
+async fn a_notice_comes_after_the_state_that_holds_what_it_is_about() {
+    let (_dir, socket, world) = setup();
+    let daemon = FakeDaemon::start(&socket, world.clone());
+    let (driver, sink) = driver(&socket, Locale::En);
+    until(&driver, "approval", |s| s.approvals.len() == 1).await;
+
+    // A snapshot has just gone: the next one would wait its turn.
+    driver.model().last_error = Some(Failure::EmptyReply);
+    driver.changed();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let next = approval("019a-thread:9");
+    world.lock().unwrap().approvals.push(next.clone());
+    daemon.emit(WatchEvent::ApprovalRequested(Box::new(next)));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while sink.notified.lock().unwrap().len() < 2 {
+        assert!(tokio::time::Instant::now() < deadline, "no second notice");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(*sink.held.lock().unwrap(), vec![true, true]);
 }
 
 /// The daemon says `sessions` on every hook of every session: a burst of

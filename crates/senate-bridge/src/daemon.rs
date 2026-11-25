@@ -1786,10 +1786,22 @@ impl Shared {
 
     /// Live sessions, after marking those whose Claude process is gone as stale.
     fn checked_live_sessions(&self) -> Result<Vec<Session>, StoreError> {
+        self.checked_live_sessions_of(None)
+    }
+
+    /// [`Self::checked_live_sessions`] for one agent's sessions only: the
+    /// others are neither checked nor returned.
+    fn checked_live_sessions_of(
+        &self,
+        only: Option<&SenatorName>,
+    ) -> Result<Vec<Session>, StoreError> {
         let mut live = Vec::new();
         let mut changed = false;
         let paths = Paths::new(&self.home);
         for s in self.store.live_sessions()? {
+            if only.is_some_and(|agent| &s.agent != agent) {
+                continue;
+            }
             if self.hosts.unpublished(&s.session_id) {
                 continue;
             }
@@ -2657,8 +2669,12 @@ impl Shared {
     /// `agent`'s heartbeat on `committee`: its own live sessions there and
     /// its own delivered cursor.
     pub(crate) async fn heartbeat(&self, agent: &SenatorName, committee: &CommitteeId) {
+        // Its own sessions only. Every stream of every agent beats once a
+        // minute, and each beat used to check every live session of every
+        // agent to count its own: streams times sessions. The sweep still
+        // checks them all.
         let (sessions, cursor) = match (
-            self.checked_live_sessions(),
+            self.checked_live_sessions_of(Some(agent)),
             self.store.delivered_cursor(agent, committee),
         ) {
             (Ok(s), Ok(c)) => (

@@ -4304,6 +4304,9 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                     name: name.as_deref(),
                     model: &model,
                     prompt_quiet,
+                    // Told to this process in its environment, by whoever
+                    // started it.
+                    test_owner: None,
                 },
             ))
         }

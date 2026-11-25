@@ -51,6 +51,7 @@ DEFAULT_ROOT = Path("/tmp/senate-perf")
 # (crates/senate-bridge/src/testenv.rs), and the markers of a coding session.
 INHERITED = [
     "SENATE_TEST_STRICT_IDENTITY",
+    "SENATE_TEST_OWNER",
     "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_SESSION_ID",
@@ -136,7 +137,7 @@ done
 HOOK_HELPER = r"""#!/usr/bin/perl
 # Runs a session's hooks on request, inside the session's process tree.
 # Lines on the FIFO: `hook <count> <result file>` times that many
-# user-prompt-submit hooks; `wait <marker> <result file>` runs the hook
+# user-prompt-submit hooks (`hookgit`: with the hook made to ask `git`); `wait <marker> <result file>` runs the hook
 # until its output carries the marker and writes when that was.
 use strict;
 use warnings;
@@ -155,7 +156,10 @@ while (1) {
     while (my $line = <$in>) {
         chomp $line;
         my ($cmd, $arg, $file) = split / /, $line, 3;
-        if ($cmd eq "hook") {
+        if ($cmd eq "hook" || $cmd eq "hookgit") {
+            # Any variable of git's that is not known to be harmless makes
+            # the hook ask `git` instead of reading the repository's files.
+            local $ENV{GIT_SENATE_BENCH_ASK_GIT} = 1 if $cmd eq "hookgit";
             my @ms;
             for (1 .. $arg) { my $t = time; hook(); push @ms, sprintf("%.3f", (time - $t) * 1000); }
             put($file, join("\n", @ms) . "\n");
@@ -548,6 +552,15 @@ def window(fd: int, rows: int, cols: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
+def answer_cursor_reports(fd: int, chunk: bytes) -> None:
+    """Answer each cursor position request as a terminal does. The viewer
+    measures how wide this terminal draws a few glyphs by printing each at
+    the first column and asking where the cursor went; unanswered, it waits
+    out a 300 ms deadline before the first paint."""
+    for _ in range(chunk.count(b"\x1b[6n")):
+        os.write(fd, b"\x1b[1;2R")
+
+
 def first_session(fx: Fixture) -> tuple[str, Path] | None:
     """A live hosted session's native id and working directory."""
     out = subprocess.run(["ps", "-Ao", "command="], capture_output=True, text=True).stdout
@@ -576,9 +589,10 @@ def cli_latency(fx: Fixture, runs: int) -> list[dict]:
             SENATE_COMPLETE="zsh", _CLAP_COMPLETE_INDEX="2", _CLAP_IFS="\n",
         ),
     ]
-    hook = hook_latency(fx, runs)
-    if hook:
-        rows.append(hook)
+    for ask_git in (False, True):
+        hook = hook_latency(fx, runs, ask_git)
+        if hook:
+            rows.append(hook)
     return rows
 
 
@@ -603,21 +617,27 @@ def ask_helper(fx: Fixture, sid: str, cwd: Path, line: str, timeout: float) -> s
     return None
 
 
-def hook_latency(fx: Fixture, runs: int) -> dict | None:
+def hook_latency(fx: Fixture, runs: int, ask_git: bool = False) -> dict | None:
     """`senate hook user-prompt-submit` as a hosted session's own hook:
-    what every turn of an agent waits for."""
+    what every turn of an agent waits for. With `ask_git`, the same hook
+    made to ask `git` for the repository's facts, as it did before it read
+    them from the repository's files."""
     session = first_session(fx)
     if not session:
         return None
     sid, cwd = session
+    name = "hook user-prompt-submit (hosted session)"
+    if ask_git:
+        name = "the same hook, asking git"
+    command = "hookgit" if ask_git else "hook"
     # The first hooks take what is queued for the session; time the rest.
-    ask_helper(fx, sid, cwd, "hook 3", 30)
-    text = ask_helper(fx, sid, cwd, f"hook {runs}", 60)
+    ask_helper(fx, sid, cwd, f"{command} 3", 30)
+    text = ask_helper(fx, sid, cwd, f"{command} {runs}", 60)
     if not text:
-        return {"name": "hook user-prompt-submit (hosted session)", "median_ms": None, "failures": runs}
+        return {"name": name, "median_ms": None, "failures": runs}
     samples = sorted(float(x) for x in text.split())
     return {
-        "name": "hook user-prompt-submit (hosted session)",
+        "name": name,
         "median_ms": round(statistics.median(samples), 1),
         "p95_ms": round(samples[min(len(samples) - 1, int(len(samples) * 0.95))], 1),
         "min_ms": round(samples[0], 1),
@@ -659,6 +679,7 @@ def attach_first_paint(fx: Fixture, runs: int) -> dict | None:
             if not chunk:
                 break
             seen += chunk
+            answer_cursor_reports(fd, chunk)
             if not answered and b"\x1b[c" in seen:
                 # Answer the terminal queries as a terminal would.
                 os.write(fd, b"\x1b]10;rgb:4c4c/4f4f/6969\x1b\\\x1b]11;rgb:efef/f1f1/f5f5\x1b\\\x1b[?997;2n\x1b[?62;22c")
@@ -780,6 +801,7 @@ def watch_grid(fx: Fixture, seconds: float) -> dict | None:
             except OSError:
                 break
             seen += len(chunk)
+            answer_cursor_reports(fd, chunk)
             if not answered and b"\x1b[c" in chunk:
                 os.write(fd, b"\x1b]10;rgb:4c4c/4f4f/6969\x1b\\\x1b]11;rgb:efef/f1f1/f5f5\x1b\\\x1b[?997;2n\x1b[?62;22c")
                 answered = True

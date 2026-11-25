@@ -443,7 +443,13 @@ impl Shared {
     /// and no permission prompt Senate knows of explains it.
     fn reconcile_screen_prompts(&self, paths: &Paths) -> Result<(), StoreError> {
         let relayed = self.relay.hosted_prompts();
-        for id in host::running_ids(paths)? {
+        // Once a second, so not every host directory there is: a stopped
+        // host's stays until it is pruned, and each cost an open and a
+        // lock to learn again that it is not running. A host counts below
+        // only as the running host of a session that has not ended
+        // (`approval_host`), so those sessions' hosts are all there is to
+        // look at.
+        for id in self.store.open_session_hosts()? {
             let Some(native) = self.store.session_for_host(&id)? else {
                 continue;
             };

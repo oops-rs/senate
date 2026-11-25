@@ -269,6 +269,7 @@ impl AppCore {
         language: Option<String>,
     ) -> Result<Arc<Self>, CoreError> {
         init_logging();
+        crate::perf::start();
         let paths = match senate_home.filter(|h| !h.trim().is_empty()) {
             Some(home) => Paths::new(home),
             None => Paths::from_env().map_err(|e| CoreError::Setup {
@@ -321,7 +322,7 @@ impl AppCore {
     pub fn start(&self, listener: Arc<dyn CoreListener>) -> Result<(), CoreError> {
         let driver = Driver::new(
             Link::new(self.paths.socket()),
-            ListenerSink { listener },
+            ListenerSink::new(listener),
             Backoff::default(),
             self.locale(),
         );
@@ -1245,12 +1246,45 @@ fn locale_of(language: Option<&str>) -> Locale {
 /// The driver's [`Sink`]: snapshots to the foreign listener.
 pub(crate) struct ListenerSink {
     listener: Arc<dyn CoreListener>,
+    /// The snapshot the listener has, and the version of the names
+    /// ([`names::version`]) it was given under.
+    last: Mutex<Option<(u64, AppState)>>,
+}
+
+impl ListenerSink {
+    fn new(listener: Arc<dyn CoreListener>) -> Self {
+        Self {
+            listener,
+            last: Mutex::new(None),
+        }
+    }
 }
 
 impl Sink for ListenerSink {
+    /// The snapshot of `model`, unless the listener already has that very
+    /// one: most of what the daemon says (a hook of a session, a status
+    /// sweep) changes nothing the app shows, and writing a snapshot out and
+    /// reading it in costs several times building it (ten times, with two
+    /// thousand threads). The names count as part of it: the app drops its
+    /// split mentions on the state after they change.
     fn changed(&self, model: &Model) {
-        self.listener
-            .on_state(AppState::from_model(model, Utc::now()));
+        let state = crate::perf::BUILD.time(|| AppState::from_model(model, Utc::now()));
+        let online = state.online;
+        // Held to the end: what the listener has is what was kept.
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        // The baseline of the measure hands over every one.
+        if !crate::perf::every_change() {
+            let names = names::version();
+            let same = crate::perf::COMPARE
+                .time(|| matches!(&*last, Some((v, s)) if *v == names && *s == state));
+            if same {
+                crate::perf::UNCHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+            *last = Some(crate::perf::COMPARE.time(|| (names, state.clone())));
+        }
+        crate::perf::DELIVER.time(|| self.listener.on_state(state));
+        crate::perf::pushed(online);
     }
 
     fn approval_arrived(&self, approval: &Approval) {

@@ -511,6 +511,7 @@ final class CoreStore {
             actionError = nil
         }
         state = next
+        if next.online { Perf.online() }
         if applyDock { Dock.badge(state.online ? waitingCount : 0) }
         if let filter = agentFilter, !state.agents.contains(where: { $0.path == filter }) {
             agentFilter = nil
