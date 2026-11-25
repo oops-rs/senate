@@ -37,8 +37,11 @@ final class CoreStore {
         case committee(String)
         /// The machine's default secretary: its session's page once it runs.
         case secretary
-        /// Town: the Senate's live activity as a little neighbourhood.
-        case town
+        /// An installed scene, by its identity: the Senate's activity as
+        /// that scene draws it.
+        case scene(String)
+        /// The scenes: what they are, adding, updating and removing them.
+        case scenes
         /// Every thread of a committee (the sidebar's "Show all").
         case threads(String)
         /// An ended or stopped session from History, read-only, by its id.
@@ -170,6 +173,10 @@ final class CoreStore {
     let profile = LocalProfile()
     /// `senate://open/v1/…` links: the one validator and router.
     let links = LinkRouter()
+    /// The installed scenes.
+    let scenes: SceneLibrary
+    /// Each scene's page, kept while it stays installed (by scene id).
+    @ObservationIgnored var scenePages: [String: (page: SceneWebPage, list: ObserveList)] = [:]
     /// The conversation page: one web view, kept, for sessions and threads.
     @ObservationIgnored lazy var page = ConversationPage(store: self)
     @ObservationIgnored private let defaults: UserDefaults
@@ -178,9 +185,11 @@ final class CoreStore {
     init(
         makeCore: @escaping MakeCore = CoreStore.realCore,
         defaults: UserDefaults = .standard,
-        notifications: Bool = true
+        notifications: Bool = true,
+        scenes: SceneLibrary? = nil
     ) {
         self.makeCore = makeCore
+        self.scenes = scenes ?? CoreStore.defaultScenes()
         threads = ThreadsModel(defaults: defaults)
         self.defaults = defaults
         drafts = defaults.dictionary(forKey: Self.draftsKey) as? [String: String] ?? [:]
@@ -197,6 +206,30 @@ final class CoreStore {
             notifier.setUp()
         }
         connect()
+    }
+
+    /// The person's scenes; under test, an empty folder of the test's own.
+    static func defaultScenes() -> SceneLibrary {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("senate-scenes-\(UUID().uuidString)", isDirectory: true)
+            return SceneLibrary(root: dir, development: nil)
+        }
+        return SceneLibrary()
+    }
+
+    /// A scene's page (made once, kept), with its list.
+    func scenePage(_ scene: InstalledScene) -> (page: SceneWebPage, list: ObserveList) {
+        if let kept = scenePages[scene.id], kept.page.scene == scene { return kept }
+        scenePages[scene.id]?.page.close()
+        let storage = SceneStorage(folder: scenes.storageFolder(scene.id), senate: state.senates.first?.key ?? "local")
+        let made = (page: SceneWebPage(scene: scene, store: self, storage: storage), list: ObserveList())
+        scenePages[scene.id] = made
+        return made
+    }
+
+    /// Close the page of a scene that changed or went.
+    func dropScenePage(_ id: String) {
+        scenePages.removeValue(forKey: id)?.page.close()
     }
 
     /// Settings' Senate home; empty or unset is `$SENATE_HOME`, else
@@ -230,6 +263,8 @@ final class CoreStore {
     func restart() {
         events?.cancel()
         events = nil
+        // Scene pages hold the old Senate's grants and storage: closed.
+        for id in Array(scenePages.keys) { dropScenePage(id) }
         core = nil
         state = .placeholder
         thread = nil
@@ -367,6 +402,7 @@ final class CoreStore {
         switch p {
         case let .session(id): session(id) != nil
         case let .past(id): history.row(id) != nil || session(id) != nil
+        case let .scene(id): scenes.scene(id) != nil
         case .item: false
         default: true
         }

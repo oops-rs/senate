@@ -27,7 +27,7 @@ final class ObserveClient {
     var onFrame: ([String: Any]) -> Void = { _ in }
     var onStatus: (Status) -> Void = { _ in }
 
-    private let grant: ObserveAccess.Grant
+    private let grant: SceneAccess.Grant
     /// The daemon's word on where Observe is now (app IPC).
     private let endpoint: () async throws -> ObserveEndpoint
     private var task: Task<Void, Never>?
@@ -36,7 +36,7 @@ final class ObserveClient {
     static let maxSnapshot = 4 * 1024 * 1024
     static let maxFrame = 64 * 1024
 
-    init(grant: ObserveAccess.Grant, endpoint: @escaping () async throws -> ObserveEndpoint) {
+    init(grant: SceneAccess.Grant, endpoint: @escaping () async throws -> ObserveEndpoint) {
         self.grant = grant
         self.endpoint = endpoint
         let config = URLSessionConfiguration.ephemeral
@@ -196,19 +196,24 @@ private final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Se
     }
 }
 
-/// The Town's observer grant: created by one click in the app (metadata
-/// only, every committee, this Senate's direct links), kept in the Keychain
-/// as the bearer, its grant id and the installation that issued it (never an
-/// address: that is asked of the daemon each time). Before use it is checked
-/// against the daemon's own list of grants, so an item planted in the
-/// Keychain is ignored.
-enum ObserveAccess {
+/// Scenes' observer grants: one per scene and Senate, created when the
+/// person allows that scene (metadata only, every committee, this Senate's
+/// direct links only if the scene asks), kept in the Keychain as the bearer,
+/// its grant id, the name it was issued under and the installation that
+/// issued it (never an address: that is asked of the daemon each time).
+/// Before use it is checked against the daemon's own list of grants, so an
+/// item planted in the Keychain is ignored.
+enum SceneAccess {
     struct Grant: Codable, Equatable {
         var token: String
         var id: String
         /// The Observe installation that issued it (the grant works with no other).
         var installation: String
         var expiresAt: String
+        /// The name it was issued under (`InstalledScene.grantName`).
+        var name: String
+        /// Whether it includes this Senate's direct links.
+        var topology: Bool
 
         var expired: Bool {
             (ISO8601DateFormatter.withFractions.date(from: expiresAt) ?? ISO8601DateFormatter().date(from: expiresAt))
@@ -216,15 +221,17 @@ enum ObserveAccess {
         }
     }
 
-    /// The name Town's grants carry on the daemon.
-    static let name = "Town"
-    private static let service = "dev.senate.app.town.observe"
+    private static let service = "dev.senate.app.scene.observe"
 
-    /// The grant kept for this Senate (`key` names it), if any and still in date.
-    static func load(_ key: String) -> Grant? {
+    /// The Keychain account: the Senate, then the scene.
+    private static func account(_ senate: String, _ scene: String) -> String { "\(scene):\(senate)" }
+
+    /// The grant kept for this scene and Senate, if any and still in date.
+    static func load(_ senate: String, scene: String) -> Grant? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-            kSecAttrAccount as String: key, kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecAttrAccount as String: account(senate, scene), kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var out: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let data = out as? Data,
@@ -232,9 +239,10 @@ enum ObserveAccess {
         return grant
     }
 
-    static func save(_ grant: Grant, _ key: String) {
+    static func save(_ grant: Grant, _ senate: String, scene: String) {
         guard let data = try? JSONEncoder().encode(grant) else { return }
-        let match: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: key]
+        let match: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                                    kSecAttrAccount as String: account(senate, scene)]
         SecItemDelete(match as CFDictionary)
         var add = match
         add[kSecValueData as String] = data
@@ -242,16 +250,76 @@ enum ObserveAccess {
         SecItemAdd(add as CFDictionary, nil)
     }
 
-    static func forget(_ key: String) {
-        let match: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: key]
+    static func forget(_ senate: String, scene: String) {
+        let match: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                                    kSecAttrAccount as String: account(senate, scene)]
         SecItemDelete(match as CFDictionary)
     }
 
-    /// A kept grant the daemon really issued to Town, still live, by the
-    /// installation that answers now: anything else is not used.
-    static func vouched(_ grant: Grant, grants: [ObserveGrantInfo], installation: String) -> Bool {
-        grant.installation == installation && !grant.expired
-            && grants.contains { $0.id == grant.id && $0.name == name }
+    /// Every Keychain item this scene has, for any Senate (a removed scene leaves none).
+    static func forgetEverywhere(scene: String) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+            kSecReturnAttributes as String: true, kSecMatchLimit as String: kSecMatchLimitAll,
+        ]
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess, let items = out as? [[String: Any]] else { return }
+        for item in items {
+            guard let account = item[kSecAttrAccount as String] as? String, account.hasPrefix("\(scene):") else { continue }
+            let match: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                                        kSecAttrAccount as String: account]
+            SecItemDelete(match as CFDictionary)
+        }
+    }
+
+    /// A kept grant the daemon really issued to this scene, still live, by
+    /// the installation that answers now: anything else is not used.
+    static func vouched(_ grant: Grant, grants: [ObserveGrantInfo], installation: String, scene: InstalledScene) -> Bool {
+        grant.installation == installation && !grant.expired && grant.name.hasSuffix(" · \(scene.grantTag)")
+            && grants.contains { $0.id == grant.id && $0.name == grant.name }
+    }
+
+    /// The daemon's grants that belong to this scene (by its tag).
+    static func issued(to scene: InstalledScene, in grants: [ObserveGrantInfo]) -> [ObserveGrantInfo] {
+        grants.filter { $0.name.hasSuffix(" · \(scene.grantTag)") }
+    }
+
+    /// One click: a grant for this scene in this Senate, of exactly the scope
+    /// its manifest asks for, through the person-only path, kept in the
+    /// Keychain. Its earlier grants are revoked: one live grant per scene.
+    static func allow(_ scene: InstalledScene, senate: String, core: any AppCoreProtocol) async throws -> Grant {
+        let issued = try await core.observeGrant(name: scene.grantName, topology: scene.manifest.wantsTopology)
+        let endpoint = try await core.observeEndpoint()
+        let grant = Grant(token: issued.token, id: issued.id, installation: endpoint.id, expiresAt: issued.expiresAt,
+                          name: scene.grantName, topology: scene.manifest.wantsTopology)
+        save(grant, senate, scene: scene.id)
+        for old in Self.issued(to: scene, in: (try? await core.observeGrants()) ?? []) where old.id != issued.id {
+            try? await core.observeRevoke(id: old.id)
+        }
+        return grant
+    }
+
+    /// Revoke every grant this scene holds on the daemon and drop what the
+    /// Keychain keeps for it in this Senate.
+    static func revoke(_ scene: InstalledScene, senate: String, core: (any AppCoreProtocol)?) async {
+        if let core {
+            for grant in Self.issued(to: scene, in: (try? await core.observeGrants()) ?? []) {
+                try? await core.observeRevoke(id: grant.id)
+            }
+        }
+        forget(senate, scene: scene.id)
+    }
+
+    /// For a scene being removed (by its identity, even when its files can no
+    /// longer be read): its grants revoked and every Keychain item gone.
+    static func removeAll(scene id: String, core: (any AppCoreProtocol)?) async {
+        if let core {
+            let tag = " · \(InstalledScene.grantTag(id))"
+            for grant in ((try? await core.observeGrants()) ?? []) where grant.name.hasSuffix(tag) {
+                try? await core.observeRevoke(id: grant.id)
+            }
+        }
+        forgetEverywhere(scene: id)
     }
 }
 

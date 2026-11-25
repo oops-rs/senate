@@ -80,11 +80,9 @@ enum Snapshot {
                 NSApplication.shared.terminate(nil)
                 return
             }
-            // SENATE_APP_SNAPSHOT_TOWN=1: only the Town page (Town/TownSnapshot.swift), then quit.
-            if ProcessInfo.processInfo.environment[TownSnapshot.env] == "1" {
-                await TownSnapshot.run(store, shot: shot) { name in
-                    await capture(dir.appendingPathComponent("\(prefix)\(name).png")) { isMain($0) }
-                }
+            // SENATE_APP_SNAPSHOT_SCENES=1: only the Scenes place and a scene (Scenes/SceneSnapshot.swift), then quit.
+            if ProcessInfo.processInfo.environment[SceneSnapshot.env] == "1" {
+                await SceneSnapshot.run(store, shot: shot)
                 NSApplication.shared.terminate(nil)
                 return
             }

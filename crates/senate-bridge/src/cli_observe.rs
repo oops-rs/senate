@@ -64,7 +64,7 @@ enum Token {
     /// Issue a read-only token. The secret is printed once.
     #[command(after_help = "Examples:
   senate observe token create --name scene --committees senate
-  senate observe token create --name town --committees all --topology")]
+  senate observe token create --name my-scene --committees all --topology")]
     Create {
         /// Display name for the consuming app.
         #[arg(long)]
