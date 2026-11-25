@@ -1266,20 +1266,20 @@ The Senate workspace contains 9 tightly scoped crates:
 
 | Crate | Version | Description |
 | :--- | :--- | :--- |
-| [`senate-core`](crates/senate-core) | `0.13.0` | Core domain types: identifiers, addressing, event envelopes, roster models, and `Hub` seams. |
-| [`senate-log`](crates/senate-log) | `0.13.0` | Append-only log engine supporting `MemoryStore`, `SqliteStore`, and `PgStore` (PostgreSQL). |
-| [`senate-server`](crates/senate-server) | `0.13.0` | Axum-powered HTTP API, Server-Sent Events (SSE) streaming, authentication, and presence leases. |
-| [`senate-speaker`](crates/senate-speaker) | `0.13.0` | Built-in model session engine (actor-based via `ractor`), triage, cover generation, and task synthesis. |
-| [`senate-work`](crates/senate-work) | `0.13.0` | Containerized autonomous worker (`DockerRunner`) and GitHub Pull Request automation (`GhForge`). |
-| [`senate-markdown`](crates/senate-markdown) | `0.13.0` | Markdown as a block tree with streaming diffs, and lazy HTML and terminal rendering with syntax highlighting. |
-| [`senate-remote-admin`](crates/senate-remote-admin) | `0.13.0` | Root-owned administrator helper for remote machine authorization (experimental). |
-| [`senate-bridge`](crates/senate-bridge) | `0.13.0` | Developer workstation bridge daemon, local IPC socket, MCP server, hooks, and the `senate` CLI. |
-| [`senated`](crates/senated) | `0.13.0` | Universal daemon executable (`--config`, `--machine`) and extensible assembly library (`Assembly`). |
-| [`senate-observe-protocol`](crates/senate-observe-protocol) | `0.13.0` | Observe v1 wire types, JSON Schema, and the `senate://` link grammar. |
-| [`senate-observe`](crates/senate-observe) | `0.13.0` | The read-only Observe service: grants, projection, resumable event stream, record and replay. |
-| [`senate-observe-client`](crates/senate-observe-client) | `0.13.0` | Rust client for Observe: bootstrap, resume, and reset handling. |
-| [`senate-scene`](crates/senate-scene) | `0.13.0` | The rules a scene bundle must satisfy: manifest, files, and the `.senatescene` archive. |
-| [`senate-app-core`](crates/senate-app-core) | `0.13.0` | UniFFI Rust bridge backing the native SwiftUI macOS companion app. |
+| [`senate-core`](crates/senate-core) | `0.13.1` | Core domain types: identifiers, addressing, event envelopes, roster models, and `Hub` seams. |
+| [`senate-log`](crates/senate-log) | `0.13.1` | Append-only log engine supporting `MemoryStore`, `SqliteStore`, and `PgStore` (PostgreSQL). |
+| [`senate-server`](crates/senate-server) | `0.13.1` | Axum-powered HTTP API, Server-Sent Events (SSE) streaming, authentication, and presence leases. |
+| [`senate-speaker`](crates/senate-speaker) | `0.13.1` | Built-in model session engine (actor-based via `ractor`), triage, cover generation, and task synthesis. |
+| [`senate-work`](crates/senate-work) | `0.13.1` | Containerized autonomous worker (`DockerRunner`) and GitHub Pull Request automation (`GhForge`). |
+| [`senate-markdown`](crates/senate-markdown) | `0.13.1` | Markdown as a block tree with streaming diffs, and lazy HTML and terminal rendering with syntax highlighting. |
+| [`senate-remote-admin`](crates/senate-remote-admin) | `0.13.1` | Root-owned administrator helper for remote machine authorization (experimental). |
+| [`senate-bridge`](crates/senate-bridge) | `0.13.1` | Developer workstation bridge daemon, local IPC socket, MCP server, hooks, and the `senate` CLI. |
+| [`senated`](crates/senated) | `0.13.1` | Universal daemon executable (`--config`, `--machine`) and extensible assembly library (`Assembly`). |
+| [`senate-observe-protocol`](crates/senate-observe-protocol) | `0.13.1` | Observe v1 wire types, JSON Schema, and the `senate://` link grammar. |
+| [`senate-observe`](crates/senate-observe) | `0.13.1` | The read-only Observe service: grants, projection, resumable event stream, record and replay. |
+| [`senate-observe-client`](crates/senate-observe-client) | `0.13.1` | Rust client for Observe: bootstrap, resume, and reset handling. |
+| [`senate-scene`](crates/senate-scene) | `0.13.1` | The rules a scene bundle must satisfy: manifest, files, and the `.senatescene` archive. |
+| [`senate-app-core`](crates/senate-app-core) | `0.13.1` | UniFFI Rust bridge backing the native SwiftUI macOS companion app. |
 | [`senate-e2e`](crates/senate-e2e) | — | Comprehensive end-to-end integration and lifecycle verification test suite. |
 
 ---
