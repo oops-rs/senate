@@ -17,6 +17,8 @@ struct InstalledScene: Identifiable, Hashable, Sendable {
     let installedAt: Date
     /// Loaded straight from a build folder (`SENATE_APP_SCENE_DEV`).
     let development: Bool
+    /// Installed from an archive the app carries (`Resources/Scenes/<key>.senatescene`): its key.
+    var builtIn: String? = nil
 
     static func == (a: Self, b: Self) -> Bool { a.id == b.id && a.digest == b.digest && a.manifest == b.manifest }
     func hash(into h: inout Hasher) { h.combine(id) }
@@ -57,6 +59,39 @@ struct SceneAsksChange: Equatable {
         addedCapabilities.isEmpty && removedCapabilities.isEmpty && addedReads.isEmpty && removedReads.isEmpty
             && addedWrites.isEmpty && removedWrites.isEmpty && !topologyChanged
     }
+
+    /// It asks for something it did not (or its reach changes): the person sees the update first.
+    var grows: Bool { !addedCapabilities.isEmpty || !addedReads.isEmpty || !addedWrites.isEmpty || topologyChanged }
+}
+
+/// A scene the app carries that is not installed: one the person removed,
+/// offered again.
+struct BuiltInScene: Identifiable, Hashable {
+    /// The archive's name without `.senatescene`.
+    let key: String
+    let archive: URL
+    let name: String
+    let version: String
+    var id: String { key }
+}
+
+/// Semantic-version order for the manifest's `major.minor.patch[-pre]`.
+enum SceneVersion {
+    static func newer(_ a: String, than b: String) -> Bool {
+        func split(_ v: String) -> ([Int], String?) {
+            let parts = v.split(separator: "-", maxSplits: 1).map(String.init)
+            return (parts[0].split(separator: ".").map { Int($0) ?? 0 }, parts.count > 1 ? parts[1] : nil)
+        }
+        let (x, xp) = split(a)
+        let (y, yp) = split(b)
+        if x != y { return x.lexicographicallyPrecedes(y) == false }
+        switch (xp, yp) {
+        case (nil, nil): return false
+        case (nil, _): return true
+        case (_, nil): return false
+        case let (p?, q?): return p.compare(q, options: .numeric) == .orderedDescending
+        }
+    }
 }
 
 /// The scenes installed for this person, in the app's Application Support
@@ -71,9 +106,16 @@ final class SceneLibrary {
     private(set) var scenes: [InstalledScene] = []
     /// A scene that could not be read back (shown in the Scenes place).
     private(set) var damaged: [String] = []
+    /// Built-in scenes the person removed, offered again.
+    private(set) var offered: [BuiltInScene] = []
+    /// Installed built-in scenes whose newer bundled version asks for more:
+    /// scene id to the archive, waiting for the person's Update.
+    private(set) var waitingUpdates: [String: URL] = [:]
 
     @ObservationIgnored let root: URL
     @ObservationIgnored private let development: URL?
+    /// The built-in keys recorded by every installed scene whose record reads, damaged ones included.
+    @ObservationIgnored private var installedBuiltIn: Set<String> = []
 
     /// Where scenes live: `SENATE_APP_SCENES_DIR` in a Debug build (tests,
     /// snapshots), otherwise Application Support/<bundle id>/Scenes.
@@ -99,9 +141,13 @@ final class SceneLibrary {
         return nil
     }
 
-    init(root: URL = SceneLibrary.defaultRoot(), development: URL? = SceneLibrary.developmentFolder()) {
+    /// The app's built-in scenes (`installBuiltIn`), if it carries any.
+    @ObservationIgnored private let builtIn: URL?
+
+    init(root: URL = SceneLibrary.defaultRoot(), development: URL? = SceneLibrary.developmentFolder(), builtIn: URL? = nil) {
         self.root = root
         self.development = development
+        self.builtIn = builtIn
         reload()
     }
 
@@ -113,12 +159,14 @@ final class SceneLibrary {
     private struct Record: Codable {
         var installed_at: Date
         var digest: String
+        var built_in: String?
     }
 
     /// Read the installed scenes again from disk.
     func reload() {
         var found: [InstalledScene] = []
         var broken: [String] = []
+        var builtIn: Set<String> = []
         let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
         // A development scene's identity: from where it is, so its storage and grant last across runs.
         let developmentID = development.map {
@@ -126,10 +174,9 @@ final class SceneLibrary {
         }
         for id in names where InstalledScene.validID(id) && id != developmentID {
             let dir = folder(id)
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            guard let data = try? Data(contentsOf: dir.appendingPathComponent("scene.json")),
-                  let record = try? decoder.decode(Record.self, from: data),
+            let record = readRecord(in: dir)
+            if let key = record?.built_in { builtIn.insert(key) }
+            guard let record,
                   let bundle = try? SceneBundle.scan(dir.appendingPathComponent("bundle", isDirectory: true)),
                   // Exactly what was installed: a changed file makes it unreadable, not different.
                   bundle.digest == record.digest
@@ -138,7 +185,7 @@ final class SceneLibrary {
                 continue
             }
             found.append(InstalledScene(id: id, manifest: bundle.manifest, root: bundle.root, digest: bundle.digest,
-                                        installedAt: record.installed_at, development: false))
+                                        installedAt: record.installed_at, development: false, builtIn: record.built_in))
         }
         found.sort { ($0.installedAt, $0.id) < ($1.installedAt, $1.id) }
         if let development, let id = developmentID {
@@ -151,6 +198,90 @@ final class SceneLibrary {
         }
         scenes = found
         damaged = broken
+        installedBuiltIn = builtIn
+        waitingUpdates = waitingUpdates.filter { id, _ in found.contains { $0.id == id } }
+    }
+
+    private func readRecord(in dir: URL) -> Record? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent("scene.json")) else { return nil }
+        return try? decoder.decode(Record.self, from: data)
+    }
+
+    // MARK: Built-in scenes
+
+    /// Where the app carries its built-in scenes: `Contents/Resources/Scenes`.
+    static func builtInFolder() -> URL? {
+        Bundle.main.resourceURL?.appendingPathComponent("Scenes", isDirectory: true)
+    }
+
+    /// The built-in keys the person removed (`built-in.json` beside the scenes).
+    private var removedFile: URL { root.appendingPathComponent("built-in.json") }
+    private struct Removed: Codable { var removed: [String] }
+
+    private func removedBuiltIn() -> Set<String> {
+        guard let data = try? Data(contentsOf: removedFile), let file = try? JSONDecoder().decode(Removed.self, from: data) else { return [] }
+        return Set(file.removed)
+    }
+
+    private func setRemoved(_ key: String, _ removed: Bool) {
+        var keys = removedBuiltIn()
+        guard keys.contains(key) != removed else { return }
+        if removed { keys.insert(key) } else { keys.remove(key) }
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try? JSONEncoder().encode(Removed(removed: keys.sorted())).write(to: removedFile, options: .atomic)
+    }
+
+    /// At launch: install each built-in scene that is not installed and was
+    /// not removed, through the same checks as Add Scene; update an
+    /// installed one to a newer bundled version when it asks for nothing
+    /// more (otherwise it waits for the person's Update); offer the removed
+    /// ones again. An archive that fails the checks is logged and skipped.
+    func installBuiltIn() {
+        guard let folder = builtIn,
+              let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return }
+        let removed = removedBuiltIn()
+        var offers: [BuiltInScene] = []
+        for name in names.sorted() where name.hasSuffix(".senatescene") {
+            let key = String(name.dropLast(".senatescene".count))
+            let archive = folder.appendingPathComponent(name, isDirectory: false)
+            let candidate: Candidate
+            do {
+                candidate = try inspect(archive, builtIn: key)
+            } catch {
+                Log.app.error("scenes: built-in \(name, privacy: .public) refused: \(String(describing: error), privacy: .public)")
+                continue
+            }
+            if let scene = scenes.first(where: { $0.builtIn == key }) {
+                let newer = SceneVersion.newer(candidate.manifest.version, than: scene.manifest.version)
+                if !newer || candidate.bundle.digest == scene.digest {
+                    discard(candidate)
+                } else if SceneAsksChange(from: scene.manifest, to: candidate.manifest).grows {
+                    discard(candidate)
+                    waitingUpdates[scene.id] = archive
+                } else {
+                    do { try update(scene.id, with: candidate) } catch {
+                        Log.app.error("scenes: built-in \(name, privacy: .public) update failed: \(String(describing: error), privacy: .public)")
+                    }
+                }
+            } else if installedBuiltIn.contains(key) {
+                discard(candidate) // installed but unreadable: shown as damaged, not installed twice
+            } else if removed.contains(key) {
+                offers.append(BuiltInScene(key: key, archive: archive, name: candidate.manifest.name, version: candidate.manifest.version))
+                discard(candidate)
+            } else {
+                do { try install(candidate) } catch {
+                    Log.app.error("scenes: built-in \(name, privacy: .public) install failed: \(String(describing: error), privacy: .public)")
+                }
+            }
+        }
+        offered = offers
+    }
+
+    /// The person updated a scene, or chose not to now: its waiting update is done with for this launch.
+    func clearWaitingUpdate(_ id: String) {
+        waitingUpdates.removeValue(forKey: id)
     }
 
     // MARK: Adding, updating, removing
@@ -162,15 +293,18 @@ final class SceneLibrary {
         let bundle: SceneBundle
         /// A staging folder of ours to delete afterwards (zips), if any.
         let staging: URL?
+        /// One of the app's built-in scenes: its key.
+        var builtIn: String? = nil
         var manifest: SceneManifest { bundle.manifest }
     }
 
-    /// Check a folder or a `.senatescene` zip the person chose.
-    func inspect(_ url: URL) throws -> Candidate {
+    /// Check a folder or a `.senatescene` zip the person chose (or the app
+    /// carries, as the built-in scene `builtIn`).
+    func inspect(_ url: URL, builtIn: String? = nil) throws -> Candidate {
         var st = stat()
         guard lstat(url.path, &st) == 0 else { throw SceneBundle.Problem.notAFolder }
         if (st.st_mode & S_IFMT) == S_IFDIR {
-            return Candidate(bundle: try SceneBundle.scan(url), staging: nil)
+            return Candidate(bundle: try SceneBundle.scan(url), staging: nil, builtIn: builtIn)
         }
         guard (st.st_mode & S_IFMT) == S_IFREG, ["senatescene", "zip"].contains(url.pathExtension.lowercased()) else {
             throw SceneBundle.Problem.notAFolder
@@ -179,7 +313,7 @@ final class SceneLibrary {
         let staging = root.appendingPathComponent(".staging-\(UUID().uuidString)", isDirectory: true)
         do {
             let inner = try SceneArchive.unpack(url, into: staging)
-            return Candidate(bundle: try SceneBundle.scan(inner), staging: staging)
+            return Candidate(bundle: try SceneBundle.scan(inner), staging: staging, builtIn: builtIn)
         } catch {
             try? FileManager.default.removeItem(at: staging)
             throw error
@@ -206,11 +340,15 @@ final class SceneLibrary {
             try candidate.bundle.copy(to: staged.appendingPathComponent("bundle", isDirectory: true))
             let copied = try SceneBundle.scan(staged.appendingPathComponent("bundle", isDirectory: true))
             guard copied.digest == candidate.bundle.digest else { throw CocoaError(.fileWriteUnknown) }
-            try writeRecord(Record(installed_at: now, digest: copied.digest), in: staged)
+            try writeRecord(Record(installed_at: now, digest: copied.digest, built_in: candidate.builtIn), in: staged)
             try fm.moveItem(at: staged, to: folder(id))
         } catch {
             try? fm.removeItem(at: staged)
             throw error
+        }
+        if let key = candidate.builtIn {
+            setRemoved(key, false)
+            offered.removeAll { $0.key == key }
         }
         reload()
         guard let scene = scene(id) else { throw CocoaError(.fileReadCorruptFile) }
@@ -233,17 +371,22 @@ final class SceneLibrary {
         }
         let current = dir.appendingPathComponent("bundle", isDirectory: true)
         _ = try fm.replaceItemAt(current, withItemAt: next)
-        try writeRecord(Record(installed_at: old.installedAt, digest: candidate.bundle.digest), in: dir)
+        try writeRecord(Record(installed_at: old.installedAt, digest: candidate.bundle.digest, built_in: old.builtIn), in: dir)
+        waitingUpdates.removeValue(forKey: id)
         reload()
     }
 
     /// Delete an installed scene's files and storage. Its grants are the
-    /// caller's to revoke first ([`SceneAccess.removeAll`]).
+    /// caller's to revoke first ([`SceneAccess.removeAll`]). A built-in
+    /// scene stays removed, and is offered again.
     func remove(_ id: String) throws {
         guard InstalledScene.validID(id), scene(id)?.development != true else { return }
         let dir = folder(id)
+        let key = scene(id)?.builtIn ?? readRecord(in: dir)?.built_in
+        if let key { setRemoved(key, true) }
         if FileManager.default.fileExists(atPath: dir.path) { try FileManager.default.removeItem(at: dir) }
         reload()
+        if key != nil { installBuiltIn() }
     }
 
     private func writeRecord(_ record: Record, in dir: URL) throws {

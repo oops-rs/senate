@@ -92,11 +92,25 @@ targets:
             CFBundleURLSchemes:
               - $(SENATE_URL_SCHEME)
         NSHumanReadableCopyright: MIT
+    # Built-in scenes (docs/scenes.md): scripts/release.sh checks and stages
+    # the archives and names the folder; any other build carries none. Runs
+    # before Xcode signs the app.
+    postBuildScripts:
+      - name: Copy built-in scenes
+        script: |
+          [ -n "${SENATE_BUNDLED_SCENES_STAGE:-}" ] || exit 0
+          dest="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/Scenes"
+          rm -rf "$dest"
+          mkdir -p "$dest"
+          find "$SENATE_BUNDLED_SCENES_STAGE" -maxdepth 1 -name '*.senatescene' -type f -exec cp {} "$dest/" \;
+        basedOnDependencyAnalysis: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.senate.app
         PRODUCT_NAME: Senate
         SENATE_URL_SCHEME: senate
+        # Set by scripts/release.sh only: the staged built-in scenes.
+        SENATE_BUNDLED_SCENES_STAGE: ""
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # The app's own code runs on the main actor unless it says otherwise.

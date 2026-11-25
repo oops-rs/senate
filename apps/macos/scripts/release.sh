@@ -11,12 +11,16 @@
 #                          "-" signs ad hoc, to check the pipeline without one
 #   SENATE_NOTARY_PROFILE  notarytool keychain profile (default "senate-notary"),
 #                          made once with `xcrun notarytool store-credentials`
+#   SENATE_BUNDLED_SCENES  folder of built-in .senatescene archives to ship in
+#                          the app (default apps/macos/BundledScenes; see its README)
 #
 # Output in build/release/: Senate.app, Senate-<version>.dmg, and the
 # separate remote administrator helper and its SHA-256 checksum.
 set -euo pipefail
 
 app_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+scenes_src="${SENATE_BUNDLED_SCENES:-$app_dir/BundledScenes}"
+[[ "$scenes_src" == /* ]] || scenes_src="$PWD/$scenes_src"
 cd "$app_dir"
 identity="${SENATE_SIGN_IDENTITY:-Developer ID Application}"
 profile="${SENATE_NOTARY_PROFILE:-senate-notary}"
@@ -24,7 +28,7 @@ notarize=1
 for arg in "$@"; do
   case "$arg" in
     --no-notarize) notarize=0 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "release.sh: unknown argument $arg" >&2; exit 2 ;;
   esac
 done
@@ -108,13 +112,33 @@ if [[ -n "$team" ]]; then
     "$out/senated"
 fi
 
+# Built-in scenes: each archive checked by this checkout's `senate scene
+# inspect` (the app's own rules), staged, and copied into the app's
+# Resources/Scenes by the build's "Copy built-in scenes" phase, before signing.
+scenes_stage="$app_dir/build/bundled-scenes"
+rm -rf "$scenes_stage"
+mkdir -p "$scenes_stage"
+shopt -s nullglob
+for scene in "$scenes_src"/*.senatescene; do
+  report="$("$out/senate" scene inspect "$scene")" || die "built-in scene $scene is refused (above)"
+  fingerprint="$(awk '$1 == "fingerprint" { print $2 }' <<<"$report")"
+  say "built-in scene $(basename "$scene"): $(head -1 <<<"$report"), fingerprint $fingerprint"
+  cp "$scene" "$scenes_stage/"
+done
+shopt -u nullglob
+scene_count="$(find "$scenes_stage" -name '*.senatescene' | wc -l | tr -d ' ')"
+say "$scene_count built-in scene(s) from $scenes_src"
+
 xcodebuild -project Senate.xcodeproj -scheme Senate -configuration Release \
   -derivedDataPath build -archivePath "$archive" archive \
   CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$identity" ${team_flags[@]+"${team_flags[@]}"} \
+  SENATE_BUNDLED_SCENES_STAGE="$scenes_stage" \
   OTHER_CODE_SIGN_FLAGS="--timestamp" | grep -E "^(\*\*|error|warning: [^S])" || true
 [[ -d "$archive/Products/Applications/Senate.app" ]] || die "the archive has no Senate.app"
 ditto "$archive/Products/Applications/Senate.app" "$out/Senate.app"
 app="$out/Senate.app"
+shipped="$(find "$app/Contents/Resources/Scenes" -name '*.senatescene' 2>/dev/null | wc -l | tr -d ' ')"
+[[ "$shipped" == "$scene_count" ]] || die "the app carries $shipped built-in scene(s), expected $scene_count"
 
 say "checking the signature"
 codesign --verify --deep --strict --verbose=2 "$app"

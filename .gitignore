@@ -9,6 +9,9 @@
 /apps/macos/Generated/
 /apps/macos/*.xcodeproj/
 /apps/macos/Senate/Info.plist
+# Built-in scenes for a release (apps/macos/BundledScenes/README.md).
+/apps/macos/BundledScenes/*
+!/apps/macos/BundledScenes/README.md
 .grapha
 # The standalone `senate` package builds on its own.
 /shim/senate/target

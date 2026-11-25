@@ -51,6 +51,22 @@ struct ScenesView: View {
                     Button(L("scenes.remove")) { Task { await remove(id: id) } }
                 }
             }
+            if !library.offered.isEmpty {
+                Color.clear.frame(height: Theme.Space.s)
+                SectionHeader(L("scenes.built_in"))
+                ForEach(library.offered) { offer in
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(verbatim: offer.name).font(.headline)
+                        Text(verbatim: offer.version).foregroundStyle(.secondary)
+                        Text(verbatim: L("scenes.built_in_offer")).font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button(L("scenes.built_in_add")) {
+                            inspect(offer.archive, builtIn: offer.key, then: { adding = $0 })
+                        }
+                        .disabled(busy)
+                    }
+                }
+            }
         }
         .sheet(item: $adding) { candidate in addSheet(candidate) }
         .sheet(isPresented: Binding(get: { updating != nil }, set: { if !$0 { cancelUpdate() } })) {
@@ -73,7 +89,19 @@ struct ScenesView: View {
                 adding = nil
             }
         }
-        .onAppear { library.reload() }
+        .onAppear {
+            library.reload()
+            offerWaitingUpdate()
+        }
+    }
+
+    /// A newer built-in version that asks for more: the Update sheet, as for any scene.
+    private func offerWaitingUpdate() {
+        guard adding == nil, updating == nil,
+              let (id, archive) = library.waitingUpdates.min(by: { $0.key < $1.key }),
+              let scene = library.scene(id) else { return }
+        inspect(archive, builtIn: scene.builtIn, then: { updating = (scene, $0) })
+        library.clearWaitingUpdate(id) // Cancel means not now: offered again at the next launch.
     }
 
     private func row(_ scene: InstalledScene) -> some View {
@@ -86,6 +114,7 @@ struct ScenesView: View {
                 .buttonStyle(.plain)
                 Text(verbatim: scene.manifest.version).foregroundStyle(.secondary)
                 if scene.development { Text(verbatim: L("scenes.development")).font(.caption).foregroundStyle(.orange) }
+                if scene.builtIn != nil { Text(verbatim: L("scenes.built_in")).font(.caption).foregroundStyle(.secondary) }
                 Spacer()
                 Text(verbatim: allowed ? L("scenes.allowed") : L("scenes.not_allowed")).font(.caption).foregroundStyle(.secondary)
             }
@@ -129,12 +158,12 @@ struct ScenesView: View {
         then(url)
     }
 
-    private func inspect(_ url: URL, then: @escaping (SceneLibrary.Candidate) -> Void) {
+    private func inspect(_ url: URL, builtIn: String? = nil, then: @escaping (SceneLibrary.Candidate) -> Void) {
         problem = nil
         busy = true
         defer { busy = false }
         do {
-            then(try library.inspect(url))
+            then(try library.inspect(url, builtIn: builtIn))
         } catch let error as SceneBundle.Problem {
             problem = L("scenes.refused", error.description)
         } catch {
