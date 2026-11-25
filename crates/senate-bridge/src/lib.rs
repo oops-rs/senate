@@ -106,6 +106,7 @@ pub mod stats;
 pub mod status;
 mod stream;
 pub mod terminal;
+pub mod terminal_use;
 pub mod testenv;
 mod timeline;
 pub mod wsl;

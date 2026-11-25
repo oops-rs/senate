@@ -705,6 +705,138 @@ impl SessionRow {
     }
 }
 
+/// What [`Request::Terminal`] asks. Every action but `open`, `list` and a
+/// `screen` of another session names a scratch terminal by its id, and the
+/// daemon serves it only to whoever opened that terminal (or to the
+/// person): an id is never the host of a hosted session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "do", rename_all = "snake_case")]
+pub enum TerminalAction {
+    /// Reserve a scratch terminal for the caller ([`TerminalReply::Opened`]).
+    /// The caller then starts its host itself
+    /// ([`crate::host::scratch::start`]): the daemon runs nothing.
+    Open {
+        command: Vec<String>,
+        cwd: PathBuf,
+        rows: u16,
+        cols: u16,
+    },
+    /// The caller's scratch terminals; every one, for the person.
+    List,
+    /// A screen as text: the caller's scratch terminal, or, for a
+    /// committee's chair, a hosted session on its committee (read only).
+    Screen {
+        #[serde(flatten)]
+        target: TerminalTarget,
+        /// Rows above the screen to include, of what scrolled off.
+        #[serde(default)]
+        scrollback: u16,
+    },
+    /// Type `text` as it is; a line end is Enter.
+    Type {
+        id: EventId,
+        text: String,
+    },
+    /// Press named keys, in order (`down down enter`, `ctrl-c`).
+    Key {
+        id: EventId,
+        keys: String,
+    },
+    /// Wait until the screen shows `text`, or has been still for
+    /// `still_ms`, or (given neither) is other than the caller was last
+    /// shown; at most `timeout_ms`.
+    Wait {
+        id: EventId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        still_ms: Option<u64>,
+        timeout_ms: u64,
+    },
+    Resize {
+        id: EventId,
+        rows: u16,
+        cols: u16,
+    },
+    /// End the program and forget the terminal.
+    Close {
+        id: EventId,
+    },
+}
+
+/// Whose screen a [`TerminalAction::Screen`] reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalTarget {
+    /// A scratch terminal of the caller's.
+    Id(EventId),
+    /// A hosted session, by alias: the chair of its committee only.
+    Session(AliasName),
+}
+
+/// What a [`Request::Terminal`] came to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TerminalReply {
+    Opened { id: EventId },
+    List { terminals: Vec<TerminalRow> },
+    Screen(TerminalScreen),
+    Closed { id: EventId },
+}
+
+/// One scratch terminal in a listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalRow {
+    pub id: EventId,
+    /// The session that opened it, as a command names it; `None` when a
+    /// person did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    pub command: Vec<String>,
+    pub cwd: PathBuf,
+    pub opened_at: DateTime<Utc>,
+    /// `starting`, `running`, or how the program ended (`code 0`).
+    pub state: String,
+    /// A person is attached and has its keyboard.
+    pub attached: bool,
+}
+
+/// A terminal's screen as text.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TerminalScreen {
+    /// The scratch terminal read; `None` for another session's screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<EventId>,
+    /// The hosted session whose screen this is (`committee::alias`). What
+    /// it shows was not written for the reader: untrusted text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub of: Option<String>,
+    pub rows: u16,
+    pub cols: u16,
+    /// The cursor's row and column, counted from 1.
+    pub cursor_row: u16,
+    pub cursor_col: u16,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cursor_hidden: bool,
+    /// The program draws on the alternate screen (a full-screen program).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub alternate: bool,
+    /// Rows that scrolled off above the screen, oldest first, when asked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scrollback: Vec<String>,
+    /// Every row of the screen, top to bottom.
+    pub lines: Vec<String>,
+    /// How the program ended, once it has (`code 0`, `signal 9`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exited: Option<String>,
+    /// A person is attached and has its keyboard.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub attached: bool,
+    /// A `wait` ran out before what it waited for.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub timed_out: bool,
+}
+
 /// `Request::PruneHosts`: what it stopped and what it removed.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PruneReply {
@@ -1264,6 +1396,14 @@ pub enum Request {
     OpenViewer {
         host: EventId,
         writable: bool,
+    },
+    /// Terminal use ([`TerminalAction`]): the calling session's own scratch
+    /// terminals, and a chair's read of a hosted session's screen. Without
+    /// a session it is the person's request.
+    Terminal {
+        #[serde(default)]
+        session: SessionSelector,
+        action: TerminalAction,
     },
     /// How many messages wait for `session_id`'s next hook.
     Waiting {

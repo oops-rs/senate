@@ -193,6 +193,7 @@ mod session_drop;
 mod session_history;
 mod session_timeline;
 mod spawn_attempt;
+mod terminal_use;
 
 pub(crate) use front::Front;
 
@@ -546,6 +547,7 @@ pub(crate) struct Shared {
     host_notices_ready: Notify,
     active_stop_notices: Mutex<BTreeMap<EventId, SenatorName>>,
     hosted_approvals: hosted_approvals::Monitor,
+    terminal_use: terminal_use::Monitor,
     hook_drops: Mutex<HookDrops>,
     codex_transport: crate::delivery::codex::Transport,
     codex_routes: crate::delivery::codex::Routes,
@@ -1163,6 +1165,7 @@ impl Shared {
             host_notices_ready: Notify::new(),
             active_stop_notices: Mutex::new(BTreeMap::new()),
             hosted_approvals: hosted_approvals::Monitor::default(),
+            terminal_use: terminal_use::Monitor::default(),
             hook_drops: Mutex::new(HookDrops::default()),
             codex_transport: common.codex.transport.clone(),
             codex_routes: common.codex.routes.clone(),
@@ -1787,6 +1790,9 @@ impl Shared {
         }
         if let Err(error) = self.log_missing_host_viewers(&paths) {
             tracing::warn!(%error, "checking activity of hosted terminal viewers");
+        }
+        if let Err(error) = self.sweep_terminals(&paths) {
+            tracing::warn!(%error, "closing the scratch terminals of ended sessions");
         }
         self.committees_changed.notify_one();
     }
@@ -3352,6 +3358,7 @@ impl Shared {
             Request::DeskOpenCommittee { session, .. } => ("open_committee", session),
             Request::Restore { session, .. } => ("restore", session),
             Request::Stop { session, .. } => ("stop", session),
+            Request::Terminal { session, .. } => ("terminal", session),
             _ => return None,
         };
         self.companion_session(session).map(|_| {
@@ -3431,6 +3438,9 @@ impl Shared {
                     .map_err(server_error),
             ),
             Request::FindSession { senator } => wrap(on_heap(|| self.on_find_session(senator)).await),
+            Request::Terminal { session, action } => {
+                wrap(on_heap(|| self.on_terminal(&session, action)).await)
+            }
             Request::DefaultSecretary => wrap(on_heap(|| self.on_default_secretary()).await),
             Request::EnsureSecretary => {
                 self.sessions_changed(wrap(on_heap(|| self.on_ensure_secretary()).await))
@@ -4014,7 +4024,13 @@ impl Shared {
         let orphans = crate::host::running_ids(&paths)
             .map_err(IpcError::internal)?
             .into_iter()
-            .filter(|id| !known.contains(id) && !self.hosts.launching(id))
+            // A scratch terminal has no session by design: `senate terminal
+            // list` shows those.
+            .filter(|id| {
+                !known.contains(id)
+                    && !self.hosts.launching(id)
+                    && !crate::host::scratch::is_scratch(&paths, id)
+            })
             .collect();
         let mut local_rows = Vec::new();
         for session in local {
@@ -4865,6 +4881,8 @@ impl Shared {
             .set_session_state(session_id, SessionState::Ended)
             .map_err(internal)?
         {
+            // What the session opened for itself goes with it.
+            self.close_terminals_of(session_id);
             if let Some(session) = &before
                 && let Err(error) = self.remember_history_name(session)
             {
@@ -6788,15 +6806,19 @@ impl Front {
         };
         let shared = self.primary();
         let paths = Paths::new(&shared.home);
-        let session = match shared.store.session_for_host(host) {
-            Ok(Some(session)) if !shared.hosts.unpublished(&session) => session,
+        match shared.store.session_for_host(host) {
+            Ok(Some(session)) if !shared.hosts.unpublished(&session) => {
+                if shared.store.session_host(&session).ok().flatten().as_ref() != Some(host) {
+                    return Reply::err(IpcError::bad_request("The terminal binding changed"));
+                }
+            }
+            // A scratch terminal has no session: the person may look at
+            // any of them, or take one over (`senate terminal attach`).
+            Ok(None) if crate::host::scratch::is_scratch(&paths, host) => {}
             Ok(_) => {
                 return Reply::err(IpcError::bad_request("The terminal is no longer published"));
             }
             Err(error) => return Reply::err(internal(error)),
-        };
-        if shared.store.session_host(&session).ok().flatten().as_ref() != Some(host) {
-            return Reply::err(IpcError::bad_request("The terminal binding changed"));
         }
         if !self.scope_fixture
             && crate::host::legacy_viewer(&paths, host)
