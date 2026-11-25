@@ -1946,7 +1946,7 @@ impl SenateMcp {
             .await?;
         let who = mentions(&posted.to);
         let (c, seq, again) = (&posted.committee, posted.seq, already(&posted, l));
-        Ok(match l {
+        let receipt = match l {
             Locale::Zh => format!(
                 "已在 {c} 上问了 {who}（问题 seq {seq}）{again}。回答会以 \
                  `[senate · {c} · … · answer，thread {seq}]` 消息推到这个会话里；不用等，也不用轮询。"
@@ -1956,7 +1956,8 @@ impl SenateMcp {
                  this session as a `[senate · {c} · … · answer in thread {seq}]` message; no need \
                  to wait or poll."
             ),
-        })
+        };
+        Ok(receipt + &recipient_notes(&posted, l))
     }
 
     #[tool(name = "answer", description = ANSWER)]
@@ -1976,7 +1977,7 @@ impl SenateMcp {
             .await?;
         let thread = posted.thread.unwrap_or(Seq(p.thread));
         let chat = self.has_chat(&posted.committee).await;
-        Ok(answered(
+        let receipt = answered(
             l,
             &posted.committee,
             thread,
@@ -1984,7 +1985,8 @@ impl SenateMcp {
             already(&posted, l),
             &answered_to(&posted),
             chat,
-        ))
+        );
+        Ok(receipt + &recipient_notes(&posted, l))
     }
 
     #[tool(name = "catch_up", description = CATCH_UP)]
@@ -2201,7 +2203,7 @@ impl SenateMcp {
                 id: Some(EventId::new()),
             })
             .await?;
-        Ok(render_sent(&reply, kind, self.locale))
+        Ok(render_sent(&reply, kind, self.locale) + &recipient_notes(&reply.posted, self.locale))
     }
 
     #[tool(name = "duty", description = DUTY)]
@@ -3311,6 +3313,37 @@ fn no_profiles(daemon_socket: &std::path::Path, locale: Locale) -> String {
              example:\n\n{example}\n\nIt is usable at the next call; the daemon needs no restart."
         ),
     }
+}
+
+/// What a receipt adds about recipients who will not read the message soon
+/// ([`ipc::RecipientNote`]): one line each, nothing when there is none.
+pub fn recipient_notes(posted: &Posted, locale: Locale) -> String {
+    let mut out = String::new();
+    for note in posted.notes.iter().filter(|note| note.away) {
+        let who = note.who.in_text();
+        let seen = note.last_seen.map(|t| t.format("%Y-%m-%d %H:%M UTC"));
+        out.push('\n');
+        out.push_str(&match (note.paused, seen, locale) {
+            (true, _, Locale::Zh) => format!("注意：{who} 已暂停；这条消息会等到它恢复。"),
+            (true, _, Locale::En) => {
+                format!("Note: {who} is paused; this waits for it until it is resumed.")
+            }
+            (false, Some(t), Locale::Zh) => format!(
+                "注意：{who} 没有打开的会话（最后一次联络 {t}）；这条消息会等到它的会话打开。"
+            ),
+            (false, Some(t), Locale::En) => format!(
+                "Note: {who} has no session open (last seen {t}); this waits for it until one \
+                 opens."
+            ),
+            (false, None, Locale::Zh) => {
+                format!("注意：{who} 没有打开的会话；这条消息会等到它的会话打开。")
+            }
+            (false, None, Locale::En) => {
+                format!("Note: {who} has no session open; this waits for it until one opens.")
+            }
+        });
+    }
+    out
 }
 
 /// Who an answer went to: its recipients here, or the seat on the other
@@ -4498,6 +4531,48 @@ mod tests {
         );
     }
 
+    /// 18 messages sat queued for ended sessions for up to 95 hours and no
+    /// sender was told: the receipt now says who will not read it soon.
+    #[test]
+    fn a_receipt_says_which_recipients_have_no_session_open() {
+        use chrono::TimeZone;
+        use crate::ipc::RecipientNote;
+        let note = |who: &str, last_seen, paused| RecipientNote {
+            who: who.parse().unwrap(),
+            away: true,
+            last_seen,
+            paused,
+        };
+        let seen = chrono::Utc.with_ymd_and_hms(2026, 11, 24, 10, 3, 0).unwrap();
+        let mut posted = Posted {
+            committee: CommitteeId::new("senate").unwrap(),
+            seq: Seq(1437),
+            to: Vec::new(),
+            thread: None,
+            duplicate: false,
+            intended: None,
+            notes: Vec::new(),
+            unseen_escalation: None,
+        };
+        assert_eq!(recipient_notes(&posted, Locale::En), "");
+        posted.notes = vec![
+            note("senator::reviewer", Some(seen), false),
+            note("/acme::commons::senator::main", None, false),
+            note("senator::docs", Some(seen), true),
+        ];
+        assert_eq!(
+            recipient_notes(&posted, Locale::En),
+            "\nNote: [senator::reviewer] has no session open (last seen 2026-11-24 10:03 UTC); \
+             this waits for it until one opens.\
+             \nNote: [/acme::commons::senator::main] has no session open; this waits for it \
+             until one opens.\
+             \nNote: [senator::docs] is paused; this waits for it until it is resumed."
+        );
+        let zh = recipient_notes(&posted, Locale::Zh);
+        assert!(zh.contains("[senator::reviewer] 没有打开的会话（最后一次联络 2026-11-24 10:03 UTC）"));
+        assert!(zh.contains("[senator::docs] 已暂停"), "{zh}");
+    }
+
     /// search and catch_up cut bodies; `thread` is where one is read whole.
     #[test]
     fn a_thread_is_read_in_full_and_only_a_very_long_one_is_shortened() {
@@ -4572,6 +4647,7 @@ mod tests {
             thread: Some(Seq(311)),
             duplicate: false,
             intended: Some("/acme::senate::senator::claude".parse().unwrap()),
+            notes: Vec::new(),
             unseen_escalation: None,
         };
         let receipt = |posted: &Posted| {

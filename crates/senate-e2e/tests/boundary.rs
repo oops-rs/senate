@@ -1295,6 +1295,8 @@ async fn another_committees_chair_receives_discussion_but_requests_wait_on_the_d
     let peer = early.intended.as_ref().expect("the receipt names the peer");
     assert_eq!(peer.committee(), Some(&target));
     assert_eq!(peer.address(), &senator("claude-maintainer"));
+    // The chair has a session open: nothing more to say of it.
+    assert!(early.notes.is_empty(), "{:?}", early.notes);
     chair.wait_for("This is about address resolution.").await;
     let early_copy = desk
         .events_of(&target)

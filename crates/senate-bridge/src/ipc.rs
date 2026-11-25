@@ -2577,6 +2577,23 @@ pub struct HookReply {
     pub delivered: usize,
 }
 
+/// Something the sender of a message should know about one of its
+/// recipients, said in the receipt: the message was recorded all the same.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipientNote {
+    /// The recipient: a seat here, or a qualified one on another committee.
+    pub who: senate_core::Locator,
+    /// It has no session open: the message waits until one opens.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub away: bool,
+    /// When the server last heard from it, if it is away and ever was here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<DateTime<Utc>>,
+    /// Away because it was paused: it is expected back.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub paused: bool,
+}
+
 /// An event the daemon appended on the agent's behalf.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Posted {
@@ -2591,6 +2608,10 @@ pub struct Posted {
     /// recipient, so `to` is empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intended: Option<senate_core::Locator>,
+    /// Recipients who will not read it soon, or are no longer who the
+    /// sender takes them for; empty when there is nothing to say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<RecipientNote>,
     /// The person spoke in a thread and an escalation to them is still in
     /// force that they had not been shown when they spoke (the two crossed):
     /// its seq. Only on `say` and a person's `answer`; the reply left it

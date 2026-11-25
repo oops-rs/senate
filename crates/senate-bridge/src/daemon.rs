@@ -157,8 +157,8 @@ use crate::format;
 use crate::ipc::{
     self, ApprovalsReply, ApproveReply, BoundReply, CatchUpReply, CheckpointReply, CommitteeStatus,
     EscalateReply, HookDropReport, HookDropStatus, HookEvent, HookReply, HookReport, InboxReply,
-    IpcError, JoinReply, Pong, Posted, Reply, Request, SayKind, SearchReply, SessionSelector,
-    StatusReply, ThreadReply, ThreadSeen, WatchEvent, codes,
+    IpcError, JoinReply, Pong, Posted, RecipientNote, Reply, Request, SayKind, SearchReply,
+    SessionSelector, StatusReply, ThreadReply, ThreadSeen, WatchEvent, codes,
 };
 use crate::kernel_process;
 use crate::notify::{News, Notifications, NotifyConfig};
@@ -218,6 +218,9 @@ const HOOK_COMMITTEE_TIMEOUT: Duration = Duration::from_secs(1);
 const HOOK_BACKLOG_RESERVE: usize = 2_000;
 /// Bound on one push into a Codex thread: connect, read, start or steer.
 const CODEX_PUSH_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a receipt waits to learn whether its recipients have a session
+/// open ([`Shared::recipient_notes`]); past it, it says nothing of them.
+const RECIPIENT_NOTE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Events a `watch` connection may fall behind by before it is told it
 /// lagged.
 const WATCH_CAPACITY: usize = 256;
@@ -5326,6 +5329,7 @@ impl Shared {
         }
         Ok(Posted {
             intended: senate_core::locator::intended(&r.event),
+            notes: self.recipient_notes(&r.event).await,
             committee: r.event.committee,
             seq: r.event.seq,
             to: r.event.to,
@@ -5333,6 +5337,86 @@ impl Shared {
             duplicate: r.duplicate,
             unseen_escalation: None,
         })
+    }
+
+    /// The agents a message just sent is for that have no session open, so
+    /// its receipt says that it waits ([`RecipientNote`]). Here those are
+    /// the agents it is addressed to and the chair, when it is to `chair`;
+    /// on another committee, the seat a cross-committee discussion is with.
+    /// A person is left out: they read when they read. Best effort: when
+    /// the server does not say in time, the receipt says nothing.
+    async fn recipient_notes(&self, event: &Event) -> Vec<RecipientNote> {
+        if !matches!(
+            event.kind,
+            Kind::Question | Kind::Request | Kind::Answer | Kind::Note
+        ) {
+            return Vec::new();
+        }
+        let mut seats: Vec<(CommitteeId, SenatorName, Locator)> = Vec::new();
+        for address in &event.to {
+            let agent = match address {
+                Address::Chair => self.current_chair(&event.committee).await,
+                other => self.people().as_agent(other).cloned(),
+            };
+            if let Some(agent) = agent {
+                let who = Locator::from(Address::senator(&agent));
+                seats.push((event.committee.clone(), agent, who));
+            }
+        }
+        // A cross-committee discussion's first message names the chair it
+        // was pinned to; a reply in one, the seat it went to. Anything
+        // else meant for a seat elsewhere is on the Speaker's desk, not
+        // waiting on that seat.
+        let peer = event
+            .is_chair_discussion()
+            .then(|| {
+                event
+                    .meta
+                    .get(meta::CHAIR_DISCUSSION)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<Locator>().ok())
+                    .or_else(|| senate_core::locator::intended(event))
+            })
+            .flatten();
+        if let Some(peer) = peer
+            && let (Some(committee), Some(agent)) = (peer.committee(), peer.address().as_senator())
+        {
+            seats.push((committee.clone(), agent.clone(), peer.clone()));
+        }
+        let mut notes = Vec::new();
+        let mut pages: HashMap<CommitteeId, Option<api::PresencePage>> = HashMap::new();
+        for (committee, agent, who) in seats {
+            if !pages.contains_key(&committee) {
+                let page = tokio::time::timeout(
+                    RECIPIENT_NOTE_TIMEOUT,
+                    self.api.presence(&committee),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok);
+                pages.insert(committee.clone(), page);
+            }
+            let Some(Some(page)) = pages.get(&committee) else {
+                continue;
+            };
+            // Only what the server knows: a seat it has no presence for
+            // is not claimed to be away. Every state but online is one
+            // without a session: taken over (the Speaker may answer for it
+            // within moments of the question) and reassigned too.
+            let Some(presence) = page.agents.iter().find(|p| p.agent == agent) else {
+                continue;
+            };
+            let away = presence.state != senate_core::PresenceState::Online;
+            if away && !notes.iter().any(|n: &RecipientNote| n.who == who) {
+                notes.push(RecipientNote {
+                    who,
+                    away: true,
+                    last_seen: presence.last_seen,
+                    paused: presence.paused,
+                });
+            }
+        }
+        notes
     }
 
     async fn on_ask(
@@ -6042,6 +6126,7 @@ impl Shared {
         let r = above.append(&event).await.map_err(server_error)?;
         Ok(Posted {
             intended: None,
+            notes: Vec::new(),
             committee: r.event.committee,
             seq: r.event.seq,
             to: r.event.to,
