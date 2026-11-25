@@ -58,6 +58,11 @@ pub fn handed_to(event: &Event) -> Option<SenatorName> {
 
 /// Characters of an open question's body kept in the brief.
 pub const QUESTION_CHARS: usize = 200;
+/// Agents whose DECISIONS notes the brief shows while no decision is
+/// recorded: those with the latest checkpoints.
+pub const MAX_DECISION_NOTES: usize = 3;
+/// Characters of each agent's DECISIONS notes kept in the brief.
+pub const DECISION_NOTE_CHARS: usize = 800;
 /// Default bound of [`Brief::to_markdown`].
 pub const DEFAULT_MARKDOWN_CHARS: usize = 8_000;
 
@@ -73,6 +78,12 @@ pub struct Brief {
     /// [`MAX_DECISIONS`].
     #[serde(default)]
     pub decisions: Vec<BriefDecision>,
+    /// While no decision is recorded: what agents wrote down as decided in
+    /// their latest checkpoints (their `DECISIONS.md`), newest first, at
+    /// most [`MAX_DECISION_NOTES`]. An agent's own record, confirmed by no
+    /// one; empty once the log holds a decision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_notes: Vec<BriefDecisionNotes>,
     /// Question roots with no answer yet, oldest first, the latest
     /// [`MAX_OPEN_QUESTIONS`]; bodies cut to [`QUESTION_CHARS`].
     #[serde(default)]
@@ -116,6 +127,17 @@ pub struct BriefDecision {
     /// else `from`.
     pub by: Address,
     pub body: String,
+}
+
+/// An agent's `DECISIONS.md` as its latest checkpoint carried it, cut to
+/// [`DECISION_NOTE_CHARS`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BriefDecisionNotes {
+    /// The checkpoint it is from.
+    pub seq: Seq,
+    pub ts: DateTime<Utc>,
+    pub agent: SenatorName,
+    pub notes: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -183,6 +205,9 @@ pub struct BriefBuilder {
     archived: BTreeMap<Seq, BriefQuestion>,
     groups: Vec<BriefGroup>,
     checkpoints: HashMap<SenatorName, BriefCheckpoint>,
+    /// The DECISIONS notes of each agent's latest checkpoint, when it has
+    /// any.
+    decision_notes: HashMap<SenatorName, BriefDecisionNotes>,
     presence: PresenceBoard,
     duties: DutyFold,
     participants: HashMap<Address, (Seq, DateTime<Utc>)>,
@@ -200,6 +225,7 @@ impl BriefBuilder {
             archived: BTreeMap::new(),
             groups: Vec::new(),
             checkpoints: HashMap::new(),
+            decision_notes: HashMap::new(),
             presence: PresenceBoard::new(),
             duties: DutyFold::new(),
             participants: HashMap::new(),
@@ -307,6 +333,25 @@ impl BriefBuilder {
             Kind::Checkpoint => {
                 if let Some(agent) = event.from.as_senator() {
                     let payload = CheckpointPayload::of(event);
+                    // Its latest checkpoint is what counts: one without
+                    // the notes takes the earlier ones away.
+                    let notes = payload
+                        .as_ref()
+                        .and_then(|p| p.files.decisions.as_deref())
+                        .map(str::trim)
+                        .filter(|notes| !notes.is_empty());
+                    match notes {
+                        Some(notes) => self.decision_notes.insert(
+                            agent.clone(),
+                            BriefDecisionNotes {
+                                seq: event.seq,
+                                ts: event.ts,
+                                agent: agent.clone(),
+                                notes: cut(notes, DECISION_NOTE_CHARS),
+                            },
+                        ),
+                        None => self.decision_notes.remove(agent),
+                    };
                     self.checkpoints.insert(
                         agent.clone(),
                         BriefCheckpoint {
@@ -372,9 +417,19 @@ impl BriefBuilder {
             })
             .collect();
         participants.sort_by_key(|p| std::cmp::Reverse(p.last_seq));
+        // A recorded decision is the committee's; until there is one, what
+        // its agents noted as decided is the nearest thing to read.
+        let mut decision_notes: Vec<BriefDecisionNotes> = if decisions.is_empty() {
+            self.decision_notes.values().cloned().collect()
+        } else {
+            Vec::new()
+        };
+        decision_notes.sort_by_key(|n| std::cmp::Reverse(n.seq));
+        decision_notes.truncate(MAX_DECISION_NOTES);
         Brief {
             committee: self.committee.clone(),
             head: self.head,
+            decision_notes,
             top: self.memory.focus().map(|p| BriefTop {
                 seq: p.seq,
                 ts: p.ts,
@@ -426,6 +481,7 @@ impl Brief {
         let header = self.header_markdown(locale);
         let mut decisions = self.decisions.as_slice();
         let tails = [
+            self.decision_notes_markdown(locale, now),
             self.digest_markdown(locale),
             self.memory_markdown(locale),
             self.open_questions_markdown(locale),
@@ -474,6 +530,34 @@ impl Brief {
                     Locale::Zh => writeln!(out, "- {name}（{}:{}）", g.platform, g.group_id),
                     Locale::En => writeln!(out, "- {name} ({}:{})", g.platform, g.group_id),
                 };
+            }
+        }
+        out
+    }
+
+    /// What follows "None recorded yet." under Decisions: the agents' own
+    /// DECISIONS notes, said to be exactly that. Like every tail it is
+    /// left out when the brief has no room for it.
+    fn decision_notes_markdown(&self, locale: Locale, now: DateTime<Utc>) -> String {
+        if self.decision_notes.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from(locale.pick(
+            "\n各 agent 在最近的检查点里记下的决定（它们自己的 DECISIONS 笔记，未经任何人确认）：\n\n",
+            "\nWhat agents noted as decided in their latest checkpoints (their own DECISIONS \
+             notes, confirmed by no one):\n\n",
+        ));
+        for n in &self.decision_notes {
+            let _ = writeln!(
+                out,
+                "- {} · seq {} · {}{}",
+                Address::senator(&n.agent).in_text(),
+                n.seq,
+                age(now, n.ts, locale),
+                colon(locale).trim_end()
+            );
+            for line in n.notes.lines().filter(|line| !line.trim().is_empty()) {
+                let _ = writeln!(out, "  {}", line.trim_end());
             }
         }
         out
@@ -1101,6 +1185,71 @@ mod tests {
                 .any(|p| p.address == addr("guest::chat/u_8f3a")),
             "a guest who spoke is"
         );
+    }
+
+    /// No committee had a decision event, so every brief said "None
+    /// recorded yet." while its agents' checkpoints held what was decided.
+    #[test]
+    fn with_no_decision_recorded_the_brief_shows_what_agents_noted_as_decided() {
+        let now = Utc::now();
+        let cp = |from: &str, decisions: Option<&str>| {
+            let mut payload = checkpoint_payload();
+            payload.files.decisions = decisions.map(str::to_owned);
+            ev(Kind::Checkpoint, from, "progress").with_meta(meta::CHECKPOINT, payload.value())
+        };
+        let mut log = Log(Vec::new());
+        let ago = |minutes| now - Duration::minutes(minutes);
+        log.push_at(cp("senator::main", Some("- merge order: perf first")), ago(50));
+        log.push_at(cp("senator::docs", Some("- old note")), ago(40));
+        log.push_at(cp("senator::perf", Some(&"x".repeat(2_000))), ago(30));
+        log.push_at(cp("senator::app", Some("- ship the town behind a flag\n\n- no push")), ago(20));
+        log.push_at(cp("senator::quiet", None), ago(10));
+        // Its latest checkpoint has no notes: the earlier ones are not shown.
+        log.push_at(cp("senator::docs", Some("  \n")), ago(5));
+        let third = log.push_at(cp("senator::main", Some("- release waits for Wendell")), ago(3));
+
+        let brief = Brief::from_events(c(), &log.0);
+        let agents: Vec<String> = brief
+            .decision_notes
+            .iter()
+            .map(|n| n.agent.to_string())
+            .collect();
+        assert_eq!(agents, ["main", "app", "perf"], "newest first, three at most");
+        assert_eq!(brief.decision_notes[0].seq, third);
+        assert_eq!(
+            brief.decision_notes[2].notes.chars().count(),
+            DECISION_NOTE_CHARS + 1,
+            "cut, with its mark"
+        );
+        let en = brief.to_markdown_at(Locale::En, DEFAULT_MARKDOWN_CHARS, now);
+        assert!(
+            en.contains(
+                "\n## Decisions\n\nNone recorded yet.\n\
+                 \nWhat agents noted as decided in their latest checkpoints (their own DECISIONS \
+                 notes, confirmed by no one):\n\
+                 \n- [senator::main] · seq 7 · 3 min ago:\n  - release waits for Wendell\n\
+                 - [senator::app] · seq 4 · 20 min ago:\n  - ship the town behind a flag\n  - no push\n"
+            ),
+            "{en}"
+        );
+        assert!(!en.contains("merge order"), "an agent's latest notes only: {en}");
+        assert!(!en.contains("old note"), "{en}");
+        let zh = brief.to_markdown_at(Locale::Zh, DEFAULT_MARKDOWN_CHARS, now);
+        assert!(zh.contains("未经任何人确认"), "{zh}");
+        assert_senate_vocabulary(&en);
+        assert_senate_vocabulary(&zh);
+        // With no room they go before anything else does.
+        let tight = brief.to_markdown_at(Locale::En, 120, now);
+        assert!(tight.contains("None recorded yet."), "{tight}");
+        assert!(!tight.contains("noted as decided"), "{tight}");
+
+        // A decision in the log is the committee's own: the notes step back.
+        log.push(ev(Kind::Decision, "senator::pm", "cap is 30 days"));
+        let brief = Brief::from_events(c(), &log.0);
+        assert!(brief.decision_notes.is_empty());
+        let en = brief.to_markdown_at(Locale::En, DEFAULT_MARKDOWN_CHARS, now);
+        assert!(!en.contains("noted as decided"), "{en}");
+        assert!(en.contains("cap is 30 days"), "{en}");
     }
 
     #[test]
