@@ -214,7 +214,9 @@ final class CoreStore {
             let dir = FileManager.default.temporaryDirectory.appendingPathComponent("senate-scenes-\(UUID().uuidString)", isDirectory: true)
             return SceneLibrary(root: dir, development: nil)
         }
-        return SceneLibrary()
+        let library = SceneLibrary(builtIn: SceneLibrary.builtInFolder())
+        library.installBuiltIn()
+        return library
     }
 
     /// A scene's page (made once, kept), with its list.

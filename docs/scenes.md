@@ -1,9 +1,9 @@
 # Scenes in the macOS app
 
 The Senate app is a container for scenes. A scene is a web bundle that
-satisfies the [scene host contract](observe.md#scene-host-contract). The app
-includes no scene. A person installs the scenes they want. Each scene is
-treated as untrusted code from somewhere else.
+satisfies the [scene host contract](observe.md#scene-host-contract). A
+person installs the scenes they want, and a release may carry a few built in
+(below). Each scene is treated as untrusted code from somewhere else.
 
 ## Installing
 
@@ -36,6 +36,22 @@ installation. A changed file makes that scene unreadable, so it won't load.
 `SENATE_APP_SCENE_DEV=<folder>` loads a bundle from a build folder in Debug
 builds only. The same checks run on every load. The identity comes from the
 folder path, so storage and the grant survive app restarts.
+
+### Built-in scenes
+
+A release may carry scenes in `Senate.app/Contents/Resources/Scenes/*.senatescene`
+(`scripts/release.sh` checks and copies them from `apps/macos/BundledScenes/`
+or `SENATE_BUNDLED_SCENES`). At launch, each one not yet installed is
+installed exactly as **Add Scene…** would: the same checks, a new random
+identity, its own storage, and no access until the person presses **Allow**
+on its page. It is marked **Built in**, keyed by its file name. Once removed,
+it stays removed and is offered under **Built in** in the Scenes place with
+an **Add** button. A newer bundled version replaces an installed one at
+launch only when it asks for nothing more (no new capability or card and the
+same links request); otherwise the Scenes place shows the usual Update sheet.
+An archive that fails the checks is logged and skipped. Nothing is
+downloaded, and a build with no built-in scenes behaves as if the feature
+were absent.
 
 ## Bundle rules
 
