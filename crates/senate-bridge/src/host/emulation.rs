@@ -148,21 +148,111 @@ fn rgb(spec: &str) -> Option<[f64; 3]> {
 }
 
 pub(crate) async fn system_scheme() -> Scheme {
+    // Off the host's one thread and bounded, as the `defaults` process this
+    // replaces was: the preferences daemon answers over XPC.
     #[cfg(target_os = "macos")]
-    if let Ok(Ok(output)) = tokio::time::timeout(
+    if let Ok(Ok(true)) = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        tokio::process::Command::new("/usr/bin/defaults")
-            .args(["read", "-g", "AppleInterfaceStyle"])
-            .kill_on_drop(true)
-            .output(),
+        tokio::task::spawn_blocking(appearance::dark),
     )
     .await
-        && output.status.success()
-        && output.stdout.trim_ascii() == b"Dark"
     {
         return Scheme::Dark;
     }
     Scheme::Light
+}
+
+/// The system appearance, as `defaults read -g AppleInterfaceStyle` reads
+/// it, asked of the preferences daemon from this process. Every host asks
+/// every five seconds for as long as it runs: a `defaults` process each
+/// time cost 8 ms of CPU, four processes a second with twenty sessions.
+#[cfg(target_os = "macos")]
+mod appearance {
+    #![allow(unsafe_code)]
+
+    use std::ffi::{c_char, c_void};
+
+    type CFTypeRef = *const c_void;
+    const UTF8: u32 = 0x0800_0100;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFPreferencesAnyApplication: CFTypeRef;
+        static kCFPreferencesCurrentUser: CFTypeRef;
+        static kCFPreferencesAnyHost: CFTypeRef;
+        fn CFStringCreateWithCString(
+            allocator: CFTypeRef,
+            string: *const c_char,
+            encoding: u32,
+        ) -> CFTypeRef;
+        fn CFPreferencesSynchronize(application: CFTypeRef, user: CFTypeRef, host: CFTypeRef)
+        -> u8;
+        fn CFPreferencesCopyValue(
+            key: CFTypeRef,
+            application: CFTypeRef,
+            user: CFTypeRef,
+            host: CFTypeRef,
+        ) -> CFTypeRef;
+        fn CFGetTypeID(value: CFTypeRef) -> usize;
+        fn CFStringGetTypeID() -> usize;
+        fn CFEqual(a: CFTypeRef, b: CFTypeRef) -> u8;
+        fn CFRelease(value: CFTypeRef);
+    }
+
+    /// Whether the global domain's `AppleInterfaceStyle` is `Dark`: the
+    /// key is absent in light mode.
+    pub(super) fn dark() -> bool {
+        // SAFETY: Both C strings are NUL-terminated literals. Every object
+        // created or copied here is checked for null before use and
+        // released once; the three domain constants are CoreFoundation's
+        // own immortal strings. The value is compared only after its type
+        // is known to be a string.
+        unsafe {
+            let key =
+                CFStringCreateWithCString(std::ptr::null(), c"AppleInterfaceStyle".as_ptr(), UTF8);
+            let dark = CFStringCreateWithCString(std::ptr::null(), c"Dark".as_ptr(), UTF8);
+            let mut is_dark = false;
+            if !key.is_null() && !dark.is_null() {
+                // Drop what this process cached: the person may have
+                // switched the appearance since the last look.
+                CFPreferencesSynchronize(
+                    kCFPreferencesAnyApplication,
+                    kCFPreferencesCurrentUser,
+                    kCFPreferencesAnyHost,
+                );
+                let value = CFPreferencesCopyValue(
+                    key,
+                    kCFPreferencesAnyApplication,
+                    kCFPreferencesCurrentUser,
+                    kCFPreferencesAnyHost,
+                );
+                if !value.is_null() {
+                    is_dark =
+                        CFGetTypeID(value) == CFStringGetTypeID() && CFEqual(value, dark) != 0;
+                    CFRelease(value);
+                }
+            }
+            for object in [key, dark] {
+                if !object.is_null() {
+                    CFRelease(object);
+                }
+            }
+            is_dark
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn the_appearance_read_here_is_what_defaults_reads() {
+            let output = std::process::Command::new("/usr/bin/defaults")
+                .args(["read", "-g", "AppleInterfaceStyle"])
+                .output()
+                .unwrap();
+            let by_defaults = output.status.success() && output.stdout.trim_ascii() == b"Dark";
+            assert_eq!(super::dark(), by_defaults);
+        }
+    }
 }
 
 pub(crate) struct Emulation {
