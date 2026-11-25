@@ -7813,6 +7813,57 @@
           }
         }
       }
+    },
+    "scenes.problem.archive_compressed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "its files are compressed; make it with “senate scene pack”"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "其中的文件经过压缩；请用“senate scene pack”制作"
+          }
+        }
+      }
+    },
+    "scenes.problem.archive_corrupt": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "its contents don't match its directory"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "其内容与目录不符"
+          }
+        }
+      }
+    },
+    "scenes.problem.io": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ could not be read or written."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法读取或写入 %@。"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

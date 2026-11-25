@@ -23,6 +23,7 @@ axum = { workspace = true, optional = true }
 senate-observe-client = { workspace = true, optional = true }
 senate-observe.workspace = true
 senate-observe-protocol.workspace = true
+senate-scene.workspace = true
 senate-remote-admin.workspace = true
 senate-core = { workspace = true }
 senate-markdown = { workspace = true }

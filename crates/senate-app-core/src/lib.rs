@@ -49,6 +49,7 @@ pub mod names;
 #[cfg(target_os = "macos")]
 pub mod oslog;
 pub mod reads;
+pub mod scene;
 pub mod state;
 pub mod stats;
 pub mod text;

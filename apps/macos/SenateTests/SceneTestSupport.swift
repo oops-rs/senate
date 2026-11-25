@@ -71,14 +71,17 @@ struct ZipBuilder {
         /// Unix mode bits for the external attributes (0o120777: a link).
         var mode: UInt32 = 0o100644
         var flags: UInt16 = 0
+        /// 0 stored, 8 deflated (the bytes stay as given).
+        var method: UInt16 = 0
         /// The size the central directory claims (the real one if nil).
         var claimedSize: UInt32?
     }
 
     var entries: [Entry] = []
 
-    mutating func add(_ name: String, _ text: String, mode: UInt32 = 0o100644, flags: UInt16 = 0, claimedSize: UInt32? = nil) {
-        entries.append(Entry(name: name, data: Data(text.utf8), mode: mode, flags: flags, claimedSize: claimedSize))
+    mutating func add(_ name: String, _ text: String, mode: UInt32 = 0o100644, flags: UInt16 = 0, method: UInt16 = 0,
+                      claimedSize: UInt32? = nil) {
+        entries.append(Entry(name: name, data: Data(text.utf8), mode: mode, flags: flags, method: method, claimedSize: claimedSize))
     }
 
     static func crc32(_ data: Data) -> UInt32 {
@@ -100,12 +103,12 @@ struct ZipBuilder {
             let name = Data(entry.name.utf8)
             let crc = Self.crc32(entry.data)
             let size = UInt32(entry.data.count)
-            u32(0x0403_4B50, &out); u16(20, &out); u16(entry.flags, &out); u16(0, &out); u16(0, &out); u16(0, &out)
+            u32(0x0403_4B50, &out); u16(20, &out); u16(entry.flags, &out); u16(entry.method, &out); u16(0, &out); u16(0, &out)
             u32(crc, &out); u32(size, &out); u32(size, &out); u16(UInt16(name.count), &out); u16(0, &out)
             out.append(name); out.append(entry.data)
             u32(0x0201_4B50, &central); u16(0x031E, &central); u16(20, &central); u16(entry.flags, &central)
-            u16(0, &central); u16(0, &central); u16(0, &central); u32(crc, &central)
-            u32(size, &central); u32(entry.claimedSize ?? size, &central)
+            u16(entry.method, &central); u16(0, &central); u16(0, &central); u32(crc, &central)
+            u32(entry.claimedSize ?? size, &central); u32(entry.claimedSize ?? size, &central)
             u16(UInt16(name.count), &central); u16(0, &central); u16(0, &central); u16(0, &central); u16(0, &central)
             u32(entry.mode << 16, &central); u32(offset, &central)
             central.append(name)
