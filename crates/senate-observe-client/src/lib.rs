@@ -2,11 +2,11 @@
 
 use std::net::IpAddr;
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-use reqwest::{Response, StatusCode, Url};
+use reqwest::{Response, StatusCode, Url, header};
 use senate_observe_protocol::{
     Cursor, EVENTS_PATH, EventFrame, EventHeader, MAX_FRAME_BYTES, MAX_STATE_BYTES, ResetFrame,
     STATE_PATH, Snapshot,
@@ -21,6 +21,8 @@ pub enum Error {
     Transport(#[from] reqwest::Error),
     #[error("Observe returned HTTP {0}")]
     Http(StatusCode),
+    #[error("Observe returned HTTP {status} with a retry delay")]
+    RetryAfter { status: StatusCode, delay: Duration },
     #[error("Observe returned invalid v1 data")]
     Protocol,
     #[error("Observe requires a new snapshot")]
@@ -98,7 +100,22 @@ impl Client {
         match response.status() {
             StatusCode::OK => Ok(response),
             StatusCode::CONFLICT => Err(Error::Reset),
-            status => Err(Error::Http(status)),
+            status => {
+                let delay = if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                    response
+                        .headers()
+                        .get(header::RETRY_AFTER)
+                        .and_then(|value| retry_after(value.to_str().ok()?, SystemTime::now()))
+                } else {
+                    None
+                };
+                Err(
+                    delay.map_or(Error::Http(status), |delay| Error::RetryAfter {
+                        status,
+                        delay,
+                    }),
+                )
+            }
         }
     }
 
@@ -134,6 +151,26 @@ impl Client {
             failures: 0,
         }
     }
+}
+
+const MAX_RETRY: Duration = Duration::from_secs(60);
+
+fn retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let seconds = value.parse::<u64>().unwrap_or(u64::MAX);
+        return Some(Duration::from_secs(seconds).min(MAX_RETRY));
+    }
+    let date = httpdate::parse_http_date(value).ok()?;
+    Some(date.duration_since(now).unwrap_or_default().min(MAX_RETRY))
+}
+
+fn retry_delay(failures: u8, hint: Option<Duration>, jitter: u8) -> Duration {
+    let backoff = Duration::from_millis(200 * (1u64 << failures.min(3)));
+    backoff
+        .max(hint.unwrap_or_default())
+        .saturating_add(Duration::from_millis(jitter.into()))
+        .min(MAX_RETRY)
 }
 
 impl Events {
@@ -240,11 +277,15 @@ impl Follow<'_> {
                     Err(Error::Http(status))
                         if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS =>
                     {
-                        self.retry().await;
+                        self.retry(None).await;
+                        continue;
+                    }
+                    Err(Error::RetryAfter { delay, .. }) => {
+                        self.retry(Some(delay)).await;
                         continue;
                     }
                     Err(Error::Transport(_)) => {
-                        self.retry().await;
+                        self.retry(None).await;
                         continue;
                     }
                     Err(error) => return Err(error),
@@ -265,8 +306,12 @@ impl Follow<'_> {
                     {
                         return Err(Error::Http(status));
                     }
+                    Err(Error::RetryAfter { delay, .. }) => {
+                        self.retry(Some(delay)).await;
+                        continue;
+                    }
                     Err(_) => {
-                        self.retry().await;
+                        self.retry(None).await;
                         continue;
                     }
                 }
@@ -302,21 +347,20 @@ impl Follow<'_> {
                 Err(Error::Protocol) => {
                     self.events = None;
                     self.cursor = None;
-                    self.retry().await;
+                    self.retry(None).await;
                 }
                 Ok(None) | Err(_) => {
                     self.events = None;
-                    self.retry().await;
+                    self.retry(None).await;
                 }
             }
         }
     }
 
-    async fn retry(&mut self) {
+    async fn retry(&mut self, hint: Option<Duration>) {
         let mut entropy = [0];
         let _ = getrandom::fill(&mut entropy);
-        let backoff = 200u64.saturating_mul(1u64 << self.failures.min(3));
-        tokio::time::sleep(Duration::from_millis(backoff + u64::from(entropy[0]))).await;
+        tokio::time::sleep(retry_delay(self.failures, hint, entropy[0])).await;
         self.failures = self.failures.saturating_add(1);
     }
 }
@@ -354,5 +398,21 @@ mod tests {
                 Err(Error::Endpoint)
             ));
         }
+    }
+    #[test]
+    fn retry_after_honors_delta_and_http_date_with_bounded_jitter() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(784111777);
+        assert_eq!(
+            retry_after("Sun, 06 Nov 1994 08:49:42 GMT", now),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(retry_after("99999999999999999999999", now), Some(MAX_RETRY));
+        assert_eq!(retry_after("-2", now), None);
+        assert_eq!(
+            retry_delay(0, retry_after("2", now), 91),
+            Duration::from_millis(2091)
+        );
+        assert_eq!(retry_delay(0, Some(MAX_RETRY), 255), MAX_RETRY);
+        assert_eq!(retry_delay(1, None, 0), Duration::from_millis(400));
     }
 }

@@ -1,14 +1,16 @@
 const MAX_FRAME_BYTES = 64 * 1024;
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
+const MAX_RETRY_MS = 60_000;
 const cursorPattern = /^[A-Za-z0-9_-]{21}[AQgw]$/;
 const encoder = new TextEncoder();
 
 export class ObserveError extends Error {
-  constructor(code, message, status = 0) {
+  constructor(code, message, status = 0, retryAfterMs) {
     super(message);
     this.name = "ObserveError";
     this.code = code;
     this.status = status;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -41,7 +43,17 @@ function requireCursor(cursor) {
 }
 
 function failed(response) {
-  return new ObserveError("http", `Observe request returned ${response.status}.`, response.status);
+  const status = response.status;
+  const value = status === 429 || status >= 500 ? response.headers.get("retry-after")?.trim() : undefined;
+  let hint;
+  if (value) {
+    if (/^[0-9]+$/.test(value)) hint = Math.min(Number(value) * 1000, MAX_RETRY_MS);
+    else if (/^[A-Za-z]{3,9},? [0-9A-Za-z]/.test(value)) {
+      const date = Date.parse(value);
+      if (Number.isFinite(date)) hint = Math.min(Math.max(date - Date.now(), 0), MAX_RETRY_MS);
+    }
+  }
+  return new ObserveError("http", `Observe request returned ${status}.`, status, hint);
 }
 
 export async function fetchSnapshot({ endpoint, token, signal }) {
@@ -151,7 +163,7 @@ export function applyFrame(state, frame) {
   return next;
 }
 
-function retry(signal, delay) {
+function retry(signal, delay, hint = 0) {
   if (signal?.aborted) return Promise.resolve();
   return new Promise((resolve) => {
     const finish = () => {
@@ -159,7 +171,7 @@ function retry(signal, delay) {
       signal?.removeEventListener("abort", finish);
       resolve();
     };
-    const timer = setTimeout(finish, delay * (0.75 + Math.random() * 0.5));
+    const timer = setTimeout(finish, Math.min(Math.max(delay, hint) + Math.random() * 255, MAX_RETRY_MS));
     signal?.addEventListener("abort", finish, { once: true });
   });
 }
@@ -170,6 +182,7 @@ export async function* observe(options) {
   let state;
   let delay = 200;
   while (!signal?.aborted) {
+    let hint;
     try {
       if (!state) {
         state = await fetchSnapshot(options);
@@ -197,8 +210,9 @@ export async function* observe(options) {
       if (error instanceof ObserveError &&
           ((error.status >= 400 && error.status < 500 && error.status !== 429) || error.code === "version_mismatch")) throw error;
       if (error instanceof SyntaxError || (error instanceof ObserveError && !error.status)) state = undefined;
+      if (error instanceof ObserveError) hint = error.retryAfterMs;
     }
-    await retry(signal, delay);
+    await retry(signal, delay, hint);
     delay = Math.min(delay * 2, 2_000);
   }
 }

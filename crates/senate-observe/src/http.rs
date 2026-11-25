@@ -222,6 +222,12 @@ fn cors(mut response: Response, origin: Option<&str>, preflight: bool) -> Respon
     );
     if let Some(origin) = origin.and_then(|value| HeaderValue::from_str(value).ok()) {
         headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        if !preflight && headers.contains_key(header::RETRY_AFTER) {
+            headers.insert(
+                header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                HeaderValue::from_static("Retry-After"),
+            );
+        }
     }
     if preflight {
         headers.insert(
@@ -486,6 +492,12 @@ mod tests {
                 )
                 .await?;
             assert_eq!(response.status(), expected);
+            if expected == 429 {
+                assert_eq!(
+                    response.headers()[header::ACCESS_CONTROL_EXPOSE_HEADERS],
+                    "Retry-After"
+                );
+            }
             assert_eq!(
                 response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
                 "https://scene.example"

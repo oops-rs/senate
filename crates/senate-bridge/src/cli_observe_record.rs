@@ -109,13 +109,17 @@ pub(super) async fn record(args: Record) -> anyhow::Result<()> {
         match update {
             Update::Snapshot(mut state) => {
                 recording::sanitize_snapshot(&mut state, args.include_lines);
-                let size = serde_json::to_vec(&state)?.len();
-                if writer.available() < size + 512 {
+                state.cursor = writer.cursor_after(1)?;
+                let row = encode_row(&Row {
+                    offset_ms,
+                    row: Content::Snapshot(state),
+                })?;
+                if writer.available() < row.len() + 512 {
                     break;
                 }
                 writer.row(offset_ms, Content::Discontinuity)?;
-                state.cursor = writer.cursor()?;
-                writer.row(offset_ms, Content::Snapshot(state))?;
+                writer.append_bytes(&row)?;
+                writer.rows += 1;
             }
             Update::Frame(frame) => {
                 let Frame::Event(mut frame) = *frame else {
@@ -124,11 +128,16 @@ pub(super) async fn record(args: Record) -> anyhow::Result<()> {
                 if !recording::sanitize_frame(&mut frame, args.include_lines) {
                     continue;
                 }
-                if writer.available() < serde_json::to_vec(&frame)?.len() + 256 {
+                frame.cursor = writer.cursor()?;
+                let row = encode_row(&Row {
+                    offset_ms,
+                    row: Content::Frame(Box::new(frame)),
+                })?;
+                if writer.available() < row.len() + 256 {
                     break;
                 }
-                frame.cursor = writer.cursor()?;
-                writer.row(offset_ms, Content::Frame(Box::new(frame)))?;
+                writer.append_bytes(&row)?;
+                writer.rows += 1;
             }
         }
         writer.file.flush()?;
@@ -155,18 +164,25 @@ impl RecordWriter {
     }
 
     fn cursor(&self) -> anyhow::Result<Cursor> {
+        self.cursor_after(0)
+    }
+
+    fn cursor_after(&self, rows: u64) -> anyhow::Result<Cursor> {
         base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(u128::from(self.rows + 1).to_be_bytes())
+            .encode(u128::from(self.rows + rows + 1).to_be_bytes())
             .parse::<Cursor>()
             .map_err(anyhow::Error::msg)
     }
 
     fn append(&mut self, value: &impl Serialize) -> anyhow::Result<()> {
-        let bytes = serde_json::to_vec(value)?;
+        self.append_bytes(&encode_row(value)?)
+    }
+
+    fn append_bytes(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
         if self.available() <= bytes.len() {
             bail!("Observe recording reached its byte limit");
         }
-        self.file.write_all(&bytes)?;
+        self.file.write_all(bytes)?;
         self.file.write_all(b"\n")?;
         self.written += bytes.len() + 1;
         Ok(())
@@ -177,6 +193,14 @@ impl RecordWriter {
         self.rows += 1;
         Ok(())
     }
+}
+
+fn encode_row(value: &impl Serialize) -> anyhow::Result<Vec<u8>> {
+    let bytes = serde_json::to_vec(value)?;
+    if bytes.len() >= recording::MAX_ROW_BYTES {
+        bail!("Observe recording row exceeds its byte limit");
+    }
+    Ok(bytes)
 }
 
 pub(super) async fn replay(args: Replay) -> anyhow::Result<()> {
@@ -222,4 +246,17 @@ pub(super) async fn replay(args: Replay) -> anyhow::Result<()> {
         })
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_writer_rejects_rows_replay_cannot_read() -> anyhow::Result<()> {
+        let payload = "x".repeat(recording::MAX_ROW_BYTES - 3);
+        assert_eq!(encode_row(&payload)?.len() + 1, recording::MAX_ROW_BYTES);
+        assert!(encode_row(&(payload + "x")).is_err());
+        Ok(())
+    }
 }

@@ -17,7 +17,7 @@ use crate::grants::lock;
 use crate::{Capture, GrantInfo, Hint, LocalNotice, ProjectionError, Registry, SenateSource};
 
 const LIMIT: u64 = 100 * 1024 * 1024;
-const MAX_ROW: u64 = 4 * 1024 * 1024 + 1024;
+const MAX_ROW: u64 = recording::MAX_ROW_BYTES as u64;
 
 pub struct Recording {
     initial: Snapshot,
