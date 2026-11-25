@@ -2586,6 +2586,11 @@ pub struct Posted {
     #[serde(default)]
     pub thread: Option<Seq>,
     pub duplicate: bool,
+    /// The seat on another committee it went to (a reply in a
+    /// cross-committee discussion): the receipt stored here names no local
+    /// recipient, so `to` is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intended: Option<senate_core::Locator>,
     /// The person spoke in a thread and an escalation to them is still in
     /// force that they had not been shown when they spoke (the two crossed):
     /// its seq. Only on `say` and a person's `answer`; the reply left it

@@ -1149,6 +1149,7 @@ impl Shared {
                     .await
                     .map_err(|e| self.refusal(e))?;
                 Posted {
+                    intended: None,
                     committee: r.event.committee,
                     seq: r.event.seq,
                     to: r.event.to,

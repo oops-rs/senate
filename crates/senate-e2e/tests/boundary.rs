@@ -1291,6 +1291,10 @@ async fn another_committees_chair_receives_discussion_but_requests_wait_on_the_d
         )
         .await;
     assert!(early.to.is_empty());
+    // With no recipient here, the receipt names the seat it went to.
+    let peer = early.intended.as_ref().expect("the receipt names the peer");
+    assert_eq!(peer.committee(), Some(&target));
+    assert_eq!(peer.address(), &senator("claude-maintainer"));
     chair.wait_for("This is about address resolution.").await;
     let early_copy = desk
         .events_of(&target)
@@ -1301,8 +1305,13 @@ async fn another_committees_chair_receives_discussion_but_requests_wait_on_the_d
     assert_eq!(early_copy.thread, Some(target_thread));
     assert_eq!(early_copy.to, [senator("claude-maintainer")]);
 
-    desk.answer("maintainer", target_thread, "Use the qualified address.")
+    let reply = desk
+        .answer("maintainer", target_thread, "Use the qualified address.")
         .await;
+    assert!(reply.to.is_empty());
+    let peer = reply.intended.as_ref().expect("the receipt names the peer");
+    assert_eq!(peer.committee(), Some(&source));
+    assert_eq!(peer.address(), &senator("claude-author"));
     sender.wait_for("Use the qualified address.").await;
     let back = desk
         .events_of(&source)

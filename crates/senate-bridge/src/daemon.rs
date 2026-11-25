@@ -5324,6 +5324,7 @@ impl Shared {
             );
         }
         Ok(Posted {
+            intended: senate_core::locator::intended(&r.event),
             committee: r.event.committee,
             seq: r.event.seq,
             to: r.event.to,
@@ -6039,6 +6040,7 @@ impl Shared {
         }
         let r = above.append(&event).await.map_err(server_error)?;
         Ok(Posted {
+            intended: None,
             committee: r.event.committee,
             seq: r.event.seq,
             to: r.event.to,

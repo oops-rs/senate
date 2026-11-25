@@ -1876,7 +1876,7 @@ impl SenateMcp {
             thread,
             posted.seq,
             already(&posted, l),
-            &mentions(&posted.to),
+            &answered_to(&posted),
             chat,
         ))
     }
@@ -3161,6 +3161,16 @@ pub fn render_escalated(reply: &EscalateReply, thread: Seq, locale: Locale) -> S
     }
 }
 
+/// Who an answer went to: its recipients here, or the seat on the other
+/// committee for a reply in a cross-committee discussion, whose receipt
+/// names no local recipient.
+fn answered_to(posted: &Posted) -> String {
+    match &posted.intended {
+        Some(peer) if posted.to.is_empty() => peer.in_text(),
+        _ => mentions(&posted.to),
+    }
+}
+
 /// What the `answer` tool tells: said in the log, and mirrored into the
 /// team's chat thread only when the committee has a chat group bound.
 fn answered(
@@ -3172,9 +3182,13 @@ fn answered(
     to: &str,
     chat: bool,
 ) -> String {
-    let base = match l {
-        Locale::Zh => format!("已在 {c} 上回答 thread {thread}（seq {seq}）{again}，发给 {to}。"),
-        Locale::En => {
+    let base = match (l, to.is_empty()) {
+        (Locale::Zh, true) => format!("已在 {c} 上回答 thread {thread}（seq {seq}）{again}。"),
+        (Locale::En, true) => format!("Answered thread {thread} on {c} (seq {seq}){again}."),
+        (Locale::Zh, false) => {
+            format!("已在 {c} 上回答 thread {thread}（seq {seq}）{again}，发给 {to}。")
+        }
+        (Locale::En, false) => {
             format!("Answered thread {thread} on {c} (seq {seq}){again}, addressed to {to}.")
         }
     };
@@ -4329,6 +4343,47 @@ mod tests {
             en(true),
             format!("{} It is mirrored into the team's chat thread.", en(false))
         );
+    }
+
+    /// A reply in a cross-committee discussion is stored here with no
+    /// recipient; the receipt read "addressed to ." (commons 311).
+    #[test]
+    fn an_answer_to_another_committee_names_the_seat_it_went_to() {
+        let c = CommitteeId::new("commons").unwrap();
+        let mut posted = Posted {
+            committee: c.clone(),
+            seq: Seq(326),
+            to: Vec::new(),
+            thread: Some(Seq(311)),
+            duplicate: false,
+            intended: Some("/acme::senate::senator::claude".parse().unwrap()),
+            unseen_escalation: None,
+        };
+        let receipt = |posted: &Posted| {
+            answered(
+                Locale::En,
+                &c,
+                Seq(311),
+                posted.seq,
+                "",
+                &answered_to(posted),
+                false,
+            )
+        };
+        assert_eq!(
+            receipt(&posted),
+            "Answered thread 311 on commons (seq 326), addressed to [/acme::senate::senator::claude]."
+        );
+        // Recipients here are named as before, whatever else the event says.
+        posted.to = vec!["senator::codex".parse().unwrap()];
+        assert_eq!(
+            receipt(&posted),
+            "Answered thread 311 on commons (seq 326), addressed to [senator::codex]."
+        );
+        // And nothing is claimed when there is no one to name.
+        posted.to.clear();
+        posted.intended = None;
+        assert_eq!(receipt(&posted), "Answered thread 311 on commons (seq 326).");
     }
 
     #[test]

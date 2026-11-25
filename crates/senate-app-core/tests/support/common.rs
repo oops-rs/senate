@@ -698,6 +698,7 @@ fn posted(thread: Seq) -> Posted {
         to: Vec::new(),
         thread: Some(thread),
         duplicate: false,
+        intended: None,
         unseen_escalation: None,
     }
 }
@@ -992,6 +993,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 to,
                 thread: None,
                 duplicate: false,
+                intended: None,
                 unseen_escalation: None,
             })
         }
