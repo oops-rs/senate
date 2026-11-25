@@ -753,6 +753,18 @@ pub async fn start_in_process(
     start_bridge(options, host_binary, true, observe, observe_consent, false).await
 }
 
+/// Start an unsigned, disposable machine fixture. The scope fixture still
+/// checks the build and home before allowing fixture callers.
+#[doc(hidden)]
+pub async fn start_in_process_fixture(
+    options: DaemonOptions,
+    observe: Option<Arc<senate_observe::Registry>>,
+    observe_consent: Option<Arc<senate_observe::AppConsentedGrants>>,
+) -> anyhow::Result<DaemonHandle> {
+    let host_binary = std::env::current_exe()?.with_file_name("senate");
+    start_bridge(options, host_binary, true, observe, observe_consent, true).await
+}
+
 /// Start the bridge with a companion Senate CLI at an explicit path.
 pub async fn start_with_host_binary(
     options: DaemonOptions,

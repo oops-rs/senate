@@ -176,7 +176,7 @@ impl Machine {
         let path = paths.config();
         let config = BridgeConfig::load_unchecked(&path)?;
         let hosted = Hosted::load(&path)?;
-        Self::start_full(paths, config, hosted, timing, Some(desktop), None).await
+        Self::start_full(paths, config, hosted, timing, Some(desktop), None, false).await
     }
 
     /// Start from a configuration already read: the hosted Senates first,
@@ -187,7 +187,16 @@ impl Machine {
         hosted: Hosted,
         timing: Timing,
     ) -> Result<Self, MachineError> {
-        Self::start_full(paths, config, hosted, timing, None, None).await
+        Self::start_full(paths, config, hosted, timing, None, None, false).await
+    }
+
+    /// Start a disposable machine used by the workspace end-to-end tests.
+    #[cfg(feature = "testing")]
+    pub async fn start_fixture(paths: Paths, timing: Timing) -> Result<Self, MachineError> {
+        let path = paths.config();
+        let config = BridgeConfig::load_unchecked(&path)?;
+        let hosted = Hosted::load(&path)?;
+        Self::start_full(paths, config, hosted, timing, None, None, true).await
     }
 
     /// Start the configured machine with a scripted model for end-to-end tests.
@@ -200,7 +209,7 @@ impl Machine {
         let path = paths.config();
         let config = BridgeConfig::load_unchecked(&path)?;
         let hosted = Hosted::load(&path)?;
-        Self::start_full(paths, config, hosted, timing, None, Some(brain)).await
+        Self::start_full(paths, config, hosted, timing, None, Some(brain), true).await
     }
 
     async fn start_full(
@@ -210,6 +219,7 @@ impl Machine {
         timing: Timing,
         desktop: Option<senate_bridge::notify::Desktop>,
         brain: Option<Arc<dyn senate_speaker::Brain>>,
+        fixture: bool,
     ) -> Result<Self, MachineError> {
         hosted.validate(&config).map_err(MachineError::Invalid)?;
         // Before anything is hosted or spawned: a socket path that cannot
@@ -314,6 +324,7 @@ impl Machine {
             .unwrap_or_default();
         let side = Arc::new(DeveloperMachine {
             in_process: !plans.is_empty(),
+            fixture,
             observe: observe.clone(),
             observe_consent,
             pauser: pauser.clone(),
@@ -820,6 +831,7 @@ pub fn nested_notice(agent: &str, dir: &Path, locale: Locale) -> String {
 /// assembly's supervision.
 struct DeveloperMachine {
     in_process: bool,
+    fixture: bool,
     observe: Option<Arc<senate_observe::Registry>>,
     observe_consent: Option<Arc<senate_observe::AppConsentedGrants>>,
     options: DaemonOptions,
@@ -834,11 +846,28 @@ impl Component for DeveloperMachine {
 
     async fn run(&self, ctx: ComponentContext) -> anyhow::Result<()> {
         let options = self.options.clone();
-        let handle = if self.in_process {
-            daemon::start_in_process(options, self.observe.clone(), self.observe_consent.clone())
+        let handle = match (self.in_process, self.fixture) {
+            (true, false) => {
+                daemon::start_in_process(
+                    options,
+                    self.observe.clone(),
+                    self.observe_consent.clone(),
+                )
                 .await?
-        } else {
-            daemon::start(options).await?
+            }
+            (true, true) => {
+                daemon::start_in_process_fixture(
+                    options,
+                    self.observe.clone(),
+                    self.observe_consent.clone(),
+                )
+                .await?
+            }
+            (false, true) => {
+                let host_binary = std::env::current_exe()?.with_file_name("senate");
+                daemon::start_with_host_binary(options, host_binary).await?
+            }
+            (false, false) => daemon::start(options).await?,
         };
         let set = |pauser| {
             *self

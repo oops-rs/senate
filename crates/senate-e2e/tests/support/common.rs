@@ -1239,7 +1239,7 @@ impl Desk {
 
     /// `senated --machine`, in process, with the tests' quick timing.
     pub async fn start(&mut self) {
-        let machine = Machine::start(self.laptop.paths.clone(), fast_timing())
+        let machine = Machine::start_fixture(self.laptop.paths.clone(), fast_timing())
             .await
             .unwrap();
         // The developer-machine side is up once its socket answers.
