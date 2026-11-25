@@ -728,9 +728,10 @@ What a scratch terminal may and may not do, enforced by the daemon:
   process of that session's runtime.
 - A session may have four at a time. They are closed when the session ends,
   and when it is found dead without having said so.
-- It is not a senator: no seat, no hooks, no approval relay. Inside it,
-  `senate` has no session identity, and person-only requests are refused as
-  they are from any hosted terminal.
+- It is not a senator: no seat, no hooks, no approval relay. A `senate`
+  command run inside it gains nothing from being there: a request in a
+  session's name is checked against the calling process as always, and
+  person-only requests are refused as they are from any hosted terminal.
 - From your own terminal you see all of them, read any, close any, and
   attach to any. While you are attached the keyboard is yours: the owner's
   `type`, `key` and `resize` are refused, in words that tell it to stop.
