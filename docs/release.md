@@ -1,0 +1,121 @@
+# Releasing Senate
+
+A release is the Rust crates on crates.io, a `vX.Y.Z` tag, and the macOS app
+built from the same commit. One script does the part that is only editing:
+`deploy/bump-version.sh`. Everything that leaves the machine (push, tag,
+publish) is done by hand, on the owner's word, and the script does none of it.
+
+## 1. Before
+
+On `main`, with everything for the release merged and the tree clean, one
+clean run of the gate:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --no-fail-fast -- --test-threads=4
+```
+
+## 2. Version
+
+```sh
+deploy/bump-version.sh 0.14.0
+```
+
+It writes the version in every place that states it and refreshes both lock
+files:
+
+| File | What |
+| :--- | :--- |
+| `Cargo.toml` | the workspace version, and the version of each workspace crate in `[workspace.dependencies]` |
+| `shim/senate/Cargo.toml` | the package version, and `senate-bridge`'s |
+| `apps/macos/project.yml` | `MARKETING_VERSION` |
+| `README.md` | the Version column of the crate table |
+| `Cargo.lock` | `cargo update -w` |
+| `shim/senate/Cargo.lock` | `cargo update -p senate-bridge -p senate-core`, run in `shim/senate` |
+
+`deploy/bump-version.sh --check` says the version and fails when a place
+states another one; the test `release_version` runs it with the workspace
+tests, so a place left behind fails the gate. `--no-lock` leaves the lock
+files alone. A place that is not in the table above is not known to the
+script: add it there and to the script together.
+
+## 3. Commit
+
+Review the diff: it is the version in those files and the workspace crates'
+entries in the two lock files, nothing else. Then:
+
+```sh
+git commit -am "Release 0.14.0"
+```
+
+## 4. Dry run
+
+```sh
+cargo publish --workspace --exclude senate-e2e --exclude senate-app-core --dry-run
+```
+
+`senate-e2e` and `senate-app-core` are `publish = false`. The dry run
+packages and builds every crate as crates.io will see it; fix what it finds
+and amend the release commit before going on.
+
+## 5. Tag, push, publish
+
+Each of these is done by hand, on the owner's word:
+
+```sh
+git tag v0.14.0
+git push origin main v0.14.0
+cargo publish --workspace --exclude senate-e2e --exclude senate-app-core
+cargo publish --manifest-path shim/senate/Cargo.toml
+```
+
+The workspace first, then the shim: `shim/senate` is the `senate` package on
+crates.io, outside the workspace, and depends on the `senate-bridge` just
+published. Within the workspace cargo orders the crates by their
+dependencies (`senate-remote-admin` before `senate-bridge`, which depends
+on it).
+
+A published version cannot be replaced. If something is wrong after this
+step, the fix is the next patch version.
+
+## 6. The macOS app
+
+From the release commit, in `apps/macos`:
+
+```sh
+scripts/release.sh
+```
+
+It builds, signs with the Developer ID, notarizes and staples the app and
+its DMG, and builds the remote administrator helper with its checksum, into
+`apps/macos/build/release/`. It reads the version from `project.yml`.
+
+- `SENATE_SIGN_IDENTITY`: the codesign identity (default `Developer ID
+  Application`).
+- `SENATE_NOTARY_PROFILE`: the notarytool keychain profile (default
+  `senate-notary`).
+- `SENATE_BUNDLED_SCENES`: the folder of built-in scenes shipped in the app
+  (default `apps/macos/BundledScenes`; its README says what goes there).
+
+For a build that stays on this machine, sign with a local identity and skip
+notarizing:
+
+```sh
+SENATE_SIGN_IDENTITY="Apple Development" scripts/release.sh --no-notarize
+```
+
+Gatekeeper refuses such a build on another Mac. `scripts/release.sh --help`
+lists the same.
+
+Attach to the release for the tag: the DMG, `senate-remote-admin` and
+`senate-remote-admin.sha256`, and put the helper's checksum in the release
+notes (the README's "Remote machines" says why).
+
+## 7. Installing
+
+Installing the new version on a machine that is in use is its own step with
+its own check, and is not part of releasing. `cargo install senate senated`
+followed by `senate setup service install --yes` replaces the running
+service; `senate setup doctor` says whether the service runs the version
+installed.
