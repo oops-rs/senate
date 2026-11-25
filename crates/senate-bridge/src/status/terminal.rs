@@ -534,7 +534,7 @@ fn sessions(
                 Cell::Id(s.session_id.clone(), ""),
                 Cell::Id(view.display(&s.agent, s.committee(), full_ids), ""),
                 Cell::Text(state.into()),
-                Cell::Text(session_push(s, l)),
+                Cell::Text(session_push(view, s, l)),
                 Cell::Text(ago(s.last_seen, now, l)),
             ];
             let mut details = Vec::new();

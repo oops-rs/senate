@@ -1,4 +1,4 @@
-//! Stop, nudge and prompt requests use a private socket so they can reach
+//! Stop, wake and prompt requests use a private socket so they can reach
 //! a host with a viewer.
 
 use std::io;
@@ -28,18 +28,22 @@ const STOPPED: u8 = 1;
 const FAILED: u8 = 2;
 const END_UNCONFIRMED: u8 = 3;
 const HANDSHAKE: Duration = Duration::from_secs(2);
-/// The nudge replies.
+/// The wake replies.
 const NUDGED: u8 = 4;
 const TYPED_RECENTLY: u8 = 5;
 const DRAFT_PENDING: u8 = 6;
+const PROMPT_SHOWN: u8 = 16;
+const TUI_BUSY: u8 = 17;
 
-/// The one line a host types into an idle hosted agy when something waits
-/// for it: Senate's own fixed text, never anything a peer wrote. agy's
-/// PreInvocation hook then hands over what waits, as at any prompt.
-pub(crate) const AGY_NUDGE: &str = "[senate] new messages";
-/// Between the nudge's text and its Enter: sent together, a TUI can take
+/// The one line a host types into an idle hosted session when something
+/// waits for it unseen: Senate's own fixed text, never anything a peer
+/// wrote. The runtime's own prompt hook then takes what waits, as at any
+/// prompt a person types: agy's PreInvocation and Claude Code's
+/// UserPromptSubmit hand it over, and Codex's starts the push again.
+pub(crate) const WAKE_LINE: &str = "[senate] new messages";
+/// Between the line's text and its Enter: sent together, a TUI can take
 /// the pair as a paste and the Enter as a newline in it.
-const NUDGE_ENTER_DELAY: Duration = Duration::from_millis(150);
+const WAKE_ENTER_DELAY: Duration = Duration::from_millis(150);
 
 /// The find replies.
 const FOUND: u8 = 13;
@@ -101,27 +105,44 @@ struct StopRequest {
     unconfirmed_audit: NewEvent,
 }
 
-/// Type [`AGY_NUDGE`] unless a viewer typed within `quiet_ms`.
+/// Type [`WAKE_LINE`] if the terminal has been quiet for `quiet_ms` and
+/// shows no prompt and no draft ([`wake_once`]).
+#[derive(Serialize, Deserialize)]
+struct WakeRequest {
+    wake: WakeParams,
+}
+
+/// What a host from before [`WakeRequest`] takes: the same line, without
+/// the check that its TUI is quiet. Asked only of an agy, which had it.
 #[derive(Serialize, Deserialize)]
 struct NudgeRequest {
-    nudge: NudgeParams,
+    nudge: WakeParams,
 }
 
 #[derive(Serialize, Deserialize)]
-struct NudgeParams {
+struct WakeParams {
     quiet_ms: u64,
 }
 
-/// What a nudge request came to.
+/// What a wake request came to. Only [`Wake::Typed`] typed anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Nudge {
+pub(crate) enum Wake {
     /// The line was typed.
     Typed,
     /// Someone typed in the terminal lately; ask again after this long.
-    Wait(Duration),
+    Typing(Duration),
     /// A viewer left a line typed but not submitted in the prompt: the
-    /// nudge would be appended to it and submit it.
+    /// line would be appended to it and submit it.
     Draft,
+    /// The screen shows a prompt or a choice: a key typed there would
+    /// answer it.
+    Prompt,
+    /// The TUI wrote to its terminal lately: a turn is running. Ask again
+    /// after this long.
+    Busy(Duration),
+    /// The host is from before the wake request and its runtime never had
+    /// the older one.
+    Unsupported,
 }
 
 fn socket(paths: &Paths, id: &EventId) -> PathBuf {
@@ -163,12 +184,12 @@ pub(super) async fn next_stop(
             let _ = stream.write_u8(1).await;
             continue;
         }
-        if let Ok(NudgeRequest { nudge }) = serde_json::from_str::<NudgeRequest>(&line) {
-            nudge_once(
+        if let Ok(WakeRequest { wake }) = serde_json::from_str::<WakeRequest>(&line) {
+            wake_once(
                 &mut stream,
                 viewer,
                 tty,
-                Duration::from_millis(nudge.quiet_ms),
+                Duration::from_millis(wake.quiet_ms),
                 observed_at,
             )
             .await;
@@ -287,10 +308,13 @@ pub(crate) async fn grant_viewer(
     })
 }
 
-/// Type the nudge into the TUI, unless a viewer typed within `quiet` or
-/// left a line unsubmitted, which it never touches. A
-/// watcher records no input, so watching never holds a nudge back.
-async fn nudge_once(
+/// Type the wake line into the TUI, and only into one that sits idle at
+/// its own prompt. It is never typed onto a line a viewer left unsubmitted,
+/// into a prompt or a choice on the screen (the key would answer it),
+/// within `quiet` of a viewer typing, or within `quiet` of the TUI writing
+/// to its terminal (a turn is running: [`super::activity`]). A watcher
+/// records no input, so watching never holds a wake back.
+async fn wake_once(
     stream: &mut UnixStream,
     viewer: &Mutex<Viewer>,
     tty: &Tty,
@@ -298,7 +322,7 @@ async fn nudge_once(
     now: impl FnOnce() -> u64,
 ) {
     // Check the draft in the same order as viewer writes. Keep the lock
-    // through Enter so no viewer input can become part of the nudge.
+    // through Enter so no viewer input can become part of the line.
     let mut write = tty.write.lock().await;
     let now = now();
     let (input_at, draft) = {
@@ -310,18 +334,23 @@ async fn nudge_once(
         let _ = stream.write_u8(DRAFT_PENDING).await;
         return;
     }
-    let quiet_ns = u64::try_from(quiet.as_nanos()).unwrap_or(u64::MAX);
-    let since = now.saturating_sub(input_at);
-    let wait = if prompt::looks_like_prompt(&tty.screen.rows()) {
-        Some(quiet)
-    } else if input_at > 0 && since < quiet_ns {
-        Some(Duration::from_nanos(quiet_ns - since))
-    } else {
-        None
-    };
-    if let Some(wait) = wait {
+    if prompt::looks_like_prompt(&tty.screen.rows()) {
         drop(write);
-        let mut reply = vec![TYPED_RECENTLY];
+        let _ = stream.write_u8(PROMPT_SHOWN).await;
+        return;
+    }
+    let quiet_ns = u64::try_from(quiet.as_nanos()).unwrap_or(u64::MAX);
+    let remaining = |since: u64| {
+        let since = now.saturating_sub(since);
+        (since < quiet_ns).then(|| Duration::from_nanos(quiet_ns - since))
+    };
+    let wait = match remaining(input_at).filter(|_| input_at > 0) {
+        Some(wait) => Some((TYPED_RECENTLY, wait)),
+        None => remaining(tty.screen.last_output()).map(|wait| (TUI_BUSY, wait)),
+    };
+    if let Some((why, wait)) = wait {
+        drop(write);
+        let mut reply = vec![why];
         reply.extend_from_slice(
             &u64::try_from(wait.as_millis())
                 .unwrap_or(u64::MAX)
@@ -331,8 +360,8 @@ async fn nudge_once(
         return;
     }
     let typed = async {
-        write.write_all(AGY_NUDGE.as_bytes()).await?;
-        tokio::time::sleep(NUDGE_ENTER_DELAY).await;
+        write.write_all(WAKE_LINE.as_bytes()).await?;
+        tokio::time::sleep(WAKE_ENTER_DELAY).await;
         write.write_all(b"\r").await
     }
     .await;
@@ -342,7 +371,7 @@ async fn nudge_once(
             let _ = stream.write_u8(NUDGED).await;
         }
         Err(error) => {
-            tracing::warn!(%error, "typing the idle nudge into the coding TUI");
+            tracing::warn!(%error, "typing the wake line into the coding TUI");
             let _ = stream.write_u8(FAILED).await;
         }
     }
@@ -470,15 +499,32 @@ pub(crate) async fn find(paths: &Paths, id: &EventId) -> Result<bool, IpcError> 
     .map_err(|_| IpcError::internal("timed out waiting for the terminal host"))?
 }
 
-/// Ask host `id` to type the idle nudge into its TUI, unless a viewer typed
-/// there within `quiet`.
-pub(crate) async fn nudge(paths: &Paths, id: &EventId, quiet: Duration) -> Result<Nudge, IpcError> {
-    let mut payload = serde_json::to_vec(&NudgeRequest {
-        nudge: NudgeParams {
-            quiet_ms: u64::try_from(quiet.as_millis()).unwrap_or(u64::MAX),
-        },
-    })
-    .map_err(IpcError::internal)?;
+/// Ask host `id` to type the wake line into its TUI if it sits idle
+/// ([`wake_once`]): quiet for `quiet`, no draft, no prompt. A host from
+/// before the request closes the connection without a word; `older` then
+/// asks it the way it knows, which only an agy's host does.
+pub(crate) async fn wake(
+    paths: &Paths,
+    id: &EventId,
+    quiet: Duration,
+    older: bool,
+) -> Result<Wake, IpcError> {
+    let params = || WakeParams {
+        quiet_ms: u64::try_from(quiet.as_millis()).unwrap_or(u64::MAX),
+    };
+    let payload =
+        serde_json::to_vec(&WakeRequest { wake: params() }).map_err(IpcError::internal)?;
+    match ask_to_wake(paths, id, payload).await? {
+        Wake::Unsupported if older => {
+            let payload = serde_json::to_vec(&NudgeRequest { nudge: params() })
+                .map_err(IpcError::internal)?;
+            ask_to_wake(paths, id, payload).await
+        }
+        wake => Ok(wake),
+    }
+}
+
+async fn ask_to_wake(paths: &Paths, id: &EventId, mut payload: Vec<u8>) -> Result<Wake, IpcError> {
     payload.push(b'\n');
     tokio::time::timeout(HANDSHAKE, async {
         let mut stream = UnixStream::connect(socket(paths, id))
@@ -489,20 +535,28 @@ pub(crate) async fn nudge(paths: &Paths, id: &EventId, quiet: Duration) -> Resul
             .await
             .map_err(IpcError::internal)?;
         match stream.read_u8().await {
-            Ok(NUDGED) => Ok(Nudge::Typed),
-            Ok(DRAFT_PENDING) => Ok(Nudge::Draft),
-            Ok(TYPED_RECENTLY) => {
+            Ok(NUDGED) => Ok(Wake::Typed),
+            Ok(DRAFT_PENDING) => Ok(Wake::Draft),
+            Ok(PROMPT_SHOWN) => Ok(Wake::Prompt),
+            Ok(why @ (TYPED_RECENTLY | TUI_BUSY)) => {
                 let ms = stream.read_u64().await.map_err(IpcError::internal)?;
-                Ok(Nudge::Wait(Duration::from_millis(ms)))
+                let wait = Duration::from_millis(ms);
+                Ok(if why == TUI_BUSY {
+                    Wake::Busy(wait)
+                } else {
+                    Wake::Typing(wait)
+                })
             }
-            Ok(_) => Err(IpcError::internal("the host could not type the nudge")),
+            Ok(_) => Err(IpcError::internal("the host could not type the wake line")),
+            // A request the host does not know: it reads the next one.
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(Wake::Unsupported),
             Err(error) => Err(IpcError::internal(format!(
-                "the host did not answer the nudge: {error}"
+                "the host did not answer the wake request: {error}"
             ))),
         }
     })
     .await
-    .map_err(|_| IpcError::internal("timed out waiting for the terminal host to nudge"))?
+    .map_err(|_| IpcError::internal("timed out waiting for the terminal host to wake its TUI"))?
 }
 
 /// Release the session binding guard after this acknowledgement, before the
@@ -627,11 +681,69 @@ mod tests {
     use super::*;
     use crate::host::{ViewerActivity, emulation::Scheme, forward_keys, input};
 
+    /// What a wake request's reply says, as the daemon reads it.
+    async fn reply(client: &mut UnixStream) -> anyhow::Result<(u8, Option<u64>)> {
+        let code = client.read_u8().await?;
+        let wait = match code {
+            TYPED_RECENTLY | TUI_BUSY => Some(client.read_u64().await?),
+            _ => None,
+        };
+        Ok((code, wait))
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn nudge_quiet_window_starts_at_viewer_input() -> anyhow::Result<()> {
+    async fn a_wake_is_typed_only_into_a_quiet_tui_with_no_prompt_on_its_screen()
+    -> anyhow::Result<()> {
+        let (pty, pts) = pty_process::open()?;
+        let mut slave = std::fs::File::from(rustix::io::dup(&pts)?);
+        let flags = rustix::fs::fcntl_getfl(&slave)?;
+        rustix::fs::fcntl_setfl(&slave, flags | rustix::fs::OFlags::NONBLOCK)?;
+        let (_, write) = pty.into_split();
+        let tty = Tty::new(write, Scheme::Light, 24, 80);
+        let viewer = Mutex::new(Viewer {
+            path: PathBuf::new(),
+            activity: ViewerActivity::default(),
+            dirty: false,
+            draft: input::Draft::default(),
+        });
+        let (mut server, mut client) = UnixStream::pair()?;
+        let quiet = Duration::from_secs(10);
+        let now = 100_000_000_000;
+        let typed = |slave: &mut std::fs::File| {
+            let mut bytes = [0; 64];
+            slave.read(&mut bytes).unwrap_or(0)
+        };
+
+        // The TUI wrote 4 s ago: a turn is running. Nothing is typed.
+        tty.screen.set_last_output(now - 4_000_000_000);
+        wake_once(&mut server, &viewer, &tty, quiet, || now).await;
+        assert_eq!(reply(&mut client).await?, (TUI_BUSY, Some(6000)));
+        assert_eq!(typed(&mut slave), 0, "typed into a busy TUI");
+
+        // Quiet, but a choice is on the screen: a key would answer it.
+        tty.screen.set_last_output(now - 60_000_000_000);
+        tty.screen
+            .output(b"Allow this command?\r\n\xe2\x9d\xaf 1. Yes\r\n  2. No\r\n");
+        tty.screen.set_last_output(now - 60_000_000_000);
+        wake_once(&mut server, &viewer, &tty, quiet, || now).await;
+        assert_eq!(reply(&mut client).await?, (PROMPT_SHOWN, None));
+        assert_eq!(typed(&mut slave), 0, "typed into a prompt");
+
+        // The choice is gone and the TUI is quiet: the line goes in.
+        tty.screen.output(b"\x1b[2J\x1b[H> ");
+        tty.screen.set_last_output(now - 60_000_000_000);
+        wake_once(&mut server, &viewer, &tty, quiet, || now).await;
+        assert_eq!(reply(&mut client).await?, (NUDGED, None));
+        assert!(typed(&mut slave) > 0);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wake_quiet_window_starts_at_viewer_input() -> anyhow::Result<()> {
         let (pty, _pts) = pty_process::open()?;
         let (_, write) = pty.into_split();
         let tty = Tty::new(write, Scheme::Light, 24, 80);
+        tty.screen.set_last_output(0);
         let input_at = 1_000_000_000;
         let viewer = Mutex::new(Viewer {
             path: PathBuf::new(),
@@ -645,14 +757,13 @@ mod tests {
         let (mut server, mut client) = UnixStream::pair()?;
         let quiet = Duration::from_secs(2);
 
-        nudge_once(&mut server, &viewer, &tty, quiet, || {
+        wake_once(&mut server, &viewer, &tty, quiet, || {
             input_at + 1_200_000_000
         })
         .await;
-        assert_eq!(client.read_u8().await?, TYPED_RECENTLY);
-        assert_eq!(client.read_u64().await?, 800);
+        assert_eq!(reply(&mut client).await?, (TYPED_RECENTLY, Some(800)));
 
-        nudge_once(&mut server, &viewer, &tty, quiet, || {
+        wake_once(&mut server, &viewer, &tty, quiet, || {
             input_at + 2_000_000_000
         })
         .await;
@@ -661,7 +772,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn viewer_keys_cannot_join_the_nudge_before_enter() -> anyhow::Result<()> {
+    async fn viewer_keys_cannot_join_the_wake_line_before_enter() -> anyhow::Result<()> {
         let (pty, pts) = pty_process::open()?;
         let mut slave = std::fs::File::from(rustix::io::dup(&pts)?);
         let mut raw = rustix::termios::tcgetattr(&slave)?;
@@ -678,7 +789,7 @@ mod tests {
             draft: input::Draft::default(),
         });
         let (mut server, mut client) = UnixStream::pair()?;
-        let mut nudge = std::pin::pin!(nudge_once(
+        let mut nudge = std::pin::pin!(wake_once(
             &mut server,
             &viewer,
             &tty,
@@ -689,14 +800,14 @@ mod tests {
         let mut classify = input::Input::default();
         let keys = forward_keys(&tty, &viewer, &cursor, &mut classify, b"draft");
 
-        // Poll until the nudge has written its text and reached its Enter
-        // delay, with the viewer input still ready to arrive before Enter.
-        let mut prefix = [0; AGY_NUDGE.len()];
+        // Poll until the line has been written and its Enter delay reached,
+        // with the viewer input still ready to arrive before Enter.
+        let mut prefix = [0; WAKE_LINE.len()];
         let mut read = 0;
         while read < prefix.len() {
             assert!(futures::poll!(nudge.as_mut()).is_pending());
             match slave.read(&mut prefix[read..]) {
-                Ok(0) => anyhow::bail!("PTY closed before the nudge arrived"),
+                Ok(0) => anyhow::bail!("PTY closed before the wake line arrived"),
                 Ok(n) => read += n,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     tokio::task::yield_now().await;
@@ -704,7 +815,7 @@ mod tests {
                 Err(error) => return Err(error.into()),
             }
         }
-        assert_eq!(prefix, AGY_NUDGE.as_bytes());
+        assert_eq!(prefix, WAKE_LINE.as_bytes());
         let ((), keys) = tokio::join!(nudge, keys);
         keys?;
         assert_eq!(client.read_u8().await?, NUDGED);

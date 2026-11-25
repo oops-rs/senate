@@ -3659,8 +3659,8 @@ mod tests {
     #[test]
     fn catch_up_says_when_items_were_sent_again_after_a_restart() {
         for (locale, marker) in [
-            (Locale::En, "sent again after the Senate daemon restarted"),
-            (Locale::Zh, "重启后再次发送"),
+            (Locale::En, "are sent again: Senate could not tell"),
+            (Locale::Zh, "有的是再次发送的"),
         ] {
             let mut page = catch_up_page(None);
             assert!(!render_catch_up(&page, locale).contains(marker));

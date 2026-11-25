@@ -656,7 +656,7 @@ pub fn fast_timing() -> Timing {
         triage_wait: Duration::from_secs(10),
         checkpoint_poll: Duration::from_secs(3600),
         checkpoint_interval: Duration::from_secs(7200),
-        agy_nudge_quiet: Duration::from_secs(10),
+        check: Default::default(),
         screen_prompt_quiet: Duration::from_secs(15),
         pause_quiet: Duration::from_millis(300),
         shutdown_pause: Duration::from_secs(90),

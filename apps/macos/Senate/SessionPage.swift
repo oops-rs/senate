@@ -170,8 +170,9 @@ struct SessionActions: View {
 }
 
 /// A session's status as one small mark, most urgent first: a prompt waits
-/// (attention), it works (a turning ring), it said something you have not
-/// read (accent), idle, paused, stopped.
+/// (attention), a message for it is not getting through (an attention
+/// ring), it works (a turning ring), it said something you have not read
+/// (accent), idle, paused, stopped.
 struct StatusMark: View {
     let status: SessionStatus
 
@@ -183,6 +184,8 @@ struct StatusMark: View {
                     .frame(width: 8, height: 8)
                     .padding(2)
                     .overlay { Circle().stroke(Theme.attention.opacity(0.35), lineWidth: 2) }
+            case .notResponding:
+                Circle().stroke(Theme.attention, lineWidth: 1.6).frame(width: 8, height: 8)
             case .working:
                 WorkingRing()
             case .unread:
@@ -206,6 +209,7 @@ extension SessionStatus {
     var label: String {
         switch self {
         case .needsYou: L("status.needs_you")
+        case .notResponding: L("status.not_responding")
         case .working: L("status.working")
         case .unread: L("status.unread")
         case .idle: L("status.idle")
@@ -258,7 +262,7 @@ struct SessionMark: View {
 
     private var tint: Color {
         switch status {
-        case .needsYou: Theme.attention
+        case .needsYou, .notResponding: Theme.attention
         case .working, .unread: Theme.primary
         case .idle, .paused, .stopped: Theme.onSurfaceVariant
         }
@@ -266,7 +270,7 @@ struct SessionMark: View {
 
     @ViewBuilder private var badge: some View {
         switch status {
-        case .needsYou: dot(Theme.attention)
+        case .needsYou, .notResponding: dot(Theme.attention)
         case .unread: dot(Theme.primary)
         case .paused:
             Image(systemName: "pause.fill")

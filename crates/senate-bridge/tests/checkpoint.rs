@@ -248,7 +248,7 @@ async fn commits_intervals_and_session_ends_checkpoint_on_their_own() {
     h.start_with(senate_bridge::Timing {
         checkpoint_poll: Duration::from_millis(150),
         checkpoint_interval: Duration::from_millis(1500),
-        agy_nudge_quiet: Duration::from_secs(10),
+        check: Default::default(),
         screen_prompt_quiet: Duration::from_secs(15),
         pause_quiet: Duration::from_millis(300),
         shutdown_pause: Duration::from_secs(90),
@@ -354,7 +354,7 @@ async fn two_agents_in_one_worktree_checkpoint_as_themselves() {
     h.start_with(senate_bridge::Timing {
         checkpoint_poll: Duration::from_millis(150),
         checkpoint_interval: Duration::from_secs(3600),
-        agy_nudge_quiet: Duration::from_secs(10),
+        check: Default::default(),
         screen_prompt_quiet: Duration::from_secs(15),
         pause_quiet: Duration::from_millis(300),
         shutdown_pause: Duration::from_secs(90),

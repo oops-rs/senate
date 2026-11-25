@@ -153,9 +153,11 @@ pub fn render_with_ids(
         locale.pick("状态", "STATE"),
         locale.pick("运行", "UPTIME"),
         locale.pick("查看者", "VIEWER"),
+        locale.pick("活动", "ACTIVITY"),
+        locale.pick("待读", "WAITING"),
         locale.pick("目录", "DIR"),
     ];
-    let lines: Vec<[String; 8]> = reply
+    let lines: Vec<[String; 10]> = reply
         .rows
         .iter()
         .map(|row| {
@@ -174,6 +176,11 @@ pub fn render_with_ids(
                 row.started_at
                     .map_or_else(|| "-".to_owned(), |at| uptime(at, now)),
                 viewer(row, locale),
+                row.delivery
+                    .activity
+                    .map_or("-", |activity| activity.label(locale))
+                    .to_owned(),
+                waiting(&row.delivery, now),
                 row.dir.display().to_string(),
             ]
         })
@@ -368,6 +375,17 @@ fn state(row: &SessionRow, locale: Locale) -> String {
     }
 }
 
+/// What is held for it or was handed to it without showing in its own
+/// record: how many, and how long the oldest has waited (`2 · 6m`); `-`
+/// for none.
+pub(crate) fn waiting(delivery: &crate::ipc::SessionDelivery, now: DateTime<Utc>) -> String {
+    match (delivery.waiting, delivery.waiting_since) {
+        (0, _) => "-".to_owned(),
+        (n, Some(since)) => format!("{n} · {}", uptime(since, now)),
+        (n, None) => n.to_string(),
+    }
+}
+
 /// Who is at its terminal: `attached`, how long since someone typed, or
 /// `-`.
 fn viewer(row: &SessionRow, locale: Locale) -> String {
@@ -429,6 +447,7 @@ pub(crate) mod tests {
             host_health: None,
             codex_scope_advisory: false,
             paused: false,
+            delivery: crate::ipc::SessionDelivery::default(),
             chair: false,
             shown_name: None,
             host_id: EventId::new(),
@@ -661,6 +680,69 @@ pub(crate) mod tests {
             render(&SessionsReply::default(), now, Locale::En),
             "No hosted sessions on this machine."
         );
+    }
+
+    /// What each session is doing and what waits for it unseen, in two
+    /// columns before DIR; the columns before them stay where they were.
+    #[test]
+    fn activity_and_what_waits_unseen_are_two_columns_before_the_directory() {
+        use crate::ipc::{SessionActivity, SessionDelivery};
+        let now = Utc::now();
+        let mut stuck = row("agy-1", Some("triage"), HostState::Running);
+        stuck.delivery = SessionDelivery {
+            activity: Some(SessionActivity::NotResponding),
+            waiting: 2,
+            waiting_since: Some(now - chrono::Duration::minutes(6)),
+            stuck: true,
+        };
+        let mut busy = row("claude-1", Some("builder"), HostState::Running);
+        busy.delivery = SessionDelivery {
+            activity: Some(SessionActivity::Active),
+            waiting: 1,
+            waiting_since: Some(now - chrono::Duration::seconds(20)),
+            stuck: false,
+        };
+        let mut idle = row("codex-1", Some("review"), HostState::Running);
+        idle.delivery.activity = Some(SessionActivity::Idle);
+        let stopped = row("codex-2", Some("old"), HostState::Stopped);
+        let reply = SessionsReply {
+            rows: vec![stuck, busy, idle, stopped],
+            local_rows: Vec::new(),
+            orphans: Vec::new(),
+        };
+        let text = render(&reply, now, Locale::En);
+        let lines: Vec<&str> = text.lines().collect();
+        let header: Vec<&str> = lines[0].split_whitespace().collect();
+        assert_eq!(
+            header,
+            [
+                "NAME",
+                "COMMITTEE",
+                "RUNTIME",
+                "MODEL",
+                "STATE",
+                "UPTIME",
+                "VIEWER",
+                "ACTIVITY",
+                "WAITING",
+                "DIR"
+            ]
+        );
+        let (activity, waiting, dir) = (
+            lines[0].find("ACTIVITY").unwrap(),
+            lines[0].find("WAITING").unwrap(),
+            lines[0].find("DIR").unwrap(),
+        );
+        let cell = |line: &str, from: usize, to: usize| line[from..to].trim().to_owned();
+        let line = |name: &str| *lines.iter().find(|l| l.starts_with(name)).unwrap();
+        assert_eq!(cell(line("triage"), activity, waiting), "not responding");
+        assert_eq!(cell(line("triage"), waiting, dir), "2 · 6m");
+        assert_eq!(cell(line("builder"), activity, waiting), "active");
+        assert_eq!(cell(line("builder"), waiting, dir), "1 · 20s");
+        assert_eq!(cell(line("review"), activity, waiting), "idle");
+        assert_eq!(cell(line("review"), waiting, dir), "-");
+        assert_eq!(cell(line("old"), activity, waiting), "-", "not running");
+        assert!(line("triage").ends_with("/work/refund"), "{text}");
     }
 
     #[test]

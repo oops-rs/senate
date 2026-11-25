@@ -270,6 +270,117 @@ async fn codex_smoke_reads_then_starts_or_steers() {
 
 // ---- inside the daemon ---------------------------------------------------
 
+/// The app-server taking a push only makes it `injected`. The thread's own
+/// rollout showing the message makes it `seen`, with nothing more done. One
+/// the rollout never shows, in a terminal Senate does not host, is told to
+/// its sender and the Speaker once, and nothing is pushed again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_codex_push_is_seen_in_its_rollout_and_an_unseen_one_is_told_once() {
+    use std::io::Write as _;
+
+    let mut h = Harness::new().await;
+    let codex = h.codex();
+    h.start().await;
+    let wd = h.workdir("cx", Some("refund-v2"));
+    let rollout = h
+        .dir
+        .path()
+        .join("rollout-2026-01-01T00-00-00-thread-1.jsonl");
+    std::fs::write(&rollout, "").unwrap();
+    h.hook_recording(
+        HookKind::SessionStart,
+        "thread-1",
+        &wd,
+        &senate_bridge::hook::HookEnv::default(),
+        Some(Runtime::Codex),
+        &rollout,
+    )
+    .await;
+    h.wait_stream("refund-v2").await;
+    codex.idle("thread-1");
+
+    let first = h
+        .server
+        .append(relayed_to(common::codex("alice"), "first question"));
+    let pushed = eventually("a turn/start", WAIT, || {
+        let p = codex.pushes();
+        (!p.is_empty()).then_some(p)
+    })
+    .await;
+    eventually("the app-server took it", WAIT, || {
+        (h.reach_of("codex", first.seq.0)? == ("injected", false)).then_some(())
+    })
+    .await;
+    // Codex writes the turn's input into the thread's rollout.
+    let record = |text: &str| {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        let row = serde_json::json!({
+            "timestamp": chrono::Utc::now(), "type": "response_item",
+            "payload": {"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": text}]},
+        });
+        writeln!(file, "{row}").unwrap();
+    };
+    record(input_text(&pushed[0].1));
+    eventually("its rollout shows it", Duration::from_secs(10), || {
+        (h.reach_of("codex", first.seq.0)? == ("seen", false)).then_some(())
+    })
+    .await;
+
+    // The second never shows. Past the bound, its sender is told why.
+    let second = h
+        .server
+        .append(relayed_to(common::codex("alice"), "second question"));
+    let note = eventually("the sender is told", Duration::from_secs(15), || {
+        h.delivery_notes("stuck").into_iter().next()
+    })
+    .await;
+    assert_eq!(note.from, common::codex("alice"));
+    assert_eq!(note.thread, Some(second.seq));
+    assert_eq!(note.kind, Kind::Note);
+    assert!(
+        note.to.contains(&second.from) && note.to.contains(&senate_core::Address::Speaker),
+        "{:?}",
+        note.to
+    );
+    assert!(
+        note.body
+            .contains(&format!("has not taken in seq {}", second.seq))
+            && note.body.contains("a terminal Senate does not host"),
+        "{}",
+        note.body
+    );
+    assert_eq!(h.reach_of("codex", second.seq.0), Some(("injected", true)));
+    assert_eq!(h.reach_of("codex", first.seq.0), Some(("seen", false)));
+    // Told once, and pushed once: nothing is sent again to a session
+    // Senate cannot wake.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(h.delivery_notes("stuck").len(), 1);
+    assert_eq!(codex.pushes().len(), 2);
+
+    // It shows after all: one note says so.
+    record(input_text(&codex.pushes()[1].1));
+    let through = eventually(
+        "the sender is told it was read",
+        Duration::from_secs(15),
+        || h.delivery_notes("through").into_iter().next(),
+    )
+    .await;
+    assert_eq!(through.thread, Some(second.seq));
+    assert!(
+        through
+            .body
+            .ends_with(&format!("has now read seq {}.", second.seq)),
+        "{}",
+        through.body
+    );
+    assert_eq!(h.reach_of("codex", second.seq.0), Some(("seen", false)));
+    h.stop().await;
+}
+
 /// A directed event reaches a Codex thread as a new turn
 /// when it is idle and steers the running turn when it is busy; a Claude
 /// session next to it still gets its inbox push.

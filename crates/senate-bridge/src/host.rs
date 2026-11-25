@@ -1,6 +1,7 @@
 //! A detached terminal owner. The daemon records the session's identity, but
 //! only this process holds the master PTY and its child.
 
+pub(crate) mod activity;
 pub(crate) mod control;
 mod emulation;
 mod input;
@@ -1018,6 +1019,7 @@ pub async fn run(
         served = serve(&listener, &tty, &viewer, &admission) => served,
         served = watch::serve(&watchers, &tty.screen, &admission) => served,
         prompted = prompt::watch(&dir, &tty.screen, session.prompt_quiet) => prompted,
+        marked = activity::watch(&dir, &tty.screen) => marked,
         fitted = tty.fit() => fitted,
         peer = control::next_stop(&controls, &viewer, &tty, paths, id, &admission) => {
             stop = Some(peer);
@@ -1380,6 +1382,9 @@ pub(crate) struct HostFacts {
     pub(crate) typed_secs_ago: Option<u64>,
     /// The attached viewer's terminal device, when it said.
     pub(crate) viewer_tty: Option<String>,
+    /// How long its TUI has written nothing to its terminal
+    /// ([`activity`]); `None` when its host does not say.
+    pub(crate) quiet_for: Option<Duration>,
 }
 
 pub(crate) fn facts(paths: &Paths, id: &EventId) -> io::Result<HostFacts> {
@@ -1391,6 +1396,7 @@ pub(crate) fn facts(paths: &Paths, id: &EventId) -> io::Result<HostFacts> {
             attached: false,
             typed_secs_ago: None,
             viewer_tty: None,
+            quiet_for: None,
         });
     }
     let started_at = std::fs::metadata(directory(paths, id).join("owner"))
@@ -1406,6 +1412,7 @@ pub(crate) fn facts(paths: &Paths, id: &EventId) -> io::Result<HostFacts> {
         attached: viewer.attached,
         typed_secs_ago,
         viewer_tty: viewer.attached.then_some(viewer.tty).flatten(),
+        quiet_for: activity::quiet_for(paths, id),
     })
 }
 

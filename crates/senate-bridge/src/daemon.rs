@@ -171,6 +171,7 @@ use crate::stream::{self, CommitteeWorker};
 mod activity;
 pub(crate) mod approval_guard;
 pub mod default_secretary;
+mod delivery_check;
 mod desk_decision;
 mod desk_open;
 mod front;
@@ -256,9 +257,8 @@ pub struct Timing {
     pub checkpoint_poll: Duration,
     /// Time between automatic checkpoints of an open session.
     pub checkpoint_interval: Duration,
-    /// How long nobody may have typed in a hosted agy's terminal before
-    /// its host types the idle nudge into it.
-    pub agy_nudge_quiet: Duration,
+    /// The bounds of the delivery check.
+    pub check: CheckTiming,
     /// How long a hosted TUI showing a choice must have written nothing
     /// before its host reports a prompt waiting ([`crate::host::prompt`]).
     pub screen_prompt_quiet: Duration,
@@ -288,10 +288,44 @@ impl Default for Timing {
             triage_wait: Duration::from_secs(senate_core::task::TRIAGE_WAIT_SECS),
             checkpoint_poll: Duration::from_secs(60),
             checkpoint_interval: Duration::from_secs(2 * 3600),
-            agy_nudge_quiet: Duration::from_secs(10),
+            check: CheckTiming::default(),
             screen_prompt_quiet: crate::host::prompt::QUIET,
             pause_quiet: Duration::from_secs(10),
             shutdown_pause: Duration::from_secs(crate::config::SHUTDOWN_PAUSE_SECS),
+        }
+    }
+}
+
+/// The bounds of the delivery check: when a session with something unseen
+/// is woken, and when its sender and chair are told it is not getting
+/// through (the `delivery_check` module has the mechanism).
+#[derive(Debug, Clone, Copy)]
+pub struct CheckTiming {
+    /// How long a hosted TUI must have been quiet (nothing written, nobody
+    /// typing) before its host types the wake line into it.
+    pub wake_quiet: Duration,
+    /// How long a message a runtime took may be missing from an idle
+    /// session's own record before the session is woken.
+    pub seen_within: Duration,
+    /// Least time between two wakes of one session.
+    pub wake_spacing: Duration,
+    /// How long a message may wait behind a prompt, a person's draft, or in
+    /// a terminal Senate does not host before the sender and the chair are
+    /// told.
+    pub stuck_after: Duration,
+    /// How long a session may work without a pause, a message unseen,
+    /// before they are told that much.
+    pub busy_after: Duration,
+}
+
+impl Default for CheckTiming {
+    fn default() -> Self {
+        Self {
+            wake_quiet: Duration::from_secs(10),
+            seen_within: Duration::from_secs(45),
+            wake_spacing: Duration::from_secs(60),
+            stuck_after: Duration::from_secs(5 * 60),
+            busy_after: Duration::from_secs(30 * 60),
         }
     }
 }
@@ -421,16 +455,6 @@ struct AgyHostObservation {
     session_id: String,
     at: Instant,
 }
-
-/// An idle agy session ([`Shared::nudge_idle_agy`]): which idle spell
-/// this is, and whether it has had its nudge.
-struct AgyIdle {
-    spell: u64,
-    nudged: bool,
-}
-
-/// Tells one idle spell of an agy from the next.
-static AGY_IDLE_SPELL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Default)]
 struct HookDrops {
@@ -563,11 +587,9 @@ pub(crate) struct Shared {
     /// to now.
     rebinds: Mutex<HashMap<String, Rebind>>,
     agy_host_observed: Mutex<HashMap<EventId, AgyHostObservation>>,
-    /// agy sessions idle since their last turn ended (`Stop` with nothing
-    /// waiting, no hook since), and whether their host has typed the idle
-    /// nudge since. Any later hook of the session removes it. Kept in
-    /// memory: after a restart no agy is nudged until its next `Stop`.
-    agy_idle: Mutex<HashMap<String, AgyIdle>>,
+    /// What the delivery check remembers of each session with something
+    /// not known seen.
+    checks: delivery_check::Checks,
     /// Prompt hooks without a matching Stop or SessionEnd in this daemon run.
     working_sessions: Mutex<HashMap<String, Instant>>,
     desk_decisions: tokio::sync::Mutex<()>,
@@ -1176,7 +1198,7 @@ impl Shared {
             home: common.home.clone(),
             rebinds: Mutex::new(HashMap::new()),
             agy_host_observed: Mutex::new(HashMap::new()),
-            agy_idle: Mutex::new(HashMap::new()),
+            checks: delivery_check::Checks::default(),
             working_sessions: Mutex::new(HashMap::new()),
             desk_decisions: tokio::sync::Mutex::new(()),
             session_titles: Arc::default(),
@@ -2822,7 +2844,7 @@ impl Shared {
         if again {
             self.work.notify_one();
         }
-        if let Some(at) = self.nudge_idle_agy(&sessions).await {
+        if let Some(at) = self.check_deliveries(&sessions).await {
             due = Some(due.map_or(at, |d| d.min(at)));
         }
         Ok(due)
@@ -3948,6 +3970,7 @@ impl Shared {
             HashMap::new()
         };
         let mut prompts = self.hosted_prompts();
+        let standings = self.standings();
         for (session, host_id) in hosted {
             let facts = crate::host::facts(&paths, &host_id).map_err(IpcError::internal)?;
             let mut host_health = facts
@@ -4011,6 +4034,13 @@ impl Shared {
                 attached: facts.attached,
                 typed_secs_ago: facts.typed_secs_ago,
                 viewer_tty: facts.viewer_tty,
+                delivery: self.session_delivery(
+                    facts.running,
+                    facts.running && self.session_working(&session),
+                    prompt.is_some(),
+                    facts.quiet_for,
+                    standings.get(&session.session_id),
+                ),
                 prompt,
                 paused: !facts.running && paused.contains(&session.agent),
             });
@@ -4045,6 +4075,13 @@ impl Shared {
             );
             let working = self.session_working(&session);
             local_rows.push(LocalSessionRow {
+                delivery: self.session_delivery(
+                    true,
+                    working,
+                    false,
+                    None,
+                    standings.get(&session.session_id),
+                ),
                 session_id: session.session_id,
                 shown_name: Some(senate_core::alias::display_name(
                     aliases.as_ref(),
@@ -4176,6 +4213,21 @@ impl Shared {
             hosted: host_status.hosted,
             hosted_unbound: host_status.unbound,
             hosted_viewer_unavailable: host_status.viewer_unavailable,
+            delivery: self
+                .standings()
+                .into_iter()
+                .map(|(session, standing)| {
+                    (
+                        session,
+                        crate::ipc::SessionDelivery {
+                            activity: None,
+                            waiting: standing.waiting,
+                            waiting_since: standing.since,
+                            stuck: standing.stuck,
+                        },
+                    )
+                })
+                .collect(),
             host_health: host_status.health,
             dropped_hooks,
             sessions,
@@ -4268,9 +4320,10 @@ impl Shared {
                 .await
                 .map_err(|_| IpcError::bad_request("the hosted launch was rolled back"))?;
         }
-        // A resumed agy can send SessionStart without starting a turn.
-        if report.runtime == Runtime::Agy && report.event == HookEvent::UserPromptSubmit {
-            lock(&self.agy_idle).remove(&report.session_id);
+        // A prompt hook is the session taking a turn: it answered whatever
+        // woke it. (A resumed agy can send SessionStart without one.)
+        if report.event == HookEvent::UserPromptSubmit {
+            self.checks.alive(&report.session_id);
         }
         let (_binding, switched) =
             if native && matches!(report.runtime, Runtime::Claude | Runtime::Agy) {
@@ -4353,9 +4406,6 @@ impl Shared {
                 self.no_longer_working(&session.session_id);
             }
             _ => {}
-        }
-        if changed_host_context && session.runtime == Runtime::Agy {
-            self.mark_agy_idle(&session.session_id);
         }
         self.publish(WatchEvent::Sessions);
         let was = before.map(|b| (b.agent.clone(), b.committee().cloned(), b.state));
@@ -4610,16 +4660,6 @@ impl Shared {
                 }
             }
         }
-        // Asked by agy's `Stop`. With something waiting the turn goes on
-        // to read it; with nothing, the session sits idle from here.
-        if waiting == 0
-            && unanswered.is_empty()
-            && session.is_some_and(|session| session.is_live() && session.runtime == Runtime::Agy)
-        {
-            self.mark_agy_idle(session_id);
-        } else {
-            lock(&self.agy_idle).remove(session_id);
-        }
         if waiting == 0 && unanswered.is_empty() && turn.is_some() {
             let mut working = lock(&self.working_sessions);
             if working.get(session_id).copied() == turn {
@@ -4631,96 +4671,6 @@ impl Shared {
             waiting,
             unanswered,
         })
-    }
-
-    fn mark_agy_idle(&self, session_id: &str) {
-        let spell = AGY_IDLE_SPELL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        lock(&self.agy_idle).insert(
-            session_id.to_owned(),
-            AgyIdle {
-                spell,
-                nudged: false,
-            },
-        );
-        // Something held just as this was answered still gets its nudge.
-        self.work.notify_one();
-    }
-
-    /// Have the host of each idle hosted agy with something waiting type
-    /// the idle nudge, once per idle spell: its next PreInvocation hook then
-    /// takes what waits. A hand-started agy has no host and is never
-    /// nudged; nor is any other runtime. Returns when to ask again a host
-    /// whose terminal someone typed in lately.
-    async fn nudge_idle_agy(&self, sessions: &[Session]) -> Option<Instant> {
-        let idle: Vec<String> = lock(&self.agy_idle)
-            .iter()
-            .filter(|(_, idle)| !idle.nudged)
-            .map(|(sid, _)| sid.clone())
-            .collect();
-        let paths = Paths::new(&self.home);
-        let mut due: Option<Instant> = None;
-        for sid in idle {
-            let Some(session) = sessions
-                .iter()
-                .find(|s| s.session_id == sid && s.runtime == Runtime::Agy)
-            else {
-                continue;
-            };
-            let Some(committee) = session.committee().cloned() else {
-                continue;
-            };
-            if !self
-                .hook_items(session, &committee)
-                .is_ok_and(|items| !items.is_empty())
-            {
-                continue;
-            }
-            let Ok(Some(host)) = self.store.session_host(&sid) else {
-                continue;
-            };
-            if crate::host::unbound_context(&paths, &host).is_some() {
-                continue;
-            }
-            // Counted as nudged before the line is typed: the turn it starts
-            // can end, and a new idle spell begin, before the host replies.
-            let spell = match lock(&self.agy_idle).get_mut(&sid) {
-                Some(idle) if !idle.nudged => {
-                    idle.nudged = true;
-                    idle.spell
-                }
-                _ => continue,
-            };
-            use crate::host::control::Nudge;
-            let retry =
-                match crate::host::control::nudge(&paths, &host, self.timing.agy_nudge_quiet).await
-                {
-                    Ok(Nudge::Wait(wait)) => Some(wait),
-                    // A line a viewer left unsubmitted: its Enter starts a turn
-                    // whose PreInvocation takes what waits, and clearing it
-                    // leaves the nudge to a later pass.
-                    Ok(Nudge::Draft) => Some(self.timing.agy_nudge_quiet),
-                    Ok(Nudge::Typed) => {
-                        tracing::info!(session = %sid, "nudged an idle hosted agy");
-                        None
-                    }
-                    // Not again this spell: a host that cannot type it now
-                    // would be asked over and over.
-                    Err(error) => {
-                        tracing::warn!(%error, session = %sid, "nudging an idle hosted agy");
-                        None
-                    }
-                };
-            if let Some(wait) = retry {
-                if let Some(idle) = lock(&self.agy_idle).get_mut(&sid)
-                    && idle.spell == spell
-                {
-                    idle.nudged = false;
-                }
-                let at = Instant::now() + wait;
-                due = Some(due.map_or(at, |d| d.min(at)));
-            }
-        }
-        due
     }
 
     fn hook_context(
@@ -5308,6 +5258,9 @@ impl Shared {
             }
         };
         if !r.duplicate {
+            // An agent that writes in a thread has acted on what it was
+            // handed there.
+            self.note_acted(&r.event);
             self.observe_route(
                 &r.event.committee,
                 r.event.seq,

@@ -823,7 +823,7 @@ async fn the_commit_triggered_checkpoint_waits_for_worktree_branch_sync() {
     h.start_with(senate_bridge::Timing {
         checkpoint_poll: Duration::from_millis(150),
         checkpoint_interval: Duration::from_secs(3600),
-        agy_nudge_quiet: Duration::from_secs(10),
+        check: Default::default(),
         screen_prompt_quiet: Duration::from_secs(15),
         pause_quiet: Duration::from_millis(300),
         shutdown_pause: Duration::from_secs(90),

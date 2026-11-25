@@ -459,6 +459,10 @@ pub mod meta {
     pub const BINDING: &str = "binding";
     /// `status` events: the [`StatusPayload`](crate::task::StatusPayload).
     pub const STATUS: &str = "status";
+    /// On a note a machine writes about its own delivery of a thread's
+    /// messages to one of its senators: `{state: "stuck" | "through", seqs,
+    /// …}`. Never itself reported as undelivered.
+    pub const DELIVERY_CHECK: &str = "delivery_check";
     /// True on a hosted approval notice. Its archive status carries the
     /// root's event ID under the same key, pinning it across log epochs.
     pub const HOSTED_APPROVAL: &str = "hosted_approval";

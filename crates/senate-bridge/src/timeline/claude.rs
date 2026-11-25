@@ -9,6 +9,7 @@ pub(super) fn events(record: &Value) -> Vec<Event> {
     }
     match record["type"].as_str() {
         Some("user") => user_events(record, true),
+        Some("attachment") => attached_delivery(&record["attachment"]),
         Some("assistant") => record["message"]["content"]
             .as_array()
             .into_iter()
@@ -52,6 +53,36 @@ pub(super) fn events(record: &Value) -> Vec<Event> {
         },
         _ => Vec::new(),
     }
+}
+
+/// A Senate delivery Claude Code took in without a `user` record of its
+/// own: a message pushed while a turn was running, which it attaches to
+/// that turn (`queued_command`, the `prompt` it was queued with), and what
+/// a hook handed over (`hook_additional_context`). Only a delivery is read
+/// from either; a person's own queued prompt is in its `user` record.
+fn attached_delivery(attachment: &Value) -> Vec<Event> {
+    let texts: Vec<&str> = match attachment["type"].as_str() {
+        Some("queued_command") => match &attachment["prompt"] {
+            Value::String(text) => vec![text.as_str()],
+            blocks => blocks
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|block| block["text"].as_str())
+                .collect(),
+        },
+        Some("hook_additional_context") => match &attachment["content"] {
+            Value::String(text) => vec![text.as_str()],
+            parts => parts
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect(),
+        },
+        _ => Vec::new(),
+    };
+    texts.into_iter().flat_map(parse::delivered_only).collect()
 }
 
 pub(super) fn user_events(record: &Value, include_results: bool) -> Vec<Event> {

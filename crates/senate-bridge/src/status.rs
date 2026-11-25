@@ -53,6 +53,8 @@ pub struct StatusView {
     pub hosted_unbound: std::collections::BTreeMap<String, String>,
     pub host_health: std::collections::BTreeMap<String, crate::ipc::HostHealth>,
     pub hosted_viewer_unavailable: std::collections::BTreeSet<String>,
+    /// By session id: what waits for it unseen ([`crate::ipc::SessionDelivery`]).
+    pub delivery: std::collections::BTreeMap<String, crate::ipc::SessionDelivery>,
     pub dropped_hooks: Option<HookDropStatus>,
     pub queue: QueueCounts,
     pub locale: Locale,
@@ -116,6 +118,7 @@ impl StatusView {
             hosted_unbound: reply.hosted_unbound,
             host_health: reply.host_health,
             hosted_viewer_unavailable: reply.hosted_viewer_unavailable,
+            delivery: reply.delivery,
             dropped_hooks: reply.dropped_hooks,
             queue: reply.queue,
             locale: reply.locale,
@@ -264,6 +267,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
         hosted_unbound: Default::default(),
         host_health: Default::default(),
         hosted_viewer_unavailable: Default::default(),
+        delivery: Default::default(),
         dropped_hooks: None,
         queue: QueueCounts::default(),
         locale: config
@@ -375,7 +379,33 @@ fn session_committee(session: &Session, locale: Locale) -> String {
     }
 }
 
-fn session_push(session: &Session, locale: Locale) -> String {
+/// How messages reach the session, then what waits for it unseen, if
+/// anything does: `at hooks · 2 waiting 6m, not getting through`.
+fn session_push(view: &StatusView, session: &Session, locale: Locale) -> String {
+    let route = push_route(session, locale);
+    let Some(delivery) = view
+        .delivery
+        .get(&session.session_id)
+        .filter(|delivery| delivery.waiting > 0)
+    else {
+        return route;
+    };
+    let age = delivery
+        .waiting_since
+        .map(|since| format!(" {}", crate::sessions::uptime(since, chrono::Utc::now())))
+        .unwrap_or_default();
+    let stuck = if delivery.stuck {
+        locale.pick("，未送达", ", not getting through")
+    } else {
+        ""
+    };
+    match locale {
+        Locale::Zh => format!("{route} · {} 条待读{age}{stuck}", delivery.waiting),
+        Locale::En => format!("{route} · {} waiting{age}{stuck}", delivery.waiting),
+    }
+}
+
+fn push_route(session: &Session, locale: Locale) -> String {
     match (session.runtime, &session.socket, session.socket_ok) {
         // agy has no channel Senate can push into: it takes what is
         // waiting at its next hook.
@@ -953,7 +983,7 @@ fn render_senate(
                     s.branch.clone().unwrap_or_else(|| "—".into()),
                     home_relative(&s.cwd),
                     ago(s.last_seen, now, l),
-                    session_push(s, l),
+                    session_push(view, s, l),
                 ]
             })
             .collect();
@@ -1034,6 +1064,7 @@ mod tests {
             hosted_unbound: Default::default(),
             host_health: Default::default(),
             hosted_viewer_unavailable: Default::default(),
+            delivery: Default::default(),
             dropped_hooks: None,
             queue: QueueCounts::default(),
             locale,
@@ -1338,6 +1369,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Beside how messages reach a session: what waits for it unseen, only
+    /// when something does.
+    #[test]
+    fn the_push_cell_says_what_waits_unseen_and_whether_it_is_getting_through() {
+        let now = Utc::now();
+        let mut view = view(Locale::En);
+        let session: Session = serde_json::from_value(serde_json::json!({
+            "session_id": "agy:example", "agent": "tester", "agent_source": "session",
+            "runtime": "agy", "cwd": "/work", "state": "live", "started_at": now,
+            "last_seen": now,
+        }))
+        .unwrap();
+        view.sessions.push(session);
+        let push = |view: &StatusView| {
+            let pipe = render(view, now);
+            pipe.lines()
+                .find(|l| l.contains("at hooks"))
+                .map(|l| l[l.find("at hooks").unwrap()..].trim_end().to_owned())
+                .unwrap_or_else(|| panic!("{pipe}"))
+        };
+        assert_eq!(push(&view), "at hooks", "nothing waits: nothing is added");
+        let mut delivery = crate::ipc::SessionDelivery {
+            waiting: 2,
+            waiting_since: Some(now - chrono::Duration::minutes(6)),
+            ..Default::default()
+        };
+        view.delivery.insert("agy:example".into(), delivery.clone());
+        assert_eq!(push(&view), "at hooks · 2 waiting 6m");
+        delivery.stuck = true;
+        view.delivery.insert("agy:example".into(), delivery);
+        assert_eq!(push(&view), "at hooks · 2 waiting 6m, not getting through");
+        let tty = render_terminal(&view, now, false, None, Terminal::new(160, false));
+        assert!(
+            tty.contains("at hooks · 2 waiting 6m, not getting through"),
+            "{tty}"
+        );
     }
 
     #[test]

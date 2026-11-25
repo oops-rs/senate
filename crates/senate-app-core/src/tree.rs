@@ -3,15 +3,15 @@
 //! with the one status that matters most for it now.
 //!
 //! The status, most urgent first ([`SessionStatus`]): a permission prompt
-//! waits for the person; the runtime is mid-turn; it said something to the
-//! person they have not read; idle; paused; stopped. A committee shows its
-//! most urgent session's.
+//! waits for the person; a message for it is not getting through; the
+//! runtime is mid-turn; it said something to the person they have not read;
+//! idle; paused; stopped. A committee shows its most urgent session's.
 
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
-use senate_bridge::ipc::{LocalSessionRow, SessionRow};
+use senate_bridge::ipc::{LocalSessionRow, SessionActivity, SessionDelivery, SessionRow};
 use senate_bridge::session::Runtime;
 use senate_core::{Address, Locale, SenatorName};
 
@@ -24,6 +24,10 @@ use crate::text;
 pub enum SessionStatus {
     /// A permission prompt waits in it for the person.
     NeedsYou,
+    /// A message for it is not getting through: it sits idle and did not
+    /// answer Senate's wakes, or something a person must clear holds it up.
+    /// Its sender and the chair were told.
+    NotResponding,
     /// The runtime is mid-turn.
     Working,
     /// It said something to the person that they have not read.
@@ -39,6 +43,7 @@ impl SessionStatus {
     pub fn label(self, locale: Locale) -> &'static str {
         match self {
             Self::NeedsYou => locale.pick("等你决定", "needs you"),
+            Self::NotResponding => locale.pick("无响应", "not responding"),
             Self::Working => locale.pick("工作中", "working"),
             Self::Unread => locale.pick("有未读", "unread"),
             Self::Idle => locale.pick("空闲", "idle"),
@@ -205,9 +210,18 @@ fn unread_from(senator: &SenatorName, waiting: &[Waiting]) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-fn status(prompt: bool, working: bool, unread: u32, paused: bool, running: bool) -> SessionStatus {
+fn status(
+    prompt: bool,
+    delivery: &SessionDelivery,
+    working: bool,
+    unread: u32,
+    paused: bool,
+    running: bool,
+) -> SessionStatus {
     if prompt {
         SessionStatus::NeedsYou
+    } else if delivery.activity == Some(SessionActivity::NotResponding) {
+        SessionStatus::NotResponding
     } else if working {
         SessionStatus::Working
     } else if unread > 0 {
@@ -218,6 +232,17 @@ fn status(prompt: bool, working: bool, unread: u32, paused: bool, running: bool)
         SessionStatus::Stopped
     } else {
         SessionStatus::Idle
+    }
+}
+
+/// The status in words, then how many messages wait for the session
+/// unseen, when any do: `not responding · 2 waiting`, `working · 1 waiting`.
+fn status_label(status: SessionStatus, delivery: &SessionDelivery, locale: Locale) -> String {
+    let label = status.label(locale);
+    match (delivery.waiting, locale) {
+        (0, _) => label.to_string(),
+        (n, Locale::Zh) => format!("{label} · {n} 条待读"),
+        (n, Locale::En) => format!("{label} · {n} waiting"),
     }
 }
 
@@ -234,7 +259,14 @@ fn hosted_line(r: &SessionRow, waiting: &[Waiting], locale: Locale) -> SessionLi
     let unread = unread_from(&r.primary, waiting);
     let running = r.is_running();
     let working = r.working && running;
-    let st = status(r.prompt.is_some(), working, unread, r.paused, running);
+    let st = status(
+        r.prompt.is_some(),
+        &r.delivery,
+        working,
+        unread,
+        r.paused,
+        running,
+    );
     let hosted = HostedSession::from(r);
     SessionLine {
         session_id: r.session_id.clone(),
@@ -248,7 +280,7 @@ fn hosted_line(r: &SessionRow, waiting: &[Waiting], locale: Locale) -> SessionLi
         branch: r.branch.clone(),
         title: r.title.clone(),
         status: st,
-        status_label: st.label(locale).to_string(),
+        status_label: status_label(st, &r.delivery, locale),
         working,
         unread,
         last_activity: time(r.last_activity),
@@ -260,7 +292,7 @@ fn hosted_line(r: &SessionRow, waiting: &[Waiting], locale: Locale) -> SessionLi
 
 fn local_line(r: &LocalSessionRow, waiting: &[Waiting], locale: Locale) -> SessionLine {
     let unread = unread_from(&r.primary, waiting);
-    let st = status(false, r.working, unread, false, true);
+    let st = status(false, &r.delivery, r.working, unread, false, true);
     SessionLine {
         session_id: r.session_id.clone(),
         display_name: r
@@ -277,12 +309,51 @@ fn local_line(r: &LocalSessionRow, waiting: &[Waiting], locale: Locale) -> Sessi
         branch: r.branch.clone(),
         title: r.title.clone(),
         status: st,
-        status_label: st.label(locale).to_string(),
+        status_label: status_label(st, &r.delivery, locale),
         working: r.working,
         unread,
         last_activity: time(r.last_activity),
         active: true,
         hosted: None,
         readable: readable(r.runtime),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A waiting prompt comes first; then a message that is not getting
+    /// through; a busy session with something unseen is working, not stuck.
+    #[test]
+    fn a_session_that_is_not_taking_its_messages_says_so_with_the_count() {
+        let delivery = |activity, waiting| SessionDelivery {
+            activity: Some(activity),
+            waiting,
+            waiting_since: None,
+            stuck: activity == SessionActivity::NotResponding,
+        };
+        let stuck = delivery(SessionActivity::NotResponding, 2);
+        let st = status(false, &stuck, false, 3, false, true);
+        assert_eq!(st, SessionStatus::NotResponding);
+        assert_eq!(
+            status_label(st, &stuck, Locale::En),
+            "not responding · 2 waiting"
+        );
+        assert_eq!(status_label(st, &stuck, Locale::Zh), "无响应 · 2 条待读");
+        assert_eq!(
+            status(true, &stuck, false, 0, false, true),
+            SessionStatus::NeedsYou,
+            "the prompt is what a person can act on"
+        );
+        let busy = delivery(SessionActivity::Active, 1);
+        let st = status(false, &busy, true, 0, false, true);
+        assert_eq!(st, SessionStatus::Working);
+        assert_eq!(status_label(st, &busy, Locale::En), "working · 1 waiting");
+        let idle = delivery(SessionActivity::Idle, 0);
+        let st = status(false, &idle, false, 0, false, true);
+        assert_eq!(status_label(st, &idle, Locale::En), "idle");
+        assert!(SessionStatus::NeedsYou < SessionStatus::NotResponding);
+        assert!(SessionStatus::NotResponding < SessionStatus::Working);
     }
 }

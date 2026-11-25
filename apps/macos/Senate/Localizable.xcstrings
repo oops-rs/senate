@@ -5621,6 +5621,23 @@
         }
       }
     },
+    "status.not_responding": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "not responding"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无响应"
+          }
+        }
+      }
+    },
     "status.paused": {
       "extractionState": "manual",
       "localizations": {

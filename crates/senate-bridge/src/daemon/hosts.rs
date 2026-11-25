@@ -462,7 +462,6 @@ impl Shared {
             Ok(session) => {
                 host::clear_context_reports(paths, id);
                 self.no_longer_working(&first.session_id);
-                lock(&self.agy_idle).remove(&first.session_id);
                 self.note_delivered(&first.session_id);
                 if let Err(error) = self.remember_history_name(&first) {
                     tracing::warn!(%error, "recording the retired conversation's display name");
@@ -564,7 +563,6 @@ impl Shared {
             })?;
         host::clear_context_reports(&paths, &id);
         self.no_longer_working(&first.session_id);
-        lock(&self.agy_idle).remove(&first.session_id);
         self.note_delivered(&first.session_id);
         if let Err(error) = self.remember_history_name(&first) {
             tracing::warn!(%error, "recording the retired conversation's display name");
@@ -1564,10 +1562,9 @@ impl Shared {
             }).await.map_err(|_| IpcError::new(codes::SERVER, "timed out publishing the hosted session"))??;
             // The publication is committed. Losing the host at this point
             // is a liveness failure, not grounds to undo an acknowledged alias.
-            if restoring && runtime == HostedRuntime::Agy {
-                // --conversation opens at the input prompt without a seed turn or Stop hook.
-                self.mark_agy_idle(&session_id);
-            }
+            // A restored agy opens at its input prompt with no seed turn and
+            // no hook: the delivery check sees it idle from its terminal.
+            self.work.notify_one();
             if codex_backend.is_some() {
                 self.codex_routes.set(&session_id, Some(codex_transport.clone()));
             }

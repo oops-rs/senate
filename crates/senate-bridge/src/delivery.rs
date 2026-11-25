@@ -35,14 +35,24 @@
 //! A Codex push that times out after the request was written is treated the
 //! same way ([`codex`]): it is sent again rather than dropped.
 //!
-//! A repeat after a restart is never silent. The delivery that carries a
-//! re-sent item says once, before the messages, that they were sent again
-//! after a daemon restart and may already have been seen, and asks the agent
-//! to check the thread by the seq in each header before answering or acting
-//! again ([`crate::format::redelivered_note`]). The flag is cleared once the
-//! item is recorded delivered, so a later delivery carries no note. Within
-//! one running daemon the in-flight claim means a batch is never handed to
-//! two sessions or pushed twice.
+//! A repeat is never silent. The delivery that carries a re-sent item says
+//! once, before the messages, that they are sent again and may already have
+//! been seen, and asks the agent to check the thread by the seq in each
+//! header before answering or acting again
+//! ([`crate::format::redelivered_note`]). The flag is cleared once the item
+//! is recorded delivered, so a later delivery carries no note. Within one
+//! running daemon the in-flight claim means a batch is never handed to two
+//! sessions or pushed twice.
+//!
+//! # Delivered is not seen
+//!
+//! `Injected` says a runtime took the batch, not that its agent has it: a
+//! Claude Code inbox holds a message behind a permission prompt, and a hook
+//! reply can go unread. The daemon follows each item from there in the
+//! session's own record of its conversation, wakes an idle session that
+//! shows no sign of it, offering the item again with the same note, and
+//! tells the sender and the chair when it is not getting through (the
+//! daemon's `delivery_check` module).
 
 pub mod acp;
 pub mod codex;

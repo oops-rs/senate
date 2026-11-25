@@ -22,6 +22,50 @@ const PEER_DELIVERY: &str = concat!(
     "This is a synthetic runtime trailer.",
 );
 
+/// Claude Code takes a message pushed during a turn into that turn, and a
+/// hook's context likewise, with no `user` record: both are attachments.
+/// The `enqueue` before either is Claude holding the message, not having it.
+#[test]
+fn claude_shows_a_delivery_taken_mid_turn_and_one_a_hook_handed_over() {
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    let hooked = "[senate] The messages below come from the Senate committee log for demo.\n\n\
+                  [senate · demo · seq 50 · from [senator::alex] · note]\n│ From a hook\n";
+    for row in [
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": PEER_DELIVERY}),
+        serde_json::json!({"type": "queue-operation", "operation": "remove"}),
+        serde_json::json!({
+            "type": "attachment", "timestamp": "2024-01-01T00:00:00Z",
+            "attachment": {"type": "queued_command", "prompt": PEER_DELIVERY, "isMeta": true,
+                "commandMode": "prompt", "origin": {"kind": "peer"}}
+        }),
+        serde_json::json!({
+            "type": "attachment",
+            "attachment": {"type": "hook_additional_context", "hookName": "UserPromptSubmit",
+                "content": [hooked]}
+        }),
+        // A person's own queued prompt is not a delivery.
+        serde_json::json!({
+            "type": "attachment",
+            "attachment": {"type": "queued_command", "prompt": "run the tests", "commandMode": "prompt"}
+        }),
+        serde_json::json!({"type": "attachment", "attachment": {"type": "date", "date": "2024-01-01"}}),
+    ] {
+        append(&mut file, &row.to_string());
+    }
+    let mut reader = Transcript::open(file.path().into(), Runtime::Claude).unwrap();
+    let page = reader.page(TimelineDirection::Tail, None, 60).unwrap();
+    let seqs: Vec<_> = page
+        .items
+        .iter()
+        .map(|item| match &item.kind {
+            TimelineKind::SenateMessage { seq, .. } => *seq,
+            other => panic!("not a Senate message: {other:?}"),
+        })
+        .collect();
+    assert_eq!(seqs, [Some(41), Some(42), Some(50)]);
+    assert!(page.items[0].ts.is_some());
+}
+
 #[test]
 fn claude_delivered_peer_turn_is_two_cards_and_never_a_title() {
     let mut file = tempfile::NamedTempFile::new().unwrap();

@@ -618,6 +618,60 @@ pub struct SessionRow {
     /// Recorded paused (`senate session pause`): stopped, to be resumed.
     #[serde(default, skip_serializing_if = "is_false")]
     pub paused: bool,
+    /// What it is doing and what waits for it unseen.
+    #[serde(default, skip_serializing_if = "SessionDelivery::is_default")]
+    pub delivery: SessionDelivery,
+}
+
+/// What a session is doing, as far as Senate can tell from its hooks and,
+/// when Senate hosts it, from its terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionActivity {
+    /// A turn is running: its hooks say so, or its TUI wrote to its
+    /// terminal in the last seconds.
+    Active,
+    Idle,
+    /// A permission prompt or a choice waits in its terminal.
+    Prompt,
+    /// Idle or held up, with a message for it that is not getting through:
+    /// its sender and the chair were told.
+    NotResponding,
+}
+
+impl SessionActivity {
+    pub fn label(self, locale: Locale) -> &'static str {
+        match self {
+            Self::Active => locale.pick("活跃", "active"),
+            Self::Idle => locale.pick("空闲", "idle"),
+            Self::Prompt => locale.pick("等待提示", "prompt"),
+            Self::NotResponding => locale.pick("无响应", "not responding"),
+        }
+    }
+}
+
+/// What the delivery check says of one session: what it is doing, and what
+/// is held for it or was handed to it without showing in its own record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDelivery {
+    /// `None` when it is not running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<SessionActivity>,
+    #[serde(default)]
+    pub waiting: u32,
+    /// Since when the oldest of them has waited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_since: Option<DateTime<Utc>>,
+    /// The sender and the chair were told one of them is not getting
+    /// through.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stuck: bool,
+}
+
+impl SessionDelivery {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// An actionable warning about the host process, independent of its seat.
@@ -674,6 +728,9 @@ pub struct LocalSessionRow {
     pub working: bool,
     pub last_activity: DateTime<Utc>,
     pub title: Option<String>,
+    /// What it is doing and what waits for it unseen.
+    #[serde(default, skip_serializing_if = "SessionDelivery::is_default")]
+    pub delivery: SessionDelivery,
 }
 
 impl SessionRow {
@@ -2650,6 +2707,16 @@ pub struct LocalDelivery {
     pub agent: SenatorName,
     pub state: crate::state::ItemStatus,
     pub via: Option<String>,
+    /// How far it has got towards the agent; `None` from a daemon before
+    /// the delivery check, and for an item that was withdrawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<crate::state::Reach>,
+    /// Since when it has been there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<DateTime<Utc>>,
+    /// The sender and the chair were told it is not getting through.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stuck: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2687,14 +2754,35 @@ impl EventReceipt {
             );
         }
         for delivery in &self.local_deliveries {
-            let state = delivery.state.as_str();
+            use crate::state::Reach;
+            // How far it got ([`Reach`]): `injected` is the runtime taking
+            // it, `seen` its own record showing it.
+            let state = delivery
+                .reach
+                .map_or(delivery.state.as_str(), Reach::as_str);
             let agent = Address::senator(&delivery.agent).in_text();
             let via = delivery
                 .via
                 .as_deref()
                 .map(|v| format!(" ({v})"))
                 .unwrap_or_default();
-            lines.push(format!("{agent}  {state}{via}"));
+            let mut line = format!("{agent}  {state}{via}");
+            if let (Some(Reach::Queued | Reach::Injected), Some(since)) =
+                (delivery.reach, delivery.since)
+            {
+                let age = crate::sessions::uptime(since, Utc::now());
+                line.push_str(&match locale {
+                    Locale::Zh => format!("，已 {age}"),
+                    Locale::En => format!(" for {age}"),
+                });
+            }
+            if delivery.stuck {
+                line.push_str(locale.pick(
+                    "；未送达，已告知发送者和主席",
+                    "; not getting through, its sender and the chair were told",
+                ));
+            }
+            lines.push(line);
         }
         lines.join("\n")
     }
@@ -3011,6 +3099,10 @@ pub struct StatusReply {
     /// Running hosts without a readable viewer activity record.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub hosted_viewer_unavailable: std::collections::BTreeSet<String>,
+    /// By session id, for the live sessions with a message held for them
+    /// or handed to them and not yet in their own record.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub delivery: std::collections::BTreeMap<String, SessionDelivery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped_hooks: Option<HookDropStatus>,
 
@@ -3466,6 +3558,72 @@ mod tests {
         let escalate: Request =
             serde_json::from_str(r#"{"op":"escalate","session":{},"thread":3,"to":"pm"}"#).unwrap();
         assert!(matches!(escalate, Request::Escalate { to: Some(p), .. } if p.as_str() == "pm"));
+    }
+
+    /// A receipt says how far the message got to each recipient here, not
+    /// only that a runtime took it; one from an older daemon reads as before.
+    #[test]
+    fn a_receipt_says_how_far_the_message_got_to_each_recipient() {
+        use crate::state::{ItemStatus, Reach};
+        let now = Utc::now();
+        let delivery = |agent: &str, state, via: Option<&str>, reach, ago, stuck| LocalDelivery {
+            agent: agent.parse().unwrap(),
+            state,
+            via: via.map(str::to_owned),
+            reach,
+            since: Some(now - chrono::Duration::seconds(ago)),
+            stuck,
+        };
+        let delivered = ItemStatus::Delivered;
+        let receipt = EventReceipt {
+            committee: CommitteeId::new("refund").unwrap(),
+            seq: Seq(12),
+            id: EventId::new(),
+            thread: Seq(12),
+            kind: Kind::Question,
+            from: Address::senator(&"claude".parse().unwrap()),
+            to: Vec::new(),
+            local_deliveries: vec![
+                delivery("a", delivered, Some("inbox"), Some(Reach::Acted), 5, false),
+                delivery("b", delivered, Some("codex"), Some(Reach::Seen), 5, false),
+                delivery(
+                    "c",
+                    delivered,
+                    Some("inbox"),
+                    Some(Reach::Injected),
+                    130,
+                    false,
+                ),
+                delivery(
+                    "d",
+                    ItemStatus::Queued,
+                    None,
+                    Some(Reach::Queued),
+                    420,
+                    true,
+                ),
+                LocalDelivery {
+                    reach: None,
+                    since: None,
+                    ..delivery("e", delivered, Some("hook"), None, 0, false)
+                },
+            ],
+        };
+        let text = receipt.render(Locale::En);
+        let lines: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(
+            lines,
+            [
+                "[senator::a]  acted (inbox)",
+                "[senator::b]  seen (codex)",
+                "[senator::c]  injected (inbox) for 2m",
+                "[senator::d]  queued for 7m; not getting through, its sender and the chair were told",
+                "[senator::e]  delivered (hook)",
+            ]
+        );
+        let old: LocalDelivery =
+            serde_json::from_str(r#"{"agent":"e","state":"delivered","via":"hook"}"#).unwrap();
+        assert_eq!((old.reach, old.since, old.stuck), (None, None, false));
     }
 
     #[test]

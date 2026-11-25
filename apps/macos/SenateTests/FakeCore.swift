@@ -465,11 +465,12 @@ extension SessionStatus {
     var rank: Int {
         switch self {
         case .needsYou: 0
-        case .working: 1
-        case .unread: 2
-        case .idle: 3
-        case .paused: 4
-        case .stopped: 5
+        case .notResponding: 1
+        case .working: 2
+        case .unread: 3
+        case .idle: 4
+        case .paused: 5
+        case .stopped: 6
         }
     }
 }
