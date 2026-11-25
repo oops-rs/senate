@@ -1670,6 +1670,58 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     fixture.h.stop().await;
 }
 
+/// A chair removes a finished senator's worktree, then restores it for a
+/// follow-up: the refusal says what happened and what to do, not only
+/// that a path cannot be opened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restoring_into_a_removed_directory_is_refused_with_the_way_on() {
+    use senate_bridge::ipc::StopReply;
+
+    let mut fixture = HostedClaude::launch(false).await;
+    let _: StopReply = call(
+        &fixture.h,
+        &Request::Stop {
+            session: Default::default(),
+            senator: fixture.seat.senator.clone().into(),
+            force: false,
+        },
+    )
+    .await;
+    // The session records the directory by its real path.
+    let project = fixture.project.canonicalize().unwrap().display().to_string();
+    std::fs::remove_dir_all(&fixture.project).unwrap();
+    let error = ipc::request::<SpawnReply>(
+        &fixture.h.socket(),
+        &Request::Restore {
+            session: Default::default(),
+            senator: fixture.seat.senator.clone().into(),
+            model: Default::default(),
+        },
+        TIMEOUT,
+        TIMEOUT,
+    )
+    .await
+    .unwrap_err();
+    let ipc::ClientError::Remote(error) = error else {
+        panic!("expected a daemon error, got {error}");
+    };
+    assert!(
+        error
+            .message
+            .contains(&format!("project directory {project} no longer exists")),
+        "{}",
+        error.message
+    );
+    assert!(
+        error
+            .message
+            .contains(&format!("`git worktree add {project} ")),
+        "{}",
+        error.message
+    );
+    fixture.h.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unconfirmed_forced_stop_audits_the_ended_host() {
     use senate_bridge::ipc::StopReply;
