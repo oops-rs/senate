@@ -42,6 +42,7 @@ const SERVICE_INSTALL: &str = "senate setup service install --yes";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
+    Info,
     Ok,
     Warn,
     Fail,
@@ -50,6 +51,7 @@ pub enum Status {
 impl Status {
     fn word(self) -> &'static str {
         match self {
+            Self::Info => "info",
             Self::Ok => "ok",
             Self::Warn => "warn",
             Self::Fail => "fail",
@@ -71,6 +73,10 @@ pub struct Check {
 }
 
 impl Check {
+    pub fn info(id: impl Into<String>, found: impl Into<String>) -> Self {
+        Self::new(id, Status::Info, found, None::<String>)
+    }
+
     pub fn ok(id: impl Into<String>, found: impl Into<String>) -> Self {
         Self::new(id, Status::Ok, found, None::<String>)
     }
@@ -126,6 +132,7 @@ impl Report {
         let mut summary = Summary::default();
         for check in &checks {
             match check.status {
+                Status::Info => {}
                 Status::Ok => summary.ok += 1,
                 Status::Warn => summary.warn += 1,
                 Status::Fail => summary.fail += 1,

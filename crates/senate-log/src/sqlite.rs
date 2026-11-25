@@ -35,7 +35,7 @@ use chrono::{DateTime, SecondsFormat, SubsecRound, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use senate_core::api::Heartbeat;
 use senate_core::hub::{matches_terms, search_terms};
-use senate_core::{Appended, CommitteeId, Event, MirrorRef, NewEvent, SenatorName, Seq};
+use senate_core::{Appended, CommitteeId, Event, EventId, MirrorRef, NewEvent, SenatorName, Seq};
 
 use crate::error::LogError;
 use crate::foreign;
@@ -489,6 +489,17 @@ impl LogStore for SqliteStore {
             .pop())
         })
         .await
+    }
+
+    async fn get_by_id(
+        &self,
+        committee: &CommitteeId,
+        id: &EventId,
+    ) -> Result<Option<Event>, LogError> {
+        let committee = committee.to_string();
+        let id = id.to_string();
+        self.run(move |conn| stored_by_id(conn, &committee, &id))
+            .await
     }
 
     async fn head(&self, committee: &CommitteeId) -> Result<Seq, LogError> {

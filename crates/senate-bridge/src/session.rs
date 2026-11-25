@@ -196,7 +196,7 @@ pub fn agy_session_key(id: &str) -> Option<String> {
 
 /// One registered session. The inbox token never leaves the daemon: it is
 /// skipped when a session is serialized onto the IPC wire.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     /// Local session key. Antigravity and ACP keys carry a runtime prefix.
     pub session_id: String,
@@ -236,6 +236,18 @@ pub struct Session {
     /// Result of the last inbox push: `None` before the first.
     #[serde(default)]
     pub socket_ok: Option<bool>,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("session_id", &self.session_id)
+            .field("runtime", &self.runtime)
+            .field("agent", &self.agent)
+            .field("cwd", &self.cwd)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Session {

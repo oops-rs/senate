@@ -79,7 +79,7 @@ async fn desk_worker_intake_relays_a_guest_answer_after_secret_rotation() {
         id: EventId::new(),
         committee: Some(intake.clone()),
         desk_intake: false,
-        question: "Which endpoint handles refunds?".into(),
+        question: "Which endpoint handles refunds?\r\u{2028}Fixture line\u{1b}\u{202e}".into(),
         caller: Some("Dial Caller".into()),
     };
     let submit = |token: &str, question: &Question| {
@@ -123,7 +123,25 @@ async fn desk_worker_intake_relays_a_guest_answer_after_secret_rotation() {
         .unwrap()
         .event;
     assert!(worker::is_intake(root));
+    assert!(root.body.contains("\n\nFixture line"));
+    assert!(
+        !root
+            .body
+            .chars()
+            .any(|ch| worker::is_display_control(ch) && ch != '\n')
+    );
     let guest = root.from.clone();
+    let mut rendered_docket: DocketReply = desk
+        .ipc(Request::Docket {
+            session: Laptop::session("s-claude"),
+            committee: Some(intake.clone()),
+        })
+        .await;
+    rendered_docket.senates[0].pages[0].items[0].event.body =
+        "first\rsecond\u{2028}third\u{202e}".into();
+    let text = senate_bridge::preside::render_docket(&rendered_docket, Locale::En);
+    assert!(text.contains("  │ first\n  │ second\n  │ third\n"));
+    assert!(!text.contains('\u{202e}'));
     let poll = |token: &str, after| {
         http.get(url(worker::REPLIES_PATH))
             .bearer_auth(token)
@@ -234,6 +252,10 @@ async fn desk_worker_intake_relays_a_guest_answer_after_secret_rotation() {
     assert_eq!(answer.thread, Some(receipt.seq));
     assert_eq!(answer.to, [guest]);
     assert!(!senate_core::is_provisional(answer));
+    assert!(
+        answer.meta.is_empty(),
+        "internal routing attribution is not returned to the worker"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

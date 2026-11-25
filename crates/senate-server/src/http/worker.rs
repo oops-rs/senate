@@ -1,11 +1,15 @@
 //! A separate, deliberately small authorization domain for desk intake.
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::{
-    Extension, Json,
-    extract::{Query, State},
+    Extension, Json, Router,
+    extract::{ConnectInfo, Query, Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,7 +19,7 @@ use senate_core::worker::{
     self, Admin, Identity, Issued, Question, Receipt, Replies, RepliesQuery,
 };
 use senate_core::{
-    Address, CommitteeId, EventId, Guest, Hub as _, Kind, Name, NewEvent, Seq, meta,
+    Address, CommitteeId, EventId, Guest, Hub as _, Kind, Name, NewEvent, Office, Seq, meta,
 };
 use senate_log::LogStore;
 
@@ -24,10 +28,40 @@ use super::{ApiFailure, AppState, LocalPerson, bearer_token};
 const PREFIX: &str = "desk-worker-grant:";
 const MAX_QUESTION_BYTES: usize = 16 * 1024;
 const PAGE: usize = 200;
+const OPEN_LIMIT: usize = 16;
+const RATE_LIMIT: usize = 20;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+pub(super) fn routes(bound: std::net::SocketAddr) -> Router<AppState> {
+    Router::new()
+        .route(worker::IDENTITY_PATH, get(identity))
+        .route(worker::QUESTIONS_PATH, post(question))
+        .route(worker::REPLIES_PATH, get(replies))
+        .route_layer(middleware::from_fn_with_state(bound, loopback_only))
+}
+
+async fn loopback_only(
+    State(bound): State<std::net::SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+        .is_some_and(|ConnectInfo(peer)| peer.ip().is_loopback())
+        && senate_observe::valid_authority(&request, bound)
+    {
+        next.run(request).await
+    } else {
+        ApiFailure::forbidden("desk-worker API requires its bound loopback authority")
+            .into_response()
+    }
+}
 
 pub(crate) struct Book {
     store: Arc<dyn LogStore>,
     policy: tokio::sync::RwLock<()>,
+    recent: Mutex<BTreeMap<EventId, VecDeque<Instant>>>,
 }
 
 impl Book {
@@ -35,6 +69,7 @@ impl Book {
         Self {
             store,
             policy: tokio::sync::RwLock::new(()),
+            recent: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -84,6 +119,33 @@ impl Book {
             .map_err(store_error)?;
         Ok(Issued { id, token })
     }
+
+    fn reserve_rate(&self, id: &EventId) -> Result<(), ApiFailure> {
+        let now = Instant::now();
+        let mut recent = self
+            .recent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        recent.retain(|_, entries| {
+            while entries
+                .front()
+                .is_some_and(|at| now.duration_since(*at) >= RATE_WINDOW)
+            {
+                entries.pop_front();
+            }
+            !entries.is_empty()
+        });
+        let entries = recent.entry(id.clone()).or_default();
+        if entries.len() >= RATE_LIMIT {
+            return Err(ApiFailure::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "desk-worker submission limit reached; retry in one minute",
+            ));
+        }
+        entries.push_back(now);
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -124,6 +186,13 @@ fn permitted(grant: &Grant, committee: &CommitteeId) -> Result<(), ApiFailure> {
             "the desk-worker grant does not include this committee",
         ))
     }
+}
+
+fn desk_sender(address: &Address, office: Option<&Office>) -> bool {
+    *address == Address::Speaker
+        || address.as_senator().is_some_and(|sender| {
+            office.is_some_and(|office| office.agent_workers().any(|worker| worker == sender))
+        })
 }
 
 pub(super) async fn admin(
@@ -233,14 +302,15 @@ pub(super) async fn question(
     Json(request): Json<Question>,
 ) -> Result<Json<Receipt>, ApiFailure> {
     let book = book(&state)?;
-    let _read = book.policy.read().await;
+    // Serialize admitting new roots with revocation, rotation and the cap check.
+    let _write = book.policy.write().await;
     let (credential, grant) = book.authorize(&headers).await?;
     let committee = match (request.committee, request.desk_intake) {
         (Some(committee), false) => {
             permitted(&grant, &committee)?;
             committee
         }
-        (None, true) => grant.desk_inbox.ok_or_else(|| {
+        (None, true) => grant.desk_inbox.clone().ok_or_else(|| {
             ApiFailure::forbidden("the desk-worker grant does not include desk intake")
         })?,
         _ => {
@@ -249,7 +319,8 @@ pub(super) async fn question(
             ));
         }
     };
-    if request.question.trim().is_empty() || request.question.len() > MAX_QUESTION_BYTES {
+    let body = worker::display_body(&request.question);
+    if body.trim().is_empty() || request.question.len() > MAX_QUESTION_BYTES {
         return Err(ApiFailure::bad_request(
             "question must contain 1–16384 UTF-8 bytes",
         ));
@@ -264,7 +335,7 @@ pub(super) async fn question(
         committee.clone(),
         Kind::Question,
         authored.clone(),
-        format!("{heading}\n\n{}", request.question),
+        format!("{heading}\n\n{body}"),
     )
     .to(Address::Speaker)
     .with_id(request.id.clone());
@@ -272,12 +343,40 @@ pub(super) async fn question(
         event = event.with_meta(meta::DESK_WORKER_INTAKE, serde_json::Value::Bool(true));
     }
     let expected_body = event.body.clone();
-    let stored = state.hub.append(event).await?.event;
+    let stored = match book
+        .store
+        .get_by_id(&committee, &request.id)
+        .await
+        .map_err(store_error)?
+    {
+        Some(existing) => existing,
+        None => {
+            book.reserve_rate(&credential)?;
+            let mut scopes = grant.committees;
+            scopes.extend(grant.desk_inbox);
+            let office = state.hub.roster().await?.office();
+            let mut open = 0;
+            for scope in scopes {
+                open += state
+                    .hub
+                    .count_unanswered_questions(&scope, &authored, |by| {
+                        desk_sender(by, office.as_ref())
+                    })
+                    .await?;
+                if open >= OPEN_LIMIT {
+                    return Err(ApiFailure::conflict(
+                        "desk-worker has too many unanswered questions",
+                    ));
+                }
+            }
+            state.hub.append(event).await?.event
+        }
+    };
     if stored.id != request.id
         || stored.committee != committee
         || stored.from != authored
         || stored.kind != Kind::Question
-        || stored.body != expected_body
+        || worker::display_body(&stored.body) != expected_body
         || stored.to != [Address::Speaker]
         || stored.thread.is_some()
         || worker::is_intake(&stored) != request.desk_intake
@@ -340,12 +439,15 @@ pub(super) async fn replies(
         .filter(|event| {
             event.kind == Kind::Answer
                 && event.thread == Some(query.root)
-                && (event.from == Address::Speaker
-                    || event.from.as_senator().is_some_and(|sender| {
-                        office.as_ref().is_some_and(|office| {
-                            office.agent_workers().any(|worker| worker == sender)
-                        })
-                    }))
+                && desk_sender(&event.from, office.as_ref())
+        })
+        .map(|mut event| {
+            event.body = worker::display_body(&event.body);
+            event.meta.retain(|key, _| key == meta::PROVISIONAL);
+            event.refs = None;
+            event.source = None;
+            event.on_behalf_of = None;
+            event
         })
         .collect();
     Ok(Json(Replies { events, next }))

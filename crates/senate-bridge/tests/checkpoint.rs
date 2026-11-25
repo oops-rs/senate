@@ -114,11 +114,21 @@ async fn the_tool_writes_the_files_and_a_handoff_pushes() {
         "the hook's transcript path does not exist"
     );
 
-    // A handoff with no origin: refused, reported, checkpointed anyway.
+    // A wire request records the handoff without launching Git in the daemon.
     let reply = checkpoint(&h, "s1", None, true).await;
     assert!(
-        reply.push_error.as_deref().unwrap().contains("origin"),
+        reply
+            .push_error
+            .as_deref()
+            .unwrap()
+            .contains("MCP checkpoint"),
         "{reply:?}"
+    );
+    assert!(
+        senate_bridge::checkpoint::push(&wd)
+            .await
+            .unwrap_err()
+            .contains("origin")
     );
     assert_eq!(
         checkpoints(&h).pop().unwrap().0.trigger,
@@ -132,8 +142,15 @@ async fn the_tool_writes_the_files_and_a_handoff_pushes() {
         &["init", "-q", "--bare", remote.to_str().unwrap()],
     );
     git(&wd, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    let hook = wd.join(".git/hooks/pre-push");
+    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let wire_only = checkpoint(&h, "s1", None, true).await;
+    assert!(!wire_only.pushed, "the daemon did not push the branch");
+    senate_bridge::checkpoint::push(&wd).await.unwrap();
+    std::fs::remove_file(hook).unwrap();
     let reply = checkpoint(&h, "s1", None, true).await;
-    assert_eq!(reply.push_error, None, "{reply:?}");
     assert!(reply.pushed, "{reply:?}");
     let (payload, _) = checkpoints(&h).pop().unwrap();
     assert!(payload.pushed);

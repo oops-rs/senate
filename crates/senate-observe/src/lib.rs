@@ -21,7 +21,7 @@ pub use grants::{
     AdminRequest, AppConsentedGrants, CreateGrant, GrantError, GrantInfo, Installation,
     IssuedGrant, Registry, Scope,
 };
-pub use http::router;
+pub use http::{router, valid_authority};
 pub use previews::{LinePolicy, Preview, first_line};
 
 pub use journal::Hint;

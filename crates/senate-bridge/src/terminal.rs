@@ -195,11 +195,12 @@ pub(crate) fn brief_name(name: &str) -> Cow<'_, str> {
 }
 
 pub(crate) fn printable(text: &str) -> Cow<'_, str> {
-    if !text.chars().any(char::is_control) {
+    use senate_core::worker::is_display_control;
+    if !text.chars().any(is_display_control) {
         return text.into();
     }
     text.chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .map(|ch| if is_display_control(ch) { ' ' } else { ch })
         .collect::<String>()
         .into()
 }

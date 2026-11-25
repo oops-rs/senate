@@ -317,6 +317,7 @@ impl ServerBuilder {
 
         let mut app = http::router(AppState {
             machine: local_person.is_some(),
+            bound: local_addr,
             workers,
             hub: hub.clone(),
             auth,

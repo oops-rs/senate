@@ -438,18 +438,18 @@ fn render_items(docket: &SenateDocket, chair: bool, locale: Locale, out: &mut St
                 ));
             }
             out.push_str(&format!(
-                "- `{}` seq {} · {} · {}{}: {}\n  │ {}{ellipsis}\n",
+                "- `{}` seq {} · {} · {}{}: {}\n  {}{ellipsis}\n",
                 page.committee,
                 event.seq,
                 kind_word(&event.kind, locale),
-                from,
+                format::one_line(&from),
                 meant_for(item, locale),
                 if chair {
                     why_chair(item, locale)
                 } else {
                     why(item, locale)
                 },
-                body.replace('\n', "\n  │ "),
+                format::fence(&body).replace('\n', "\n  "),
             ));
         }
     }

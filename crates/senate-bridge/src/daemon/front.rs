@@ -682,7 +682,8 @@ impl Front {
                 )
             }
             request => {
-                if let Some(selector) = approval_guard::session_selector(&request)
+                if !approval_guard::request_effect(&request).requires_operator()
+                    && let Some(selector) = approval_guard::session_selector(&request)
                     && let Err(error) = self.verify_selector_owner(session_peer, selector)
                 {
                     return Reply::err(error);

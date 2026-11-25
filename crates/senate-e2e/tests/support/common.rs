@@ -1016,16 +1016,31 @@ impl Laptop {
 
     /// [`Self::checkpoint`] with `push = true`, the way a hand-off sends one.
     pub async fn handoff(&self, session_id: &str, progress: &str) -> CheckpointReply {
-        self.ipc(Request::Checkpoint {
-            session: Self::session(session_id),
-            summary: None,
-            progress: Some(progress.into()),
-            decisions: None,
-            open: None,
-            push: true,
-            id: None,
-        })
-        .await
+        let bound: ipc::BoundReply = self
+            .ipc(Request::Bound {
+                session: Self::session(session_id),
+            })
+            .await;
+        let result = senate_bridge::checkpoint::push(&bound.cwd.unwrap()).await;
+        let mut reply: CheckpointReply = self
+            .ipc(Request::Checkpoint {
+                session: Self::session(session_id),
+                summary: None,
+                progress: Some(progress.into()),
+                decisions: None,
+                open: None,
+                push: true,
+                id: None,
+            })
+            .await;
+        match result {
+            Ok(output) => {
+                reply.push_output = Some(output);
+                reply.push_error = None;
+            }
+            Err(error) => reply.push_error = Some(error),
+        }
+        reply
     }
 
     /// What the agent's `catch_up` tool does.

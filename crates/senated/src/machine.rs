@@ -1038,6 +1038,15 @@ mod tests {
             .json()
             .await?;
         assert_eq!(
+            http.get(format!("{}{}", top.url, senate_core::worker::IDENTITY_PATH))
+                .header(reqwest::header::HOST, "foreign.invalid")
+                .bearer_auth(&issued.token)
+                .send()
+                .await?
+                .status(),
+            403
+        );
+        assert_eq!(
             http.get(format!("{}/v1/me", top.url))
                 .bearer_auth(&issued.token)
                 .send()
@@ -1123,6 +1132,36 @@ mod tests {
             .json()
             .await?;
         assert_eq!(poll(&other.token).send().await?.status(), 404);
+        let mut open = Vec::new();
+        for _ in 0..16 {
+            question.id = EventId::new();
+            let created: Receipt = send(&question)
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            open.push(created.seq);
+        }
+        question.id = EventId::new();
+        assert_eq!(send(&question).send().await?.status(), 409);
+        for seq in open.into_iter().take(3) {
+            top.daemon
+                .hub
+                .append(
+                    NewEvent::new(allowed.clone(), Kind::Answer, Address::Speaker, "resolved")
+                        .in_thread(seq),
+                )
+                .await?;
+        }
+        for _ in 0..2 {
+            question.id = EventId::new();
+            send(&question).send().await?.error_for_status()?;
+        }
+        // A successful replay is still available even when admission is limited.
+        send(&question).send().await?.error_for_status()?;
+        question.id = EventId::new();
+        assert_eq!(send(&question).send().await?.status(), 429);
         local
             .send(
                 http.post(format!("{}{}", top.url, senate_core::worker::ADMIN_PATH))

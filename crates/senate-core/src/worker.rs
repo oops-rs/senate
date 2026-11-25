@@ -11,6 +11,26 @@ pub const QUESTIONS_PATH: &str = "/v1/desk-worker/questions";
 pub const REPLIES_PATH: &str = "/v1/desk-worker/replies";
 pub const GUEST_PLATFORM: &str = "desk-worker";
 
+/// Terminal controls and Unicode format controls must never cross a display boundary.
+pub fn is_display_control(ch: char) -> bool {
+    ch.is_control()
+        || unicode_general_category::get_general_category(ch)
+            == unicode_general_category::GeneralCategory::Format
+}
+
+/// Normalize worker text once so downstream log readers get the same safe lines.
+pub fn display_body(body: &str) -> String {
+    body.replace("\r\n", "\n")
+        .chars()
+        .map(|ch| match ch {
+            '\r' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}' => '\n',
+            '\n' | '\t' => ch,
+            ch if is_display_control(ch) => ' ',
+            ch => ch,
+        })
+        .collect()
+}
+
 pub fn is_question(event: &Event) -> bool {
     event.kind == Kind::Question
         && event.thread.is_none()
@@ -98,4 +118,15 @@ pub struct RepliesQuery {
 pub struct Replies {
     pub events: Vec<Event>,
     pub next: Seq,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn display_normalizes_line_breaks_and_removes_terminal_and_format_controls() {
+        assert_eq!(
+            super::display_body("line one\rline two\u{2028}line\u{1b} three\u{202e}\r\nend"),
+            "line one\nline two\nline  three \nend"
+        );
+    }
 }

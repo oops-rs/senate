@@ -95,6 +95,25 @@ pub trait LogStore: Send + Sync + 'static {
 
     async fn get(&self, committee: &CommitteeId, seq: Seq) -> Result<Option<Event>, LogError>;
 
+    /// Read the exact event occupying an idempotency key.
+    async fn get_by_id(
+        &self,
+        committee: &CommitteeId,
+        id: &EventId,
+    ) -> Result<Option<Event>, LogError> {
+        let mut after = Seq::ZERO;
+        loop {
+            let page = self.read(committee, after, 200).await?;
+            let Some(last) = page.last() else {
+                return Ok(None);
+            };
+            after = last.seq;
+            if let Some(event) = page.into_iter().find(|event| &event.id == id) {
+                return Ok(Some(event));
+            }
+        }
+    }
+
     /// The committee's highest stored seq; [`Seq::ZERO`] when it has no events.
     async fn head(&self, committee: &CommitteeId) -> Result<Seq, LogError>;
 

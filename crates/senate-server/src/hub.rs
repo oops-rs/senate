@@ -1615,6 +1615,21 @@ impl ServerHub {
             head: board.head(),
         })
     }
+
+    pub(crate) async fn count_unanswered_questions(
+        &self,
+        committee: &CommitteeId,
+        author: &Address,
+        is_final_sender: impl Fn(&Address) -> bool,
+    ) -> Result<usize, HubError> {
+        let cached = self.folded(&self.discussions, committee).await?;
+        Ok(cached
+            .fold
+            .0
+            .open_questions_by(author)
+            .filter(|question| !question.answered_by.as_ref().is_some_and(&is_final_sender))
+            .count())
+    }
 }
 
 #[async_trait]

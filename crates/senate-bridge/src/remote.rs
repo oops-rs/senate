@@ -28,6 +28,7 @@ use senate_core::Name;
 const VERSION: u8 = 4;
 use authority::MAX_VALID_SECS;
 const HANDSHAKE: Duration = Duration::from_secs(6);
+const ATTACH_HANDSHAKE: Duration = Duration::from_secs(70);
 const OFFER_TTL: Duration = Duration::from_secs(authority::OFFER_SECONDS);
 const MAX_REQUEST: usize = 4096;
 const MAX_REPLY: usize = 1024 * 1024;
@@ -802,7 +803,12 @@ impl Client {
         call: Call,
         pairing: bool,
     ) -> anyhow::Result<(Pipe<tokio_rustls::client::TlsStream<TcpStream>>, Reply)> {
-        tokio::time::timeout(HANDSHAKE, async {
+        let timeout = if matches!(call, Call::Attach { .. }) {
+            ATTACH_HANDSHAKE
+        } else {
+            HANDSHAKE
+        };
+        tokio::time::timeout(timeout, async {
             let socket = TcpStream::connect(self.machine.at).await?;
             socket.set_nodelay(true)?;
             let server = if pairing { tls::PAIR } else { tls::HOST };
@@ -1167,29 +1173,32 @@ impl Service {
             )
             .await;
         }
-        let host =
-            match tokio::time::timeout(HANDSHAKE, front.remote_terminal(&session, attach)).await {
-                Ok(Ok(host)) => host,
-                _ => {
-                    self.audit.record(
-                        device,
-                        if attach {
-                            "attach_unavailable"
-                        } else {
-                            "watch_unavailable"
-                        },
-                        Some(peer),
-                        None,
-                    );
-                    return reply(
-                        &mut wire,
-                        Reply::Refused {
-                            message: "no running hosted terminal for that session".into(),
-                        },
-                    )
-                    .await;
-                }
-            };
+        let timeout = if attach { ATTACH_HANDSHAKE } else { HANDSHAKE };
+        let host = match tokio::time::timeout(
+            timeout,
+            front.remote_terminal(&session, attach, &device.name),
+        )
+        .await
+        {
+            Ok(Ok(host)) => host,
+            refused => {
+                let message = match refused {
+                    Ok(Err(error)) => error.to_string(),
+                    _ => "The terminal access request timed out".into(),
+                };
+                self.audit.record(
+                    device,
+                    if attach {
+                        "attach_unavailable"
+                    } else {
+                        "watch_unavailable"
+                    },
+                    Some(peer),
+                    None,
+                );
+                return reply(&mut wire, Reply::Refused { message }).await;
+            }
+        };
         self.audit
             .record(device, action, Some(peer), Some(&session));
         reply(&mut wire, Reply::Stream).await?;

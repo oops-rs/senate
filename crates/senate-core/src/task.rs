@@ -640,6 +640,21 @@ impl TaskBoard {
         self.threads.get(&root)
     }
 
+    /// All unarchived questions from one author, including desk discussions.
+    pub fn open_questions_by<'a>(
+        &'a self,
+        author: &'a Address,
+    ) -> impl Iterator<Item = &'a ThreadSummary> {
+        self.threads
+            .values()
+            .chain(self.discussions.values())
+            .filter(move |thread| {
+                &thread.from == author
+                    && thread.kind == Kind::Question
+                    && thread.state != StatusState::Archived
+            })
+    }
+
     /// Threads in `state` (all when `None`), longest in that state first.
     pub fn threads(&self, state: Option<StatusState>) -> Vec<&ThreadSummary> {
         let mut out: Vec<_> = self

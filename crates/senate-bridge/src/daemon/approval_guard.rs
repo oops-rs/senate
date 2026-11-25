@@ -36,9 +36,26 @@ tokio::task_local! {
 
 pub(super) fn annotate_origin(event: NewEvent) -> NewEvent {
     match VERIFIED_ORIGIN.try_with(|origin| *origin) {
-        Ok(origin) => event.with_meta("verified_origin", serde_json::json!(origin)),
-        Err(_) => event,
+        Ok(origin) if origin != "unverified" => {
+            event.with_meta("verified_origin", serde_json::json!(origin))
+        }
+        _ => event,
     }
+}
+
+/// Check the actual author selected by a socket request before appending.
+/// Internal daemon work runs outside the socket's caller scope.
+pub(super) fn check_person_author(is_person: bool) -> Result<(), IpcError> {
+    if is_person
+        && VERIFIED_ORIGIN
+            .try_with(|origin| !matches!(*origin, "app" | "person-terminal"))
+            .unwrap_or(false)
+    {
+        return Err(refusal(
+            "Write as the person from your own terminal or the Senate app",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) struct PresencePeer {
@@ -86,48 +103,235 @@ pub(super) fn answers_a_prompt(request: &Request) -> bool {
     )
 }
 
-fn routine_operator_action(request: &Request) -> bool {
+/// Effects whose authority cannot come from a session selector.
+/// Exhaustive over Request so extending the IPC requires an effect decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RequestEffect {
+    SessionOrRead,
+    PersonWrite,
+    Operator,
+    Presence,
+}
+
+impl RequestEffect {
+    pub(crate) fn requires_operator(self) -> bool {
+        self != Self::SessionOrRead
+    }
+}
+
+pub(crate) fn request_effect(request: &Request) -> RequestEffect {
+    use RequestEffect::{Operator, PersonWrite, Presence, SessionOrRead};
+
     match request {
-        Request::OpenCommittee { .. }
-        | Request::Seen { .. }
-        | Request::FindSession { .. }
-        | Request::OpenViewer { .. }
-        | Request::Say { .. }
+        Request::Take { .. } | Request::MemoryEdit { .. } | Request::Say { .. } => PersonWrite,
+
+        Request::OpenCommittee { .. } | Request::Seen { .. } | Request::Watch { .. } => Operator,
+
+        Request::DeskWorker { .. }
+        | Request::AuthorizeNativeAuthority { .. }
+        | Request::RebindHost { .. }
+        | Request::Restore { .. }
+        | Request::Replace { .. }
+        | Request::Stop { .. }
+        | Request::Pause { .. }
+        | Request::Resume { .. }
+        | Request::SessionForget { .. }
+        | Request::PruneHosts
+        | Request::RestartHost { .. }
+        | Request::Attach { .. }
+        | Request::ArchiveCommittee { .. }
+        | Request::EnsureSecretary
+        | Request::SetAlias { .. }
+        | Request::RemoveAlias { .. }
+        | Request::SetCommitteeSeat { .. }
+        | Request::DeskDecide { .. }
+        | Request::SpeakerAlias { .. }
+        | Request::SpeakerUnseat { .. }
+        | Request::Forward { .. }
+        | Request::Refuse { .. }
+        | Request::SetChair { .. }
+        | Request::DeskOpenCommittee { .. }
+        | Request::SetSecretarySession { .. }
+        | Request::Approve { .. }
+        | Request::ApproveSession { .. } => Presence,
+
+        Request::Secretaries { action, .. } => {
+            if *action == ipc::SecretaryOp::List {
+                SessionOrRead
+            } else {
+                Presence
+            }
+        }
+        Request::Desk { set } => {
+            if set.is_some() {
+                Presence
+            } else {
+                SessionOrRead
+            }
+        }
+        Request::Spawn {
+            chair, secretary, ..
+        } => {
+            if *chair || *secretary {
+                Presence
+            } else {
+                Operator
+            }
+        }
+        Request::Answer {
+            as_person, session, ..
+        }
         | Request::Duty {
-            as_person: true, ..
+            as_person, session, ..
         }
         | Request::Task {
-            as_person: true, ..
+            as_person, session, ..
+        } => {
+            if *as_person || session == &SessionSelector::default() {
+                PersonWrite
+            } else {
+                SessionOrRead
+            }
         }
-        | Request::Thread {
-            mark_seen: true, ..
-        } => true,
         Request::Ask { session, .. }
-        | Request::Answer { session, .. }
         | Request::Post { session, .. }
         | Request::Send { session, .. }
-        | Request::Take { session, .. }
-        | Request::Duty { session, .. }
-        | Request::Task { session, .. }
-        | Request::MemoryEdit { session, .. }
-        | Request::Escalate { session, .. }
-        | Request::ChatSend { session, .. }
+        | Request::ChatSend { session, .. } => {
+            if session == &SessionSelector::default() {
+                PersonWrite
+            } else {
+                SessionOrRead
+            }
+        }
+        Request::Thread { mark_seen, .. } => {
+            if *mark_seen {
+                Operator
+            } else {
+                SessionOrRead
+            }
+        }
+        Request::RemoteControl { command } => {
+            if matches!(
+                command,
+                crate::remote::Control::Devices | crate::remote::Control::Candidate
+            ) {
+                SessionOrRead
+            } else {
+                Presence
+            }
+        }
+        Request::ObserveAdmin { command } => {
+            use senate_observe::AdminRequest;
+            if matches!(
+                command,
+                AdminRequest::Create { .. }
+                    | AdminRequest::Revoke { .. }
+                    | AdminRequest::Publish { .. }
+                    | AdminRequest::Withdraw { .. }
+            ) {
+                Presence
+            } else {
+                Operator
+            }
+        }
+        Request::SetCard { session, .. } => {
+            if session == &SessionSelector::default() {
+                Presence
+            } else {
+                SessionOrRead
+            }
+        }
+        Request::OpenViewer { writable, .. } => {
+            if *writable {
+                Presence
+            } else {
+                Operator
+            }
+        }
+
+        Request::ServerHealth
+        | Request::Ping
+        | Request::Status
+        | Request::Profiles
+        | Request::HookDropped(..)
+        | Request::Hook(..)
+        | Request::SessionHook(..)
+        | Request::NativeAuthorityCandidate { .. }
+        | Request::Sessions
+        | Request::SessionDrop { .. }
+        | Request::Stats { .. }
+        | Request::SessionHistory { .. }
+        | Request::SessionSearch { .. }
+        | Request::Timeline { .. }
+        | Request::CommitteeThreads { .. }
+        | Request::ActivityWatch { .. }
+        | Request::TimelineWatch { .. }
+        | Request::AttachInfo { .. }
+        | Request::AttachChoices
+        | Request::ResolveSessionRole { .. }
+        | Request::SessionRoleNames
+        | Request::Waiting { .. }
+        | Request::SessionEnd { .. }
+        | Request::HostedSessionEnd { .. }
+        | Request::HostedClaudeApproval { .. }
+        | Request::CatchUp { .. }
+        | Request::Join { .. }
+        | Request::ArchivedCommittees
+        | Request::FindSession { .. }
+        | Request::DefaultSecretary
+        | Request::Roster
+        | Request::Aliases
+        | Request::Receipt { .. }
+        | Request::JoinAs { .. }
+        | Request::Memory { .. }
+        | Request::Search { .. }
+        | Request::Brief { .. }
+        | Request::Bound { .. }
+        | Request::Escalate { .. }
+        | Request::ChatThread { .. }
+        | Request::Inbox { .. }
+        | Request::Presides { .. }
+        | Request::DeskItem { .. }
+        | Request::Docket { .. }
+        | Request::Route { .. }
+        | Request::Cover { .. }
+        | Request::Hold { .. }
+        | Request::Refer { .. }
+        | Request::ChairDocket { .. }
+        | Request::ChairRoute { .. }
+        | Request::ChairCover { .. }
+        | Request::SecretaryCover { .. }
+        | Request::ChairEscalate { .. }
+        | Request::SecretaryWork { .. }
+        | Request::Roles
+        | Request::Approvals
+        | Request::Checkpoint { .. } => SessionOrRead,
+    }
+}
+
+fn routine_operator_action(request: &Request) -> bool {
+    // Observe exercises the actual caller check in disposable fixtures too.
+    if matches!(request, Request::ObserveAdmin { .. }) {
+        return false;
+    }
+    if matches!(
+        request_effect(request),
+        RequestEffect::PersonWrite | RequestEffect::Operator
+    ) {
+        return true;
+    }
+    matches!(
+        request,
+        Request::FindSession { .. } | Request::OpenViewer { .. }
+    ) || matches!(request,
+        Request::Escalate { session, .. }
         | Request::Checkpoint { session, .. }
         | Request::Join { session, .. }
         | Request::JoinAs { session, .. }
         | Request::Inbox { session, .. }
         | Request::CatchUp { session, .. }
-            if session == &SessionSelector::default() =>
-        {
-            true
-        }
-        Request::Secretaries {
-            session, action, ..
-        } if session == &SessionSelector::default() && *action != crate::ipc::SecretaryOp::List => {
-            true
-        }
-        _ => false,
-    }
+        if session == &SessionSelector::default()
+    )
 }
 
 /// What only the person does, and what to tell an agent that asks: `None`
@@ -430,8 +634,8 @@ impl Front {
 
         let home = &self.primary().home;
         let pin_change = crate::app_confirmation::macos::pending_change(home);
-        let session_action = session_selector(&request).is_some()
-            || matches!(&request, Request::SetCard { session, .. } if session != &SessionSelector::default());
+        let session_action =
+            !request_effect(&request).requires_operator() && session_selector(&request).is_some();
         let requester_pid = if session_action {
             peer.session
         } else {
@@ -896,6 +1100,59 @@ fn hook_owner_mismatch() -> IpcError {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn request_effect_and_final_author_do_not_inherit_session_authority() {
+        let session = serde_json::json!({"session_id":"fixture"});
+        let examples = [
+            (
+                serde_json::json!({"op":"answer","session":session,"as_person":true,"thread":1,"body":"answer"}),
+                RequestEffect::PersonWrite,
+            ),
+            (
+                serde_json::json!({"op":"memory_edit","session":session,"targets":[1],"text":"correction"}),
+                RequestEffect::PersonWrite,
+            ),
+            (
+                serde_json::json!({"op":"take","session":session,"thread":1}),
+                RequestEffect::PersonWrite,
+            ),
+            (
+                serde_json::json!({"op":"secretaries","session":session,"action":"add","for":"operator","secretary":"agent"}),
+                RequestEffect::Presence,
+            ),
+            (
+                serde_json::json!({"op":"secretaries","session":session,"action":"list"}),
+                RequestEffect::SessionOrRead,
+            ),
+            (
+                serde_json::json!({"op":"answer","session":session,"thread":1,"body":"answer"}),
+                RequestEffect::SessionOrRead,
+            ),
+        ];
+        for (wire, expected) in examples {
+            let request: Request = serde_json::from_value(wire).unwrap();
+            assert_eq!(request_effect(&request), expected);
+            assert_eq!(
+                crate::app_confirmation::required(&request),
+                expected == RequestEffect::Presence
+            );
+            if expected == RequestEffect::PersonWrite {
+                assert!(person_only(&request).is_some());
+            }
+        }
+        for origin in ["session", "unverified", "person-terminal", "app"] {
+            VERIFIED_ORIGIN
+                .scope(origin, async {
+                    assert!(check_person_author(false).is_ok());
+                    assert_eq!(
+                        check_person_author(true).is_ok(),
+                        matches!(origin, "person-terminal" | "app")
+                    );
+                })
+                .await;
+        }
+    }
+
     #[test]
     fn person_and_session_writes_require_their_own_proofs() {
         let person = SessionSelector::default();
