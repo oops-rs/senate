@@ -3545,6 +3545,13 @@ impl Shared {
                 let result = self.api.set_committee_seat(&committee, &request).await;
                 if result.is_ok() {
                     self.seed_chair(&committee).await;
+                    // A seat given back: a stream the server refused for
+                    // want of it connects now, not at its slow retry.
+                    for ((_, on), worker) in lock(&self.streams).iter() {
+                        if on == &committee {
+                            worker.retry_now();
+                        }
+                    }
                 }
                 wrap(result.map_err(server_error))
             }

@@ -1254,7 +1254,12 @@ impl Desk {
 
     /// `senated --machine`, in process, with the tests' quick timing.
     pub async fn start(&mut self) {
-        let machine = Machine::start_fixture(self.laptop.paths.clone(), fast_timing())
+        self.start_with(fast_timing()).await;
+    }
+
+    /// [`Self::start`] with a timing of the test's own.
+    pub async fn start_with(&mut self, timing: Timing) {
+        let machine = Machine::start_fixture(self.laptop.paths.clone(), timing)
             .await
             .unwrap();
         // The developer-machine side is up once its socket answers.

@@ -49,6 +49,8 @@ pub(crate) struct CommitteeWorker {
     /// Stopped because no session of the agent is bound to the committee
     /// any more: the reporter tells the server so as it goes.
     leaving: Arc<AtomicBool>,
+    /// Ends the wait before the next connection attempt.
+    retry: Arc<Notify>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -78,6 +80,15 @@ impl CommitteeWorker {
         self.stop();
     }
 
+    /// Connect again now instead of waiting out the retry interval: what
+    /// refused the stream may have changed (the agent's seat was given
+    /// back). Nothing happens to a stream that is open.
+    pub(crate) fn retry_now(&self) {
+        if matches!(self.state(), StreamState::Backoff { .. }) {
+            self.retry.notify_one();
+        }
+    }
+
     pub(crate) fn into_tasks(self) -> Vec<JoinHandle<()>> {
         self.tasks
     }
@@ -92,16 +103,17 @@ pub(crate) fn spawn(
     let state = Arc::new(Mutex::new(StreamState::Connecting { attempt: 0 }));
     let dirty = Arc::new(Notify::new());
     let leaving = Arc::new(AtomicBool::new(false));
+    let retry = Arc::new(Notify::new());
     let resyncs = shared.resyncs();
     let tasks = vec![
         tokio::spawn(run_stream(
             shared.clone(),
-            agent.clone(),
-            committee.clone(),
+            (agent.clone(), committee.clone()),
             state.clone(),
             dirty.clone(),
             rx.clone(),
             resyncs,
+            retry.clone(),
         )),
         tokio::spawn(run_reporter(
             shared,
@@ -116,6 +128,7 @@ pub(crate) fn spawn(
         state,
         stop,
         leaving,
+        retry,
         tasks,
     }
 }
@@ -133,6 +146,55 @@ fn backoff(timing: &Timing, attempt: u32) -> Duration {
     capped.mul_f64(0.8 + f64::from(noise) / 1000.0)
 }
 
+/// How many times the backoff cap a stream waits after the server refused
+/// it outright: 5 minutes with the cap as shipped.
+const REFUSED_BACKOFFS: u32 = 5;
+
+/// Whether the server refused the stream itself (an agent unseated from
+/// the committee "must explicitly join … before connecting"), as against a
+/// connection that was lost or a server that could not answer. Waiting
+/// does not change a refusal.
+fn refused(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<client::ApiClientError>()
+        .is_some_and(client::ApiClientError::definitive_rejection)
+}
+
+/// How long to wait before connecting again. A lost connection backs off
+/// ([`backoff`]). A refusal waits a slow fixed interval,
+/// [`REFUSED_BACKOFFS`] times the backoff cap: only someone's action heals
+/// it, and a seat given back wakes the worker at once
+/// ([`CommitteeWorker::retry_now`]).
+fn retry_delay(timing: &Timing, attempt: u32, refused: bool) -> Duration {
+    if refused {
+        timing.backoff_max.saturating_mul(REFUSED_BACKOFFS)
+    } else {
+        backoff(timing, attempt)
+    }
+}
+
+/// The cause a stream's failure was last warned of. A cause is warned of
+/// once, however many retries meet it again (one refusal filled 92% of a
+/// daemon log with the same line); a stream that opened in between starts
+/// over.
+#[derive(Default)]
+struct Reported(Option<String>);
+
+impl Reported {
+    /// Whether `cause` differs from the one last warned of; it is the one
+    /// last warned of from here on.
+    fn is_new(&mut self, cause: &str) -> bool {
+        if self.0.as_deref() == Some(cause) {
+            return false;
+        }
+        self.0 = Some(cause.to_owned());
+        true
+    }
+
+    fn clear(&mut self) {
+        self.0 = None;
+    }
+}
+
 /// How one connection ended.
 enum Ended {
     /// Asked to stop.
@@ -146,16 +208,18 @@ enum Ended {
 
 async fn run_stream(
     shared: Arc<Shared>,
-    agent: SenatorName,
-    committee: CommitteeId,
+    (agent, committee): (SenatorName, CommitteeId),
     state: Arc<Mutex<StreamState>>,
     dirty: Arc<Notify>,
     mut stop: watch::Receiver<bool>,
     mut resyncs: watch::Receiver<u64>,
+    retry: Arc<Notify>,
 ) {
     let mut attempt: u32 = 0;
+    let mut reported = Reported::default();
     while !*stop.borrow() {
         set(&state, StreamState::Connecting { attempt });
+        let before = attempt;
         let ended = consume(
             &shared,
             (&agent, &committee),
@@ -166,6 +230,10 @@ async fn run_stream(
             &mut attempt,
         )
         .await;
+        if before > 0 && attempt == 0 {
+            // It opened this time: what ends it next is news again.
+            reported.clear();
+        }
         let err = match ended {
             Ended::Stop => break,
             Ended::Lost(e) => e,
@@ -176,8 +244,15 @@ async fn run_stream(
             }
         };
         attempt = attempt.saturating_add(1);
-        let delay = backoff(&shared.timing, attempt);
-        tracing::warn!(%agent, %committee, attempt, "stream lost: {err:#}; retrying in {delay:?}");
+        let refused = refused(&err);
+        let delay = retry_delay(&shared.timing, attempt, refused);
+        if !reported.is_new(&format!("{err:#}")) {
+            tracing::debug!(%agent, %committee, attempt, "stream still down: {err:#}; retrying in {delay:?}");
+        } else if refused {
+            tracing::warn!(%agent, %committee, "stream refused: {err:#}; this does not heal by itself, so it is retried only every {delay:?} (at once when the seat is given back) and not reported again");
+        } else {
+            tracing::warn!(%agent, %committee, attempt, "stream lost: {err:#}; retrying in {delay:?} (a retry that fails the same way is not reported again)");
+        }
         let retry_at = Utc::now()
             + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::seconds(60));
         set(
@@ -190,6 +265,7 @@ async fn run_stream(
         );
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
+            _ = retry.notified() => {}
             _ = stop.changed() => break,
         }
     }
@@ -354,5 +430,55 @@ mod tests {
         assert!(d3 >= Duration::from_millis(3200) && d3 <= Duration::from_millis(4800));
         let big = backoff(&t, 40);
         assert!(big <= Duration::from_secs(36));
+    }
+
+    fn api_error(status: u16, code: &str) -> anyhow::Error {
+        client::ApiClientError::Api {
+            status,
+            code: code.into(),
+            message: "claude must explicitly join senate before connecting".into(),
+            epoch: None,
+            candidates: Vec::new(),
+        }
+        .into()
+    }
+
+    /// One unseated agent's stream was retried every minute for 32 hours,
+    /// 2,104 times, each with a warning.
+    #[test]
+    fn a_refused_stream_is_retried_slowly_and_a_lost_one_backs_off() {
+        let t = Timing {
+            backoff_base: Duration::from_secs(1),
+            backoff_max: Duration::from_secs(60),
+            ..Timing::default()
+        };
+        assert!(refused(&api_error(400, "bad_request")));
+        assert!(refused(&api_error(403, "forbidden")));
+        // The server could not answer, was not the one answering, or asked
+        // to try again: not a refusal.
+        assert!(!refused(&api_error(500, "internal")));
+        assert!(!refused(&api_error(404, "http")));
+        assert!(!refused(&api_error(429, "rate_limited")));
+        assert!(!refused(&anyhow!("the server closed the stream")));
+
+        // The first refusal already waits the slow interval; attempts do
+        // not shorten or lengthen it.
+        for attempt in [1, 2, 40] {
+            assert_eq!(retry_delay(&t, attempt, true), Duration::from_secs(300));
+        }
+        assert!(retry_delay(&t, 1, false) <= Duration::from_millis(1200));
+        assert!(retry_delay(&t, 40, false) <= Duration::from_secs(72));
+    }
+
+    #[test]
+    fn a_cause_is_reported_once_until_the_stream_opens_or_it_changes() {
+        let mut reported = Reported::default();
+        assert!(reported.is_new("must explicitly join"));
+        assert!(!reported.is_new("must explicitly join"));
+        assert!(!reported.is_new("must explicitly join"));
+        assert!(reported.is_new("the server closed the stream"));
+        assert!(reported.is_new("must explicitly join"));
+        reported.clear();
+        assert!(reported.is_new("must explicitly join"));
     }
 }

@@ -1110,6 +1110,78 @@ async fn restoring_an_unseated_senator_requires_explicit_rejoin_before_capacity(
     }
 }
 
+/// An agent unseated while a session of it is bound: the server refuses
+/// its stream, and nothing but a seat heals that. The bridge retries
+/// slowly, not at its reconnect pace (one such stream was retried 2,104
+/// times in 32 hours), and connects at once when the seat is given back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_stream_waits_for_its_seat_and_opens_when_it_is_given_back() {
+    use senate_bridge::ipc::{StatusReply, StreamState};
+    use senate_core::CommitteeSeatAction;
+    use senate_core::api::{CommitteeSeatInfo, SetCommitteeSeat};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(dir.path(), "alice", Locale::En, "[local]\n");
+    // A lost connection would be retried within 20 s; a refusal waits five
+    // times that, far beyond this test.
+    desk.start_with(senate_bridge::Timing {
+        backoff_max: std::time::Duration::from_secs(20),
+        ..fast_timing()
+    })
+    .await;
+    let chair = desk.inbox("chair");
+    desk.session_start_as("chair", &chair, "claude")
+        .await
+        .unwrap();
+    let member = desk.inbox("member");
+    desk.session_start_as("member", &member, "reviewer")
+        .await
+        .unwrap();
+    desk.wait_stream_of("member").await;
+
+    let committee = committee();
+    let seat = |action| Request::SetCommitteeSeat {
+        committee: committee.clone(),
+        request: SetCommitteeSeat {
+            senator: path("reviewer"),
+            action,
+            id: senate_core::EventId::new(),
+            acted_by: None,
+        },
+    };
+    let stream = || async {
+        let status: StatusReply = desk.ipc(Request::Status).await;
+        status
+            .committees
+            .into_iter()
+            .find(|c| c.agent == path("reviewer") && c.committee == committee)
+            .and_then(|c| c.stream)
+    };
+    let _: CommitteeSeatInfo = desk.ipc(seat(CommitteeSeatAction::Unseat)).await;
+    let (retry_at, error) = eventually_async("the stream to be refused", || async {
+        match stream().await? {
+            StreamState::Backoff {
+                retry_at, error, ..
+            } if error.contains("must explicitly join") => Some((retry_at, error)),
+            _ => None,
+        }
+    })
+    .await;
+    assert!(error.contains("before connecting"), "{error}");
+    let wait = retry_at - chrono::Utc::now();
+    assert!(
+        wait > chrono::Duration::seconds(60),
+        "a refusal is retried slowly, not in {wait}"
+    );
+
+    let _: CommitteeSeatInfo = desk.ipc(seat(CommitteeSeatAction::Join)).await;
+    eventually_async("the stream to open with the seat back", || async {
+        matches!(stream().await?, StreamState::Connected { .. }).then_some(())
+    })
+    .await;
+    desk.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_team_principals_agent_crosses_committees_by_way_of_the_desk() {
     // A team's Senate: bob presides; `north-desk` is a team (a principal
