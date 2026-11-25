@@ -11,8 +11,9 @@
 //! Two guards, so neither has to be remembered alone:
 //!
 //! - [`isolate`] is how every test spawns one of these binaries: it removes
-//!   [`INHERITED`] and sets [`CONFINE_ENV`] to the test's temp directory
-//!   (a convention test checks every spawn goes through it).
+//!   [`INHERITED`], sets [`CONFINE_ENV`] to the test's temp directory and
+//!   names the test's process ([`OWNER_ENV`]) (a convention test checks
+//!   every spawn goes through it).
 //! - A binary started with [`CONFINE_ENV`] set uses no inbox socket outside
 //!   that directory ([`confined`]): the hook drops one from its
 //!   environment, and delivery never connects to one. A variable set again
@@ -30,10 +31,18 @@ pub const CONFINE_ENV: &str = "SENATE_CONFINE_TO";
 /// does, instead of the disposable-fixture shortcut.
 pub const STRICT_IDENTITY_ENV: &str = "SENATE_TEST_STRICT_IDENTITY";
 
+/// The process a test runs in, for the terminal hosts started on its
+/// behalf: a debug host ends itself and its TUI once that process is gone.
+/// A test's harness kills its hosts as it drops, but a test process that
+/// aborts (a stack overflow, a kill, a timeout) drops nothing, and its
+/// hosts used to stay for good.
+pub const OWNER_ENV: &str = "SENATE_TEST_OWNER";
+
 /// What a spawned binary must never inherit from the process running the
 /// tests.
-pub const INHERITED: [&str; 16] = [
+pub const INHERITED: [&str; 17] = [
     STRICT_IDENTITY_ENV,
+    OWNER_ENV,
     "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_SESSION_ID",
@@ -58,7 +67,28 @@ pub fn isolate<'a>(cmd: &'a mut Command, root: &Path) -> &'a mut Command {
     for var in INHERITED {
         cmd.env_remove(var);
     }
-    cmd.env(CONFINE_ENV, root)
+    cmd.env(OWNER_ENV, std::process::id().to_string())
+        .env(CONFINE_ENV, root)
+}
+
+/// In a daemon that is a test's fixture: the test's process. A daemon the
+/// test spawned was told ([`isolate`]); a daemon inside the test is it.
+pub fn fixture_owner() -> u32 {
+    named_owner().unwrap_or_else(std::process::id)
+}
+
+/// In a terminal host: the test process it must not outlive. Never in a
+/// release build, whatever the environment says.
+pub fn owner() -> Option<u32> {
+    cfg!(debug_assertions).then(named_owner).flatten()
+}
+
+fn named_owner() -> Option<u32> {
+    std::env::var(OWNER_ENV)
+        .ok()?
+        .parse()
+        .ok()
+        .filter(|pid| *pid > 1)
 }
 
 /// [`isolate`] for a `tokio` command.
