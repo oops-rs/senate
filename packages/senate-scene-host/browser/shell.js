@@ -6,34 +6,45 @@ const mount = document.querySelector("main");
 const status = document.querySelector("output");
 const navigation = document.querySelector("#navigation");
 const encoder = new TextEncoder();
-const sceneCsp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; webrtc 'block'; require-trusted-types-for 'script'; trusted-types 'none'";
+const sceneCsp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; webrtc 'block'; require-trusted-types-for 'script'; trusted-types 'none'";
+// These nodes either create a second execution realm, trigger resource hints,
+// or change how markup is parsed when scripting is enabled.
+const blockedSceneElements = [
+  "frame", "iframe", "frameset", "object", "embed", "applet", "portal", "fencedframe",
+  "link", "noscript",
+];
 const sceneAllow = "camera 'none'; microphone 'none'; display-capture 'none'; webrtc 'none'";
 
 // This function is installed as the first classic script in the iframe.
 // CSP guards fetch-backed APIs, but deployed browsers do not all enforce
 // a WebRTC-specific policy. Keep the native constructors out of the realm.
-function restrictSceneRealm() {
+function restrictSceneRealm(blockedElements) {
+  const blocked = new Set(blockedElements);
   for (const name of [
     "RTCPeerConnection", "webkitRTCPeerConnection", "mozRTCPeerConnection",
     "RTCDataChannel", "RTCIceGatherer", "RTCIceTransport", "RTCDtlsTransport",
     "RTCSctpTransport", "WebTransport", "WebSocket", "WebSocketStream",
-    "Worker", "SharedWorker",
+    "Worker", "SharedWorker", "open",
   ]) {
     Object.defineProperty(window, name, { value: undefined, configurable: false, writable: false });
   }
   for (const name of ["sendBeacon", "serviceWorker"]) {
     Object.defineProperty(Navigator.prototype, name, { value: undefined, configurable: false, writable: false });
   }
-  // Resource hints can initiate a connection without a fetch. Scene
-  // stylesheets are inlined by the host, so scenes need no link elements.
-  // Trusted Types covers HTML insertion sinks where implemented.
+  if (window.Worklet) {
+    Object.defineProperty(Worklet.prototype, "addModule", {
+      value: undefined, configurable: false, writable: false,
+    });
+  }
+  // The CSP and sandbox independently restrict workers and popups. Block
+  // browsing-context and resource-hint elements at creation too.
   for (const [method, nameIndex] of [["createElement", 0], ["createElementNS", 1]]) {
     const create = Document.prototype[method];
     Object.defineProperty(Document.prototype, method, {
       value(...args) {
         const name = String(args[nameIndex]);
-        if (name.split(":").at(-1).toLowerCase() === "link") {
-          throw new DOMException("Resource hints are disabled in scenes", "SecurityError");
+        if (blocked.has(name.split(":").at(-1).toLowerCase())) {
+          throw new DOMException("Element is disabled in scenes", "SecurityError");
         }
         args[nameIndex] = name;
         return create.apply(this, args);
@@ -65,7 +76,8 @@ async function bundle(files) {
       fetch(new URL("./example.html", import.meta.url)).then((response) => response.text()),
       fetch(new URL("../src/index.js", import.meta.url)).then((response) => response.text()),
     ]);
-    return { id: "example-v1", required: [], html: page.replace("/* SCENE_SDK */", () => sdk) };
+    const document = new DOMParser().parseFromString(page.replace("/* SCENE_SDK */", () => sdk), "text/html");
+    return { id: "example-v1", required: [], document };
   }
   if (files.length > 256 || files.reduce((size, file) => size + file.size, 0) > 16 * 1024 * 1024) {
     throw new Error("Scene folder exceeds the shell's limit.");
@@ -119,7 +131,7 @@ async function bundle(files) {
   for (const key of [...assets.keys()].sort()) identities.push([key, await digest(assets.get(key))]);
   const hash = await crypto.subtle.digest("SHA-256", encoder.encode(JSON.stringify(identities)));
   const id = [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  return { id, required: manifest.observe.required, html: `<!doctype html>${page.documentElement.outerHTML}` };
+  return { id, required: manifest.observe.required, document: page };
 }
 
 function environment(frame) {
@@ -169,11 +181,17 @@ function launch(content, options) {
   frame.setAttribute("sandbox", "allow-scripts");
   frame.allow = sceneAllow;
   frame.referrerPolicy = "no-referrer";
-  const isolated = new DOMParser().parseFromString(content.html, "text/html");
+  const isolated = content.document;
+  const blocked = new Set(blockedSceneElements);
   const fragments = [isolated];
   for (const fragment of fragments) {
-    for (const link of fragment.querySelectorAll("link")) link.remove();
-    for (const template of fragment.querySelectorAll("template")) fragments.push(template.content);
+    for (const element of fragment.querySelectorAll("*")) {
+      const name = element.localName.toLowerCase();
+      // Drop the whole noscript subtree. The inert parser and the runnable
+      // scene tokenize its contents differently, including in the head.
+      if (blocked.has(name)) element.remove();
+      if (name === "template" && element instanceof HTMLTemplateElement) fragments.push(element.content);
+    }
   }
   const policy = isolated.createElement("meta");
   policy.httpEquiv = "Content-Security-Policy";
@@ -182,7 +200,7 @@ function launch(content, options) {
   dns.httpEquiv = "x-dns-prefetch-control";
   dns.content = "off";
   const bootstrap = isolated.createElement("script");
-  bootstrap.textContent = `(${restrictSceneRealm.toString()})();`;
+  bootstrap.textContent = `(${restrictSceneRealm.toString()})(${JSON.stringify(blockedSceneElements)});`;
   isolated.head.prepend(policy, dns, bootstrap);
   frame.srcdoc = `<!doctype html>${isolated.documentElement.outerHTML}`;
   const channel = new MessageChannel();

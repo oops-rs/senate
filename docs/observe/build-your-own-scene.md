@@ -37,6 +37,33 @@ activity and environment messages. The container keeps its credential and
 the SSE connection. When the person selects a row, the scene can ask the
 container to open its supplied app link.
 
+## Browser isolation
+
+Use scene bundles you trust, especially when granting access to live data.
+The reference shell uses an opaque sandboxed iframe, CSP that denies frame,
+object and worker loads, and a bootstrap that disables popup, worker,
+worklet and WebRTC entry points. It removes browsing-context elements,
+resource hints and entire `noscript` subtrees, including inside templates.
+Use ordinary DOM methods and bundled assets to render the scene.
+
+Chromium enforces the sandbox and fetch CSP and uses Trusted Types to guard
+raw HTML sinks. Safari added Trusted Types in version 26. Earlier Safari
+versions lack that layer. The draft WebRTC CSP directive and iframe
+permission denials are supplementary where implemented. An iframe sandbox
+and ordinary fetch CSP alone do not guarantee WebRTC isolation. Use browser
+test results for the exact engine and version you intend to ship.
+[Content Security Policy Level 3](https://www.w3.org/TR/CSP3/) ·
+[Chrome Trusted Types guidance](https://developer.chrome.com/docs/modern-web-guidance/guides/security/trusted-types) ·
+[Safari 26 WebKit features](https://webkit.org/blog/17333/webkit-features-in-safari-26-0/)
+
+The browser regression suite checks rendered markup and child-context
+restrictions separately, then checks the synthetic scene's previously
+covered network paths. Set `SENATE_SCENE_CHROME` to a Chrome binary or
+`SENATE_SCENE_WEBKIT` to the entry module of an existing Playwright
+installation with WebKit. The Chromium run additionally checks DNS lookup
+telemetry. The suite passed in Chrome 158 and Playwright WebKit 27.2.
+Firefox is outside current browser test coverage.
+
 ## Small standalone browser client
 
 Use a loopback-served page with a form containing `endpoint` and `token`
