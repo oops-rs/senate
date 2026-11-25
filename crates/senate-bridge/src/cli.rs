@@ -156,6 +156,11 @@ enum MemoryCmd {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Issue or revoke scoped desk-worker credentials on this machine.
+    DeskWorker {
+        #[command(subcommand)]
+        command: DeskWorkerCmd,
+    },
     /// Issue or manage read-only observation grants.
     Observe(cli_observe::Observe),
     /// Replace or clear a profile card.
@@ -756,6 +761,24 @@ impl DisplayScope {
         let cwd = std::env::current_dir()?;
         Ok(binding::directory_committee(paths, &cwd, &settings).await)
     }
+}
+
+#[derive(Subcommand)]
+enum DeskWorkerCmd {
+    /// Issue a worker credential and print its secret once.
+    Issue {
+        /// A distinct service label, not a person or senator identity.
+        #[arg(long)]
+        worker: Name,
+        /// Existing committee granted to the worker. Repeat to add a committee.
+        #[arg(long = "committee", required = true)]
+        committees: Vec<CommitteeId>,
+    },
+    /// Revoke a previously issued worker credential.
+    Revoke {
+        /// The public credential ID returned by issue.
+        id: EventId,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3350,6 +3373,17 @@ fn run_doctor(json: bool) -> anyhow::Result<()> {
         manager: &service::SystemManager,
         wsl: wsl.as_ref(),
     });
+    if paths
+        .hosted(crate::paths::HOSTED_KEY)
+        .join("token")
+        .exists()
+    {
+        checks.push(crate::doctor::Check::warn(
+            "server.legacy_person_token",
+            "A legacy machine person-token file remains on disk",
+            Some("Upgrade the machine daemon and use Senate CLI or app IPC"),
+        ));
+    }
     checks.extend(completion::doctor(locale));
     #[cfg(target_os = "macos")]
     checks.push(crate::app_confirmation::macos::pin_doctor(paths.home()));
@@ -3476,6 +3510,18 @@ fn run_service(command: ServiceCmd, output: Output) -> anyhow::Result<()> {
             };
             let plan = service::plan_install(&spec, &senated);
             if yes {
+                let paths = Paths::new(&spec.senate_home);
+                crate::config::check_legacy_person_token_consumers(&paths)
+                    .map_err(anyhow::Error::msg)?;
+                if paths
+                    .hosted(crate::paths::HOSTED_KEY)
+                    .join("token")
+                    .exists()
+                {
+                    eprintln!(
+                        "The legacy machine person token will be revoked. Check external integrations and use Senate CLI or app IPC for person actions."
+                    );
+                }
                 #[cfg(target_os = "macos")]
                 {
                     let paths = Paths::new(&spec.senate_home);
@@ -3575,6 +3621,25 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         Cmd::Secretary(args) => cli_secretary::run(args),
         Cmd::Desk(args) => cli_desk::run(args),
         Cmd::Chat(args) => cli_chat::run(args),
+        Cmd::DeskWorker { command } => {
+            let paths = Paths::from_env()?;
+            let command = match command {
+                DeskWorkerCmd::Issue { worker, committees } => senate_core::worker::Admin::Issue {
+                    worker,
+                    committees: committees.into_iter().collect(),
+                },
+                DeskWorkerCmd::Revoke { id } => senate_core::worker::Admin::Revoke { id },
+            };
+            let issued: Option<senate_core::worker::Issued> =
+                runtime(false)?.block_on(daemon_call(&paths, &Request::DeskWorker { command }))?;
+            match issued {
+                Some(issued) => print_json(&issued),
+                None => {
+                    println!("Desk-worker credential revoked.");
+                    Ok(())
+                }
+            }
+        }
         Cmd::Observe(args) => cli_observe::run(args),
         Cmd::Card(args) => cli_observe::run_card(args),
         Cmd::Open(args) => cli_open::run(args),

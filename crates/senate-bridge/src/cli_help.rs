@@ -44,7 +44,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "secretary",
         ],
     ),
-    ("Set up this machine", &["setup"]),
+    ("Set up this machine", &["setup", "desk-worker"]),
 ];
 
 const FOOTER: &str = "\

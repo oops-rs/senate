@@ -1055,6 +1055,10 @@ pub enum Request {
         target: CardTarget,
         document: String,
     },
+    DeskWorker {
+        command: senate_core::worker::Admin,
+    },
+    ServerHealth,
     Ping,
     Status,
     Profiles,
@@ -2805,6 +2809,12 @@ impl CommitteeStatus {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct ServerHealthReply {
+    pub me: senate_core::api::Me,
+    pub ahead: Vec<(CommitteeId, Seq)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusReply {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -2958,7 +2968,7 @@ pub async fn request_line(socket: &Path, request: &Request) -> Result<Vec<u8>, C
                     | Request::TimelineWatch { .. }
                     | Request::DeskDecide { .. }
                     | Request::Sessions
-                    | Request::Watch { app: true }
+                    | Request::Watch { .. }
             ) {
             Some(ProofKind::Operator)
         } else if matches!(

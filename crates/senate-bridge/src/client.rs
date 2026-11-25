@@ -34,6 +34,8 @@ pub const CURSOR_AHEAD: &str = api::code::CURSOR_AHEAD;
 pub enum ApiClientError {
     #[error("could not reach the Senate server: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("the in-process Senate bridge could not serve the request: {0}")]
+    Local(#[from] std::io::Error),
     #[error("the Senate server answered {status} {code}: {message}")]
     Api {
         status: u16,
@@ -59,6 +61,7 @@ impl ApiClientError {
         match self {
             Self::Api { status, .. } => Some(*status),
             Self::Http(e) => e.status().map(|s| s.as_u16()),
+            Self::Local(_) => None,
         }
     }
 
@@ -70,7 +73,7 @@ impl ApiClientError {
     pub fn epoch(&self) -> Option<&str> {
         match self {
             Self::Api { epoch, .. } => epoch.as_deref(),
-            Self::Http(_) => None,
+            Self::Http(_) | Self::Local(_) => None,
         }
     }
 
@@ -78,7 +81,7 @@ impl ApiClientError {
     pub fn code(&self) -> Option<&str> {
         match self {
             Self::Api { code, .. } => Some(code),
-            Self::Http(_) => None,
+            Self::Http(_) | Self::Local(_) => None,
         }
     }
 
@@ -160,6 +163,52 @@ pub struct ApiClient {
     /// No overall timeout: SSE responses never finish. Stalls are caught by
     /// the stream loop's keepalive deadline instead.
     streaming: Client,
+    local: Option<LocalTransport>,
+}
+
+/// The machine server's in-memory request capability.
+pub type LocalTransport = std::sync::Arc<
+    dyn Fn(
+            reqwest::Request,
+        ) -> futures::future::BoxFuture<'static, Result<Response, std::io::Error>>
+        + Send
+        + Sync,
+>;
+
+struct Prepared<'a> {
+    request: RequestBuilder,
+    local: Option<&'a LocalTransport>,
+}
+
+impl Prepared<'_> {
+    fn query<T: serde::Serialize + ?Sized>(mut self, value: &T) -> Self {
+        self.request = self.request.query(value);
+        self
+    }
+    fn json<T: serde::Serialize + ?Sized>(mut self, value: &T) -> Self {
+        self.request = self.request.json(value);
+        self
+    }
+    async fn send(self) -> Result<Response, ApiClientError> {
+        match self.local {
+            Some(local) => {
+                let request = self.request.build()?;
+                if let Some(timeout) = request.timeout().copied() {
+                    Ok(tokio::time::timeout(timeout, local(request))
+                        .await
+                        .map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "local Senate request timed out",
+                            )
+                        })??)
+                } else {
+                    Ok(local(request).await?)
+                }
+            }
+            None => Ok(self.request.send().await?),
+        }
+    }
 }
 
 impl std::fmt::Debug for ApiClient {
@@ -177,6 +226,19 @@ impl ApiClient {
 
     pub(crate) fn in_process(server_url: &str, token: &str) -> Result<Self, ApiClientError> {
         Self::build(server_url, token, true)
+    }
+
+    pub fn with_local_transport(
+        server_url: &str,
+        local: LocalTransport,
+    ) -> Result<Self, ApiClientError> {
+        let mut api = Self::build(server_url, "", true)?;
+        api.local = Some(local);
+        Ok(api)
+    }
+
+    pub(crate) fn uses_local_transport(&self) -> bool {
+        self.local.is_some()
     }
 
     fn build(server_url: &str, token: &str, in_process: bool) -> Result<Self, ApiClientError> {
@@ -206,6 +268,7 @@ impl ApiClient {
             http,
             short: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             streaming,
+            local: None,
         })
     }
 
@@ -217,9 +280,19 @@ impl ApiClient {
         format!("{}{}", self.base, path)
     }
 
-    fn authed(&self, req: RequestBuilder) -> RequestBuilder {
-        req.bearer_auth(&self.token)
-            .timeout(Duration::from_secs(30))
+    fn authed(&self, req: RequestBuilder) -> Prepared<'_> {
+        self.prepare(req.timeout(Duration::from_secs(30)))
+    }
+
+    fn prepare(&self, req: RequestBuilder) -> Prepared<'_> {
+        Prepared {
+            request: if self.local.is_some() {
+                req
+            } else {
+                req.bearer_auth(&self.token)
+            },
+            local: self.local.as_ref(),
+        }
     }
 
     // Keep this permit until the response body has been read or dropped.
@@ -324,6 +397,25 @@ impl ApiClient {
         Ok(KnownAliases::Unscoped(
             checked(response).await?.json().await?,
         ))
+    }
+
+    pub(crate) async fn desk_worker(
+        &self,
+        command: &senate_core::worker::Admin,
+    ) -> Result<Option<senate_core::worker::Issued>, ApiClientError> {
+        if !self.uses_local_transport() {
+            return Err(std::io::Error::other(
+                "Desk-worker credentials belong to a machine-hosted Senate",
+            )
+            .into());
+        }
+        let _permit = self.short_request().await;
+        let response = self
+            .authed(self.http.post(self.url(senate_core::worker::ADMIN_PATH)))
+            .json(command)
+            .send()
+            .await?;
+        Ok(checked(response).await?.json().await?)
     }
 
     pub async fn me(&self) -> Result<Me, ApiClientError> {
@@ -867,12 +959,13 @@ impl ApiClient {
             senator: agent.cloned(),
         };
         let resp = self
-            .streaming
-            .get(url)
-            .bearer_auth(&self.token)
-            .query(&query)
-            .header("Accept", "text/event-stream")
-            .header("Last-Event-ID", after.to_string())
+            .prepare(
+                self.streaming
+                    .get(url)
+                    .query(&query)
+                    .header("Accept", "text/event-stream")
+                    .header("Last-Event-ID", after.to_string()),
+            )
             .send()
             .await?;
         checked(resp).await

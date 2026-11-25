@@ -999,6 +999,8 @@ macro_rules! request_selector {
             | Request::SetChair { session, .. } => Some(session),
             Request::RemoteControl { .. }
             | Request::ObserveAdmin { .. }
+            | Request::DeskWorker { .. }
+            | Request::ServerHealth
             | Request::Ping
             | Request::Status
             | Request::Profiles

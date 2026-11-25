@@ -67,6 +67,67 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+/// Refuse a machine migration that would break the known local Commons worker.
+pub fn check_legacy_person_token_consumers(paths: &crate::Paths) -> Result<(), String> {
+    let legacy = paths.hosted(crate::paths::HOSTED_KEY).join("token");
+    let commons = std::env::var_os("COMMONS_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".commonsd")));
+    let Some(config) = commons.map(|home| home.join("dial-speaker.toml")) else {
+        return Ok(());
+    };
+    check_commons_credential(&config, &legacy)
+}
+
+fn check_commons_credential(config: &Path, legacy: &Path) -> Result<(), String> {
+    let text = match std::fs::read_to_string(config) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "Could not check the Commons credential at {}: {error}",
+                config.display()
+            ));
+        }
+    };
+    let doc: toml_edit::DocumentMut = text.parse().map_err(|_error: toml_edit::TomlError| {
+        format!(
+            "Could not parse the Commons configuration at {} to check its credential",
+            config.display()
+        )
+    })?;
+    let Some(reference) = doc
+        .get("senate")
+        .and_then(|section| section.get("token_file"))
+        .and_then(toml_edit::Item::as_str)
+    else {
+        return Ok(());
+    };
+    let reference = Path::new(reference);
+    let path_matches = reference == legacy
+        || std::fs::canonicalize(reference)
+            .ok()
+            .is_some_and(|target| std::fs::canonicalize(legacy).ok().as_ref() == Some(&target));
+    let value_matches = !path_matches
+        && legacy.exists()
+        && match (
+            std::fs::read_to_string(reference),
+            std::fs::read_to_string(legacy),
+        ) {
+            (Ok(reference), Ok(legacy)) => {
+                !legacy.trim().is_empty() && reference.trim() == legacy.trim()
+            }
+            _ => false,
+        };
+    if path_matches || value_matches {
+        return Err(format!(
+            "Commons Dial Speaker still uses the legacy machine person credential in {}. Switch Commons to the scoped desk-worker integration before installing or starting the new machine daemon.",
+            config.display()
+        ));
+    }
+    Ok(())
+}
+
 use senate_core::{
     BranchNaming, CommitteeId, DEFAULT_BRANCH_PREFIX, Locale, Name, SenatePath, SenatorId,
     SenatorName, SpeakerName,
@@ -906,6 +967,31 @@ impl AgyConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commons_preflight_detects_the_original_and_copied_legacy_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("dial-speaker.toml");
+        let legacy = dir.path().join("legacy-token");
+        let staged = dir.path().join("worker-token");
+        let configure = |path: &Path| {
+            let mut doc = toml_edit::DocumentMut::new();
+            doc["senate"]["token_file"] = toml_edit::value(path.to_str().unwrap());
+            std::fs::write(&config, doc.to_string()).unwrap();
+        };
+
+        configure(&legacy);
+        let warning = check_commons_credential(&config, &legacy).unwrap_err();
+        assert!(warning.contains("scoped desk-worker"));
+
+        configure(&staged);
+        std::fs::write(&legacy, "fixture-legacy").unwrap();
+        assert!(check_commons_credential(&config, &legacy).is_ok());
+        std::fs::write(&staged, "fixture-legacy\n").unwrap();
+        assert!(check_commons_credential(&config, &legacy).is_err());
+        std::fs::write(&staged, "fixture-scoped").unwrap();
+        assert!(check_commons_credential(&config, &legacy).is_ok());
+    }
 
     #[test]
     fn launch_profiles_load_without_a_remote_senate() {

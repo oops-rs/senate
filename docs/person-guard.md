@@ -189,6 +189,35 @@ private signing key by a hosted agent. Doctor reports a missing, changed, or
 inactive app pin. Unsigned development appliances have no trusted presence
 path.
 
+## The machine server's credentials
+
+The machine's person and native Senate seats use verified local bridge IPC.
+Their machine-server requests go through the private in-process router.
+The public loopback router has no person bearer for the production machine.
+Upgrade revokes the old `senates/top/token` credential and removes the file.
+An old copy gets 401 directing its client to the local Senate CLI or app.
+Doctor warns if the file is still present. Standalone servers and separately
+configured parent connections keep their configured credentials.
+
+No machine Senate seat has a general-purpose server bearer saved on disk.
+Native Claude inbox credentials can be recorded with the session in
+`state.db`. They authenticate delivery into that runtime's inbox, so a
+same-user reader can potentially inject input there. They cannot authorize
+server event writes or substitute for another runtime's verified IPC identity.
+External desk intake uses [separate scoped worker credentials](worker-credentials.md).
+
+An agent that can drive a user's running tmux or screen pane can act with
+the operator proof available in that pane. It can speak through routine
+person IPC and share writable viewer authorization already cached for the
+pane. A detached pane can remain alive. Attachment and foreground process
+group facts do not reliably identify the user's focused pane across
+multiplexers, nor distinguish synthetic input in the same pane. Restrict
+access to terminal automation and check which terminal tools have it.
+
+Committee logs, including thread, memory, search and brief data on disk,
+are protected by the filesystem like transcripts. IPC verification restricts
+the daemon endpoints and does not provide a separate filesystem boundary.
+
 ## Writable trust records
 
 The app pin and approval preference live in the Senate home. The installer

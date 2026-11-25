@@ -7,6 +7,21 @@
 
 use senate_core::{Kind, NewEvent, meta};
 
+pub(crate) const BRIDGE_KEYS: [&str; 1] = ["verified_origin"];
+
+pub(crate) fn check_bridge_origin(event: &NewEvent, local: bool) -> Result<(), String> {
+    if !local
+        && let Some(key) = BRIDGE_KEYS
+            .iter()
+            .find(|key| event.meta.contains_key(**key))
+    {
+        return Err(format!(
+            "meta.{key} is reserved for the authenticated machine bridge"
+        ));
+    }
+    Ok(())
+}
+
 /// Keys only the Speaker writes. A senator carrying one, whatever its value,
 /// is refused, so no event in the log looks like one the Speaker wrote.
 pub(crate) const SPEAKER_KEYS: [&str; 7] = [
@@ -76,4 +91,28 @@ pub(crate) fn check_may_change_state(event: &NewEvent) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_private_route_accepts_verified_origin() {
+        let note = NewEvent::new(
+            "design".parse().unwrap(),
+            Kind::Note,
+            senate_core::Address::Speaker,
+            "Fixture note",
+        );
+        assert!(check_bridge_origin(&note, false).is_ok());
+
+        let stamped = note.with_meta("verified_origin", serde_json::json!("person-terminal"));
+        assert!(check_bridge_origin(&stamped, true).is_ok());
+        assert!(
+            check_bridge_origin(&stamped, false)
+                .unwrap_err()
+                .contains("meta.verified_origin is reserved")
+        );
+    }
 }

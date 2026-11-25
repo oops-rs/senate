@@ -29,6 +29,7 @@ mod live;
 mod worktree;
 mod wsl;
 
+pub(crate) use live::cursors_ahead;
 pub use live::{CodexProbe, Live, Probe, gather, live};
 pub use wsl::Wsl;
 

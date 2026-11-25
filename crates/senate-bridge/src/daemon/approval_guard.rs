@@ -140,6 +140,9 @@ pub(crate) fn person_only(request: &Request) -> Option<&'static str> {
         Request::SetCard { session, .. } if session == &SessionSelector::default() => {
             "Manage your profile card from your own terminal or the Senate app"
         }
+        Request::DeskWorker { .. } => {
+            "Manage desk-worker credentials from your own terminal or the Senate app"
+        }
         Request::ObserveAdmin { .. } => {
             "Manage Observe grants from your own terminal or the Senate app"
         }

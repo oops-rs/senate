@@ -93,6 +93,8 @@ type Hands = (Arc<dyn Runner>, Option<Arc<dyn Forge>>);
 /// `database_url`, authentication from `[[tokens]]`, the roster from
 /// `[roster]`, the Speaker from `[speaker]` (its model through basis), its
 /// hands from `[work]`.
+type LocalLink = Arc<std::sync::OnceLock<senate_server::LocalBridge>>;
+
 pub struct Assembly {
     config: SenatedConfig,
     store: Option<Arc<dyn LogStore>>,
@@ -114,6 +116,7 @@ pub struct Assembly {
     /// No built-in session, whatever the configuration says.
     without_session: bool,
     observe: Option<Arc<senate_observe::Registry>>,
+    local_machine: Option<(senate_core::Name, LocalLink)>,
 }
 
 impl Assembly {
@@ -134,12 +137,18 @@ impl Assembly {
             model_check: None,
             without_session: false,
             observe: None,
+            local_machine: None,
         }
     }
 
     /// The configuration was read from `file`: `secretary.toml` is read
     /// beside it ([`crate::config::secretary_dir`]), and what is shown names
     /// it.
+    pub(crate) fn local_machine(mut self, person: senate_core::Name, ready: LocalLink) -> Self {
+        self.local_machine = Some((person, ready));
+        self
+    }
+
     pub fn config_file(mut self, file: impl Into<PathBuf>) -> Self {
         let file = file.into();
         self.secretary_dir = Some(crate::config::secretary_dir(&file));
@@ -277,6 +286,7 @@ impl Assembly {
             model_check,
             without_session,
             observe,
+            local_machine,
         } = self;
         let remote = crate::gateway_ipc::RemoteGateway::from_config(&config)
             .map_err(AssemblyError::GatewayConfig)?;
@@ -365,10 +375,18 @@ impl Assembly {
         if let Some(registry) = observe {
             server = server.observe(registry);
         }
+        if let Some((person, _)) = &local_machine {
+            server = server.local_person(person.clone());
+        }
         let running = match listener {
             Some(listener) => server.start_with_listener(listener).await?,
             None => server.start().await?,
         };
+        if let Some((_, ready)) = local_machine
+            && let Some(bridge) = &running.local_bridge
+        {
+            let _ = ready.set(bridge.clone());
+        }
         let hub: Arc<dyn Hub> = running.hub.clone();
 
         let slot = SpeakerSlot::default();
@@ -622,6 +640,10 @@ impl Senated {
     }
 
     /// `http://<local_addr>`: where bridges connect.
+    pub(crate) fn local_bridge(&self) -> Option<senate_server::LocalBridge> {
+        self.server.as_ref()?.local_bridge.clone()
+    }
+
     pub fn base_url(&self) -> String {
         format!("http://{}", self.local_addr)
     }

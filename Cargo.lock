@@ -2835,6 +2835,7 @@ dependencies = [
  "chrono",
  "eventsource-stream",
  "futures",
+ "getrandom 0.4.3",
  "hex",
  "hyper-util",
  "ractor",
@@ -2847,11 +2848,13 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "subtle",
  "tempfile",
  "thiserror",
  "tokio",
  "tokio-stream",
  "toml 0.8.23",
+ "tower",
  "tracing",
 ]
 

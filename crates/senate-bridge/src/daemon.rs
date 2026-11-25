@@ -739,18 +739,27 @@ pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
 
 pub async fn start(options: DaemonOptions) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_bridge(options, host_binary, false, None, None, false).await
+    start_bridge(options, host_binary, false, None, None, false, None).await
 }
 
-/// Start the bridge against the loopback Senate listener owned by this
-/// process. That listener supports HTTP/2 without negotiation.
+/// Start the bridge against the owning process's private Senate router.
 pub async fn start_in_process(
     options: DaemonOptions,
     observe: Option<Arc<senate_observe::Registry>>,
     observe_consent: Option<Arc<senate_observe::AppConsentedGrants>>,
+    local: crate::client::LocalTransport,
 ) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_bridge(options, host_binary, true, observe, observe_consent, false).await
+    start_bridge(
+        options,
+        host_binary,
+        true,
+        observe,
+        observe_consent,
+        false,
+        Some(local),
+    )
+    .await
 }
 
 /// Start an unsigned, disposable machine fixture. The scope fixture still
@@ -760,9 +769,19 @@ pub async fn start_in_process_fixture(
     options: DaemonOptions,
     observe: Option<Arc<senate_observe::Registry>>,
     observe_consent: Option<Arc<senate_observe::AppConsentedGrants>>,
+    local: crate::client::LocalTransport,
 ) -> anyhow::Result<DaemonHandle> {
     let host_binary = std::env::current_exe()?.with_file_name("senate");
-    start_bridge(options, host_binary, true, observe, observe_consent, true).await
+    start_bridge(
+        options,
+        host_binary,
+        true,
+        observe,
+        observe_consent,
+        true,
+        Some(local),
+    )
+    .await
 }
 
 /// Start the bridge with a companion Senate CLI at an explicit path.
@@ -770,7 +789,7 @@ pub async fn start_with_host_binary(
     options: DaemonOptions,
     host_binary: PathBuf,
 ) -> anyhow::Result<DaemonHandle> {
-    start_bridge(options, host_binary, false, None, None, true).await
+    start_bridge(options, host_binary, false, None, None, true, None).await
 }
 
 fn debug_scope_fixture(home: &Path, fixture_bootstrap: bool) -> bool {
@@ -798,6 +817,7 @@ async fn start_bridge(
     observe: Option<Arc<senate_observe::Registry>>,
     observe_consent: Option<Arc<senate_observe::AppConsentedGrants>>,
     fixture_bootstrap: bool,
+    local: Option<crate::client::LocalTransport>,
 ) -> anyhow::Result<DaemonHandle> {
     #[cfg(not(target_os = "macos"))]
     let _ = observe_consent;
@@ -807,7 +827,9 @@ async fn start_bridge(
         timing,
         desktop,
     } = options;
-    config.validate().map_err(anyhow::Error::msg)?;
+    if local.is_none() {
+        config.validate().map_err(anyhow::Error::msg)?;
+    }
     if let Some(notice) = approval_guard::advisory_notice(config.locale) {
         tracing::warn!("{notice}");
     }
@@ -886,6 +908,7 @@ async fn start_bridge(
     });
     let fixture = debug_scope_fixture(paths.home(), fixture_bootstrap);
     let common = Common {
+        local,
         #[cfg(target_os = "macos")]
         owned_codex_backends: scope.is_some(),
         #[cfg(target_os = "linux")]
@@ -1014,6 +1037,7 @@ async fn start_bridge(
 /// What every Senate's half of the daemon shares: one Codex transport and
 /// approvals relay, one watch channel, one companion configuration.
 struct Common {
+    local: Option<crate::client::LocalTransport>,
     owned_codex_backends: bool,
     #[cfg(target_os = "macos")]
     protected_hosting: bool,
@@ -1066,7 +1090,9 @@ impl Shared {
                 "re-queued items that were in flight at the last exit"
             );
         }
-        let api = if in_process {
+        let api = if let Some(local) = common.local.clone() {
+            ApiClient::with_local_transport(&config.server_url, local)?
+        } else if in_process {
             ApiClient::in_process(&config.server_url, &config.token)?
         } else {
             ApiClient::new(&config.server_url, &config.token)?
@@ -3494,6 +3520,14 @@ impl Shared {
                 }
                 wrap(result.map_err(server_error))
             }
+            Request::DeskWorker { command } => wrap(self.api.desk_worker(&command).await.map_err(server_error)),
+            Request::ServerHealth => match self.api.me().await {
+                Ok(me) => wrap(Ok(ipc::ServerHealthReply {
+                    me,
+                    ahead: crate::doctor::cursors_ahead(&self.api, &self.store).await,
+                })),
+                Err(error) => Reply::err(server_error(error)),
+            },
             Request::Status => wrap(self.on_status()),
             Request::NativeAuthorityCandidate { .. } | Request::AuthorizeNativeAuthority { .. } |
             Request::RemoteControl { .. } | Request::ObserveAdmin { .. } | Request::SetCard { .. } | Request::OpenViewer { .. } => {
@@ -5184,7 +5218,11 @@ impl Shared {
     /// Append, turning the server's `ambiguous_recipient` into an error that
     /// carries the candidates and tells the asker how to choose.
     async fn post(&self, event: NewEvent) -> Result<Posted, IpcError> {
-        let event = approval_guard::annotate_origin(event);
+        let event = if self.api.uses_local_transport() {
+            approval_guard::annotate_origin(event)
+        } else {
+            event
+        };
         let r = match self.api.append(&event).await {
             Ok(r) => r,
             Err(e) => {
@@ -5923,7 +5961,6 @@ impl Shared {
         if let Some(id) = id {
             event = event.with_id(id);
         }
-        let event = approval_guard::annotate_origin(event);
         let r = above.append(&event).await.map_err(server_error)?;
         Ok(Posted {
             committee: r.event.committee,
@@ -6922,6 +6959,18 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         (reply, false)
                     }
                     Ok(Request::Watch { app }) => {
+                        if !shared.scope_fixture
+                            && let Err(error) = shared
+                                .refuse_agent_caller(
+                                    person_peer,
+                                    "Watch the Senate from your terminal or the Senate app",
+                                )
+                                .await
+                        {
+                            send_ipc_line(&mut write, &Reply::err(error)).await;
+                            return;
+                        }
+
                         // An app that shows notifications itself keeps the
                         // daemon quiet while it is connected.
                         let _guard = (app && (signed_app || shared.scope_fixture))

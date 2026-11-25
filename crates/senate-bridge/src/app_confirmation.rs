@@ -282,6 +282,19 @@ pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> 
         Request::AuthorizeNativeAuthority { session_id, .. } => {
             format!("Authorize native seat {session_id}")
         }
+        Request::DeskWorker {
+            command: senate_core::worker::Admin::Issue { worker, committees },
+        } => {
+            let names = committees
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("Issue a scoped desk-worker credential for {worker} in {names}")
+        }
+        Request::DeskWorker {
+            command: senate_core::worker::Admin::Revoke { id },
+        } => format!("Revoke desk-worker credential {id}"),
         Request::ObserveAdmin {
             command: AdminRequest::Create { grant },
         } => {
@@ -1048,6 +1061,7 @@ pub fn required(request: &crate::ipc::Request) -> bool {
 
     match request {
         Request::Approve { .. }
+        | Request::DeskWorker { .. }
         | Request::ApproveSession { .. }
         | Request::DeskDecide { .. }
         | Request::Forward { .. }

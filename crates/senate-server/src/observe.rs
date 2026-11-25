@@ -866,6 +866,7 @@ fn eligible(event: &senate_core::Event) -> Option<public::MessageKind> {
                     | meta::SOURCES
                     | meta::TOPIC
                     | meta::COMPANION
+                    | "verified_origin"
             )
         })
     {
