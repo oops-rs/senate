@@ -65,8 +65,19 @@ if [[ "$identity" != "-" ]]; then
   # a current account doesn't have.
   match="$(security find-identity -v -p codesigning | grep -F "$identity" | head -1)"
   [[ -n "$match" ]] || die "no codesigning identity matches \"$identity\""
-  team="$(sed -n 's/.*(\([A-Z0-9]*\))".*/\1/p' <<<"$match")"
   identity="$(awk '{print $2}' <<<"$match")"
+  # The team is the certificate's organizational unit. The parenthesis in an
+  # "Apple Development: Name (XXXXXXXXXX)" name is the person's own id, not
+  # the team, so read the certificate that has this hash.
+  team="$(security find-certificate -a -Z -p \
+    | awk -v want="$identity" '
+        /^SHA-1 hash:/ { keep = ($3 == want) }
+        keep && /BEGIN CERTIFICATE/ { pem = 1 }
+        keep && pem { print }
+        keep && /END CERTIFICATE/ { exit }' \
+    | openssl x509 -noout -subject -nameopt multiline 2>/dev/null \
+    | sed -n 's/^ *organizationalUnitName *= *//p' | head -1)"
+  [[ -n "$team" ]] || die "could not read the team of the signing certificate $identity"
   team_flags=(DEVELOPMENT_TEAM="$team")
 fi
 say "building the separate remote administrator artifact and CLI"
