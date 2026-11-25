@@ -118,6 +118,8 @@ pub(super) struct Screen {
     watchers: AtomicU64,
     /// When the TUI last wrote anything ([`super::observed_at`]).
     last_output: AtomicU64,
+    /// Counts what changes the screen: output and resizes.
+    revision: AtomicU64,
 }
 
 impl Screen {
@@ -133,6 +135,7 @@ impl Screen {
             fit_due: Notify::new(),
             watchers: AtomicU64::new(0),
             last_output: AtomicU64::new(super::observed_at()),
+            revision: AtomicU64::new(0),
         }
     }
 
@@ -190,6 +193,7 @@ impl Screen {
     pub(super) fn output(&self, bytes: &[u8]) {
         let mut parser = self.parser();
         parser.process(bytes);
+        self.revision.fetch_add(1, Ordering::AcqRel);
         self.last_output
             .store(super::observed_at(), Ordering::Release);
         // Nobody watching is not an error.
@@ -200,7 +204,14 @@ impl Screen {
     pub(super) fn resize(&self, rows: u16, cols: u16) {
         let mut parser = self.parser();
         parser.set_size(dimension(rows), dimension(cols));
+        self.revision.fetch_add(1, Ordering::AcqRel);
         let _ = self.changes.send(Change::Size(rows, cols));
+    }
+
+    /// A number that changes whenever [`Self::rows`] may: the TUI wrote, or
+    /// the screen was resized.
+    pub(super) fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
     }
 
     /// When the TUI last wrote anything.

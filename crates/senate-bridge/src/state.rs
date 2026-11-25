@@ -523,12 +523,10 @@ fn queue_host_notice(
 }
 
 fn session_host(conn: &Connection, session_id: &str) -> Result<Option<EventId>, StoreError> {
+    // Asked for every live session on every sweep: parsed once.
     let id: Option<Option<String>> = conn
-        .query_row(
-            "SELECT host_id FROM sessions WHERE session_id = ?1",
-            [session_id],
-            |row| row.get(0),
-        )
+        .prepare_cached("SELECT host_id FROM sessions WHERE session_id = ?1")?
+        .query_row([session_id], |row| row.get(0))
         .optional()?;
     id.flatten().as_deref().map(parse_host_id).transpose()
 }
@@ -1760,11 +1758,8 @@ impl Store {
     pub(crate) fn session_for_host(&self, id: &EventId) -> Result<Option<String>, StoreError> {
         Ok(self
             .conn()
-            .query_row(
-                "SELECT session_id FROM sessions WHERE host_id = ?1",
-                [id.to_string()],
-                |row| row.get(0),
-            )
+            .prepare_cached("SELECT session_id FROM sessions WHERE host_id = ?1")?
+            .query_row([id.to_string()], |row| row.get(0))
             .optional()?)
     }
 
@@ -2034,10 +2029,12 @@ impl Store {
     }
 
     pub fn session(&self, id: &str) -> Result<Option<Session>, StoreError> {
+        // The daemon's most frequent read: its statement is parsed once.
         let sql = format!("SELECT {SESSION_COLS} FROM sessions WHERE session_id = ?1");
         Ok(self
             .conn()
-            .query_row(&sql, [id], session_from_row)
+            .prepare_cached(&sql)?
+            .query_row([id], session_from_row)
             .optional()?)
     }
 
@@ -2047,7 +2044,7 @@ impl Store {
             "SELECT {SESSION_COLS} FROM sessions WHERE state != 'ended' ORDER BY last_seen DESC"
         );
         let conn = self.conn();
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([], session_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -2090,7 +2087,7 @@ impl Store {
     pub fn all_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let sql = format!("SELECT {SESSION_COLS} FROM sessions ORDER BY last_seen DESC");
         let conn = self.conn();
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([], session_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -2136,7 +2133,7 @@ impl Store {
             "SELECT {SESSION_COLS} FROM sessions WHERE state = 'live' ORDER BY last_seen DESC"
         );
         let conn = self.conn();
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([], session_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
     }

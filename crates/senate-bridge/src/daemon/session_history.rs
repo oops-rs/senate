@@ -66,11 +66,45 @@ struct Snapshot {
     index: Option<(u64, u64)>,
 }
 
+/// What a pass writes about a session whatever its transcript holds
+/// ([`crate::stats::scan::session`], and where its transcript is).
+type Facts = Vec<(
+    String,
+    i64,
+    &'static str,
+    Option<CommitteeId>,
+    Option<PathBuf>,
+    Option<PathBuf>,
+)>;
+
+fn facts(sessions: &[Session]) -> Facts {
+    sessions
+        .iter()
+        .map(|session| {
+            (
+                session.session_id.clone(),
+                session.started_at.timestamp(),
+                session.runtime.as_str(),
+                session.committee().cloned(),
+                session.git_root.clone(),
+                timeline::path(session),
+            )
+        })
+        .collect()
+}
+
+/// A pass that finds every input as the last full pass left it does
+/// nothing. One full pass still runs this often: it retries a transcript
+/// that could not be read last time though its file has not changed since.
+const FULL_PASS_EVERY: Duration = Duration::from_secs(300);
+
 struct Status {
     progress: Option<SessionIndexProgress>,
     error: Option<String>,
     complete: Option<Snapshot>,
     active: Option<Snapshot>,
+    /// When the last full pass ended, and the session facts it wrote.
+    walked: Option<(Instant, Facts)>,
 }
 
 pub(super) struct Background {
@@ -91,6 +125,7 @@ impl Default for Background {
                 error: None,
                 complete: None,
                 active: None,
+                walked: None,
             }),
             wake: tokio::sync::Notify::new(),
             ready: watch::channel(0).0,
@@ -220,6 +255,22 @@ fn refresh_index(shared: &Shared, shutdown: &watch::Receiver<bool>) -> anyhow::R
     }
     sessions
         .sort_unstable_by(|a, b| (b.last_seen, &b.session_id).cmp(&(a.last_seen, &a.session_id)));
+    // Nothing a pass reads has changed since the last full one: the same
+    // sessions, the same transcript files, the same index. Most ticks end
+    // here, without opening the index or reading a session again.
+    let mut written = facts(&sessions);
+    written.sort_unstable();
+    {
+        let status = lock(&shared.history_background.status);
+        if status.covers(&snapshot.sources, snapshot.index)
+            && status
+                .walked
+                .as_ref()
+                .is_some_and(|(at, last)| at.elapsed() < FULL_PASS_EVERY && *last == written)
+        {
+            return Ok(snapshot);
+        }
+    }
     let total = sessions.len();
     {
         let mut status = lock(&shared.history_background.status);
@@ -257,6 +308,9 @@ fn refresh_index(shared: &Shared, shutdown: &watch::Receiver<bool>) -> anyhow::R
             indexed: position + 1,
             total,
         });
+    }
+    if !*shutdown.borrow() {
+        lock(&shared.history_background.status).walked = Some((Instant::now(), written));
     }
     // Publish the inputs observed before the walk. A request for an append
     // that arrived during the pass may still need a later pass.

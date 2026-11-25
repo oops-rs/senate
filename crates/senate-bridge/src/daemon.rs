@@ -3374,15 +3374,14 @@ impl Shared {
                 principal,
                 appointed,
             } => wrap(
-                self.on_set_secretary_session(target_session, senator, principal, appointed)
-                    .await,
+                on_heap(|| self.on_set_secretary_session(target_session, senator, principal, appointed)).await,
             ),
-            Request::Desk { set } => wrap(self.on_desk(set).await),
+            Request::Desk { set } => wrap(on_heap(|| self.on_desk(set)).await),
             Request::SecretaryWork {
                 session,
                 principal,
                 operation,
-            } => wrap(self.on_secretary_work(&session, principal, operation).await),
+            } => wrap(on_heap(|| self.on_secretary_work(&session, principal, operation)).await),
             Request::Ping => Reply::ok(&Pong {
                 protocol: ipc::PROTOCOL_VERSION,
                 pid: std::process::id(),
@@ -3397,7 +3396,7 @@ impl Shared {
                 }
                 wrap(result)
             }
-            Request::OpenCommittee { committee } => wrap(self.on_open_committee(committee).await),
+            Request::OpenCommittee { committee } => wrap(on_heap(|| self.on_open_committee(committee)).await),
             Request::DeskOpenCommittee {
                 session,
                 committee,
@@ -3407,7 +3406,7 @@ impl Shared {
                 alias,
                 prompt,
             } => self.sessions_changed(wrap(
-                self.on_desk_open_committee(
+                on_heap(|| self.on_desk_open_committee(
                     &session,
                     committee,
                     desk_open::ChairOrder {
@@ -3417,14 +3416,13 @@ impl Shared {
                         alias,
                         prompt,
                     },
-                )
-                .await,
+                )).await,
             )),
             Request::ArchiveCommittee {
                 committee,
                 archived,
                 id,
-            } => wrap(self.on_archive_committee(committee, archived, id).await),
+            } => wrap(on_heap(|| self.on_archive_committee(committee, archived, id)).await),
             Request::ArchivedCommittees => wrap(
                 self.api
                     .me()
@@ -3432,14 +3430,14 @@ impl Shared {
                     .map(|me| me.archived)
                     .map_err(server_error),
             ),
-            Request::FindSession { senator } => wrap(self.on_find_session(senator).await),
-            Request::DefaultSecretary => wrap(self.on_default_secretary().await),
+            Request::FindSession { senator } => wrap(on_heap(|| self.on_find_session(senator)).await),
+            Request::DefaultSecretary => wrap(on_heap(|| self.on_default_secretary()).await),
             Request::EnsureSecretary => {
-                self.sessions_changed(wrap(self.on_ensure_secretary().await))
+                self.sessions_changed(wrap(on_heap(|| self.on_ensure_secretary()).await))
             }
-            Request::Roster => wrap(self.on_roster().await),
+            Request::Roster => wrap(on_heap(|| self.on_roster()).await),
             Request::SetAlias { senator, alias, committee } => {
-                wrap(self.on_set_alias(senator, alias, committee).await)
+                wrap(on_heap(|| self.on_set_alias(senator, alias, committee)).await)
             }
             Request::RemoveAlias {
                 primary,
@@ -3484,51 +3482,51 @@ impl Shared {
                     model,
                 };
                 let result = match attempt_id {
-                    Some(id) => self.on_spawn_attempt(&session, input, &id).await,
+                    Some(id) => on_heap(|| self.on_spawn_attempt(&session, input, &id)).await,
                     None => match self.resolve_spawn_order(input) {
-                        Ok(order) => self.on_hosted_spawn(&session, order).await,
+                        Ok(order) => on_heap(|| self.on_hosted_spawn(&session, order)).await,
                         Err(error) => return Reply::err(error),
                     },
                 };
                 self.sessions_changed(wrap(result))
             }
-            Request::RebindHost { host, to } => wrap(self.repair_agy_binding(&host, &to).await),
+            Request::RebindHost { host, to } => wrap(on_heap(|| self.repair_agy_binding(&host, &to)).await),
             Request::Restore {
                 session,
                 senator,
                 model,
-            } => self.sessions_changed(wrap(self.on_hosted_restore(&session, &senator, model).await)),
+            } => self.sessions_changed(wrap(on_heap(|| self.on_hosted_restore(&session, &senator, model)).await)),
             Request::Stop {
                 session,
                 senator,
                 force,
-            } => self.sessions_changed(wrap(self.on_hosted_stop(&session, &senator, force).await)),
+            } => self.sessions_changed(wrap(on_heap(|| self.on_hosted_stop(&session, &senator, force)).await)),
             Request::Pause {
                 senator,
                 force,
                 timeout_secs,
-            } => self.sessions_changed(wrap(self.on_pause(&senator, force, timeout_secs).await)),
+            } => self.sessions_changed(wrap(on_heap(|| self.on_pause(&senator, force, timeout_secs)).await)),
             Request::RestartHost { senator, host, force } => {
-                self.sessions_changed(wrap(self.on_restart_host(&senator, &host, force).await))
+                self.sessions_changed(wrap(on_heap(|| self.on_restart_host(&senator, &host, force)).await))
             }
             Request::Resume { senator } => {
-                self.sessions_changed(wrap(self.on_resume(&senator).await))
+                self.sessions_changed(wrap(on_heap(|| self.on_resume(&senator)).await))
             }
             Request::Replace {
                 senator,
                 prompt,
                 model,
-            } => self.sessions_changed(wrap(self.on_replace(&senator, prompt, model).await)),
-            Request::AttachInfo { target } => wrap(self.on_attach_info(target).await),
+            } => self.sessions_changed(wrap(on_heap(|| self.on_replace(&senator, prompt, model)).await)),
+            Request::AttachInfo { target } => wrap(on_heap(|| self.on_attach_info(target)).await),
             Request::AttachChoices => {
                 self.refresh_display_aliases().await;
                 let aliases = lock(&self.display_aliases).as_ref().map(|(_, a)| a.clone());
-                wrap(self.session_rows(false, aliases).await)
+                wrap(on_heap(|| self.session_rows(false, aliases)).await)
             }
-            Request::ResolveSessionRole { role } => wrap(self.resolve_session_role(role).await),
+            Request::ResolveSessionRole { role } => wrap(on_heap(|| self.resolve_session_role(role)).await),
             Request::SessionRoleNames => wrap(self.session_role_names()),
-            Request::Attach { senator } => wrap(self.on_attach(senator).await),
-            Request::Receipt { committee, seq } => wrap(self.receipt(&committee, seq).await),
+            Request::Attach { senator } => wrap(on_heap(|| self.on_attach(senator)).await),
+            Request::Receipt { committee, seq } => wrap(on_heap(|| self.receipt(&committee, seq)).await),
             Request::SetCommitteeSeat { committee, request } => {
                 let result = self.api.set_committee_seat(&committee, &request).await;
                 if result.is_ok() {
@@ -3550,27 +3548,27 @@ impl Shared {
                 Reply::err(IpcError::bad_request("local person socket only"))
             }
             Request::Profiles => wrap(Ok(&self.config.profiles)),
-            Request::Sessions => wrap(self.on_sessions(false).await),
+            Request::Sessions => wrap(on_heap(|| self.on_sessions(false)).await),
             Request::CommitteeThreads { committee, include_archived, limit, cursor } =>
-                wrap(self.on_committee_threads(committee, include_archived, limit, cursor).await),
-            Request::Stats { from, to, tz } => wrap(self.on_stats(from, to, &tz).await),
+                wrap(on_heap(|| self.on_committee_threads(committee, include_archived, limit, cursor)).await),
+            Request::Stats { from, to, tz } => wrap(on_heap(|| self.on_stats(from, to, &tz)).await),
             Request::SessionHistory { committee, before, limit } =>
-                wrap(self.on_history(committee, before, limit).await),
+                wrap(on_heap(|| self.on_history(committee, before, limit)).await),
             Request::SessionSearch { query, committee, limit, cursor } =>
-                wrap(self.on_history_search(query, committee, limit, cursor).await),
+                wrap(on_heap(|| self.on_history_search(query, committee, limit, cursor)).await),
             Request::SessionForget { session_id } =>
-                wrap(self.on_history_forget(session_id).await),
+                wrap(on_heap(|| self.on_history_forget(session_id)).await),
             Request::Timeline { session_id, direction, cursor, limit } =>
-                wrap(self.on_timeline(session_id, direction, cursor, limit).await),
-            Request::PruneHosts => wrap(self.on_prune_hosts().await),
+                wrap(on_heap(|| self.on_timeline(session_id, direction, cursor, limit)).await),
+            Request::PruneHosts => wrap(on_heap(|| self.on_prune_hosts()).await),
             Request::HookDropped(report) => {
                 self.on_hook_dropped(report);
                 Reply::ok(&())
             }
-            Request::Hook(report) => wrap(self.on_hook(report, false).await),
+            Request::Hook(report) => wrap(on_heap(|| self.on_hook(report, false)).await),
             Request::SessionHook(report) => {
                 let codex = report.runtime == Runtime::Codex;
-                let reply = wrap(self.on_hook(report, true).await);
+                let reply = wrap(on_heap(|| self.on_hook(report, true)).await);
                 if codex {
                     self.reconcile_approvals();
                 }
@@ -3595,21 +3593,21 @@ impl Shared {
                 session,
                 committee,
                 senator,
-            } => wrap(self.on_set_chair(&session, committee, senator, None).await),
-            Request::ChairDocket { session } => wrap(self.on_chair_docket(&session).await),
+            } => wrap(on_heap(|| self.on_set_chair(&session, committee, senator, None)).await),
+            Request::ChairDocket { session } => wrap(on_heap(|| self.on_chair_docket(&session)).await),
             Request::ChairRoute {
                 session,
                 seq,
                 to,
                 id,
-            } => wrap(self.on_chair_route(&session, seq, to, id).await),
+            } => wrap(on_heap(|| self.on_chair_route(&session, seq, to, id)).await),
             Request::ChairCover {
                 session,
                 thread,
                 body,
                 agent,
                 id,
-            } => wrap(self.on_chair_cover(&session, thread, body, agent, id).await),
+            } => wrap(on_heap(|| self.on_chair_cover(&session, thread, body, agent, id)).await),
             Request::SecretaryCover {
                 session,
                 thread,
@@ -3617,15 +3615,14 @@ impl Shared {
                 agent,
                 id,
             } => wrap(
-                self.on_secretary_cover(&session, thread, body, agent, id)
-                    .await,
+                on_heap(|| self.on_secretary_cover(&session, thread, body, agent, id)).await,
             ),
             Request::ChairEscalate {
                 session,
                 seq,
                 reason,
                 id,
-            } => wrap(self.on_chair_escalate(&session, seq, reason, id).await),
+            } => wrap(on_heap(|| self.on_chair_escalate(&session, seq, reason, id)).await),
             Request::Send {
                 session,
                 kind,
@@ -3634,30 +3631,29 @@ impl Shared {
                 body,
                 refs,
                 id,
-            } => wrap(self.on_send(&session, kind, to, at, body, refs, id).await),
+            } => wrap(on_heap(|| self.on_send(&session, kind, to, at, body, refs, id)).await),
             Request::Secretaries {
                 session,
                 action,
                 for_,
                 secretary,
-            } => wrap(self.on_secretaries(&session, action, for_, secretary).await),
-            Request::Roles => wrap(self.on_roles().await),
-            Request::Waiting { session_id } => wrap(self.on_waiting(&session_id).await),
+            } => wrap(on_heap(|| self.on_secretaries(&session, action, for_, secretary)).await),
+            Request::Roles => wrap(on_heap(|| self.on_roles()).await),
+            Request::Waiting { session_id } => wrap(on_heap(|| self.on_waiting(&session_id)).await),
             Request::SessionEnd { session_id, .. } => {
-                self.sessions_changed(wrap(self.on_session_end(&session_id, None).await))
+                self.sessions_changed(wrap(on_heap(|| self.on_session_end(&session_id, None)).await))
             }
             Request::HostedSessionEnd {
                 session_id,
                 host_id,
-            } => self.sessions_changed(wrap(self.on_session_end(&session_id, Some(&host_id)).await)),
+            } => self.sessions_changed(wrap(on_heap(|| self.on_session_end(&session_id, Some(&host_id))).await)),
             Request::HostedClaudeApproval {
                 session_id,
                 host_id,
                 at,
                 signal,
             } => wrap(
-                self.on_hosted_claude_approval(&session_id, &host_id, at, signal)
-                    .await,
+                on_heap(|| self.on_hosted_claude_approval(&session_id, &host_id, at, signal)).await,
             ),
 
             Request::Checkpoint {
@@ -3674,7 +3670,7 @@ impl Shared {
                     decisions,
                     open,
                 };
-                wrap(self.on_checkpoint(&session, summary, files, push, id).await)
+                wrap(on_heap(|| self.on_checkpoint(&session, summary, files, push, id)).await)
             }
             Request::Ask {
                 session,
@@ -3683,7 +3679,7 @@ impl Shared {
                 refs,
                 id,
                 request,
-            } => wrap(self.on_ask(&session, to, body, refs, id, request).await),
+            } => wrap(on_heap(|| self.on_ask(&session, to, body, refs, id, request)).await),
             Request::Answer {
                 session,
                 thread,
@@ -3698,30 +3694,30 @@ impl Shared {
                     agent,
                     as_person,
                 };
-                wrap(self.on_answer(&session, thread, body, id, acting).await)
+                wrap(on_heap(|| self.on_answer(&session, thread, body, id, acting)).await)
             }
-            Request::CatchUp { session, limit } => wrap(self.on_catch_up(&session, limit).await),
+            Request::CatchUp { session, limit } => wrap(on_heap(|| self.on_catch_up(&session, limit)).await),
             Request::Join { session, committee } => {
-                wrap(self.on_join(&session, committee, None).await)
+                wrap(on_heap(|| self.on_join(&session, committee, None)).await)
             }
             Request::JoinAs {
                 session,
                 committee,
                 senator,
-            } => wrap(self.on_join(&session, committee, Some(senator)).await),
+            } => wrap(on_heap(|| self.on_join(&session, committee, Some(senator))).await),
             Request::Search {
                 session,
                 query,
                 limit,
                 committee,
-            } => wrap(self.on_search(&session, committee, query, limit).await),
+            } => wrap(on_heap(|| self.on_search(&session, committee, query, limit)).await),
             Request::Memory {
                 session,
                 query,
                 limit,
                 all,
                 committee,
-            } => wrap(self.on_memory(&session, committee, query, limit, all).await),
+            } => wrap(on_heap(|| self.on_memory(&session, committee, query, limit, all)).await),
             Request::MemoryEdit {
                 session,
                 committee,
@@ -3729,8 +3725,7 @@ impl Shared {
                 text,
                 id,
             } => wrap(
-                self.on_memory_edit(&session, committee, targets, text, id)
-                    .await,
+                on_heap(|| self.on_memory_edit(&session, committee, targets, text, id)).await,
             ),
             Request::Post {
                 session,
@@ -3740,8 +3735,7 @@ impl Shared {
                 agent,
                 id,
             } => wrap(
-                self.on_post(&session, committee, agent, body, proposal, id)
-                    .await,
+                on_heap(|| self.on_post(&session, committee, agent, body, proposal, id)).await,
             ),
             Request::Duty {
                 session,
@@ -3751,10 +3745,9 @@ impl Shared {
                 as_person,
                 id,
             } => wrap(
-                self.on_duty(&session, committee, senator, duty, as_person, id)
-                    .await,
+                on_heap(|| self.on_duty(&session, committee, senator, duty, as_person, id)).await,
             ),
-            Request::Brief { session, committee } => wrap(self.on_brief(&session, committee).await),
+            Request::Brief { session, committee } => wrap(on_heap(|| self.on_brief(&session, committee)).await),
             Request::Bound { session } => wrap(self.on_bound(&session)),
             Request::Task {
                 session,
@@ -3770,7 +3763,7 @@ impl Shared {
                     agent,
                     as_person,
                 };
-                wrap(self.on_task(&session, thread, status, id, acting).await)
+                wrap(on_heap(|| self.on_task(&session, thread, status, id, acting)).await)
             }
             Request::Escalate {
                 session,
@@ -3778,13 +3771,13 @@ impl Shared {
                 to,
                 reason,
                 id,
-            } => wrap(self.on_escalate(&session, thread, to, reason, id).await),
+            } => wrap(on_heap(|| self.on_escalate(&session, thread, to, reason, id)).await),
             Request::Take {
                 session,
                 thread,
                 id,
                 committee,
-            } => wrap(self.on_take(&session, thread, id, committee).await),
+            } => wrap(on_heap(|| self.on_take(&session, thread, id, committee)).await),
             Request::Say {
                 session,
                 committee,
@@ -3795,35 +3788,33 @@ impl Shared {
                 thread,
                 id,
             } => wrap(
-                self.on_say(&session, committee, kind, to, at, body, thread, id)
-                    .await,
+                on_heap(|| self.on_say(&session, committee, kind, to, at, body, thread, id)).await,
             ),
             Request::ChatSend {
                 session,
                 committee,
                 request,
-            } => wrap(self.on_chat_send(&session, committee, request).await),
+            } => wrap(on_heap(|| self.on_chat_send(&session, committee, request)).await),
             Request::ChatThread {
                 session,
                 committee,
                 message_ref,
             } => wrap(
-                self.on_chat_thread(&session, committee, &message_ref)
-                    .await,
+                on_heap(|| self.on_chat_thread(&session, committee, &message_ref)).await,
             ),
             Request::Thread {
                 session,
                 committee,
                 thread,
                 mark_seen,
-            } => wrap(self.on_thread(&session, committee, thread, mark_seen).await),
+            } => wrap(on_heap(|| self.on_thread(&session, committee, thread, mark_seen)).await),
             Request::Seen { committee, marks } => wrap(self.on_seen(&committee, &marks)),
             Request::Inbox {
                 session,
                 committee,
                 agent,
                 all,
-            } => wrap(self.on_inbox(&session, committee, agent, all).await),
+            } => wrap(on_heap(|| self.on_inbox(&session, committee, agent, all)).await),
             Request::Approvals => Reply::ok(&ApprovalsReply {
                 approvals: self.relay.list(),
             }),
@@ -3833,7 +3824,7 @@ impl Shared {
                     .map(|approval| ApproveReply { approval, decision }),
             ),
             Request::ApproveSession { senator, decision } => {
-                wrap(self.on_approve_session(&senator, decision).await)
+                wrap(on_heap(|| self.on_approve_session(&senator, decision)).await)
             }
             // Served by the connection itself (`serve_connection`).
             Request::SessionDrop { .. } => Reply::err(IpcError::bad_request(
@@ -7414,6 +7405,25 @@ async fn serve_watch(
             return;
         }
     }
+}
+
+/// Start a handler's future on the heap, made in a frame of its own.
+///
+/// The daemon's dispatch is one `match` over every request, awaiting a
+/// handler in each arm. An unoptimised build gives every one of those
+/// futures its own place in dispatch's stack frame, used or not, and again
+/// in each frame above it: about 750 KiB for dispatch alone, on a 2 MiB
+/// worker stack, before a handler had run. Here the future exists only in
+/// this function's frame, which is gone before the future is polled; the
+/// caller keeps a pointer.
+#[inline(never)]
+pub(crate) fn on_heap<'a, T, F>(
+    make: impl FnOnce() -> F,
+) -> std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>
+where
+    F: Future<Output = T> + Send + 'a,
+{
+    Box::pin(make())
 }
 
 async fn supervise(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) {
