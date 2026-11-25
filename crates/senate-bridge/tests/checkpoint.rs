@@ -80,6 +80,59 @@ async fn checkpoint(h: &Harness, sid: &str, progress: Option<&str>, push: bool) 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn checkpoint_rejects_linked_destinations_and_does_not_read_omitted_notes() {
+    use std::os::unix::fs::symlink;
+
+    let mut h = Harness::new().await;
+    h.start().await;
+    let wd = repo(&h, "w1");
+    h.hook(HookKind::SessionStart, "s1", &wd, None).await;
+    let outside = h.dir.path().join("outside-note");
+    std::fs::write(&outside, "outside fixture").unwrap();
+    let note = wd.join(".senate/PROGRESS.md");
+    let request = Request::Checkpoint {
+        session: SessionSelector {
+            session_id: Some("s1".into()),
+            claude_pid: None,
+        },
+        summary: None,
+        progress: Some("submitted note".into()),
+        decisions: None,
+        open: None,
+        push: false,
+        id: None,
+    };
+    let socket = h.socket();
+    let send = || {
+        ipc::request::<CheckpointReply>(
+            &socket,
+            &request,
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+        )
+    };
+
+    symlink(&outside, &note).unwrap();
+    assert!(send().await.is_err());
+    std::fs::remove_file(&note).unwrap();
+    std::fs::hard_link(&outside, &note).unwrap();
+    assert!(send().await.is_err());
+    std::fs::remove_file(&note).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&outside).unwrap(),
+        "outside fixture"
+    );
+
+    symlink(&outside, wd.join(".senate/OPEN.md")).unwrap();
+    let reply = send().await.unwrap();
+    assert_eq!(reply.files, ["PROGRESS.md"]);
+    let stored = checkpoints(&h).pop().unwrap().0;
+    assert_eq!(stored.files.progress.as_deref(), Some("submitted note\n"));
+    assert!(stored.files.open.is_none());
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_tool_writes_the_files_and_a_handoff_pushes() {
     let mut h = Harness::new().await;
     h.start().await;
@@ -165,6 +218,7 @@ async fn the_tool_writes_the_files_and_a_handoff_pushes() {
     git(&wd, &["push", "origin", &format!("{saved}:main")]);
     git(&wd, &["config", "branch.autoSetupMerge", "false"]);
     git(&wd, &["switch", "-c", "new-topic", "origin/main"]);
+    senate_bridge::follow::sync(&h.paths, &senate_bridge::follow::tree_of(&wd).unwrap()).unwrap();
     assert_eq!(git(&wd, &["rev-parse", "HEAD"]), head);
     assert_eq!(
         git(
@@ -250,6 +304,7 @@ async fn commits_intervals_and_session_ends_checkpoint_on_their_own() {
     .await;
     git(&wd, &["config", "branch.autoSetupMerge", "false"]);
     git(&wd, &["switch", "-c", "untracked-topic", "origin/main"]);
+    senate_bridge::follow::sync(&h.paths, &senate_bridge::follow::tree_of(&wd).unwrap()).unwrap();
     let (fresh, _) = eventually("an automatic checkpoint for the new branch", WAIT, || {
         checkpoints(&h)
             .pop()

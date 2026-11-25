@@ -545,10 +545,18 @@ async fn a_checkpoint_carries_the_notes_and_committee_of_the_branch_checked_out(
     assert_eq!(b_payload.files.open.as_deref(), Some("- B waits\n"));
     assert_ne!(b_payload.commit, "", "a commit");
 
-    // Back to A with no command run: the first session's next checkpoint is
-    // A's, on A's committee, with A's notes exactly as they were.
+    // Sync the checked-out branch from the worktree, then supply A's notes.
     git(&alice.work, &["switch", "-q", BRANCH]);
-    let again = alice.checkpoint("s-alice", None, None, None).await;
+    let tree = senate_bridge::follow::tree_of(&alice.work).unwrap();
+    senate_bridge::follow::sync(&alice.paths, &tree).unwrap();
+    let again = alice
+        .checkpoint(
+            "s-alice",
+            Some(std::str::from_utf8(&a_files).unwrap()),
+            Some("- A decided"),
+            Some("- A waits"),
+        )
+        .await;
     assert_eq!(again.branch, BRANCH);
     assert_eq!(again.commit, head_a);
     assert_eq!(again.posted.committee, committee());

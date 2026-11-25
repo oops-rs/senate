@@ -495,6 +495,7 @@ impl HookDrops {
 }
 
 pub(crate) struct Shared {
+    scope_fixture: bool,
     #[cfg(target_os = "macos")]
     protected_hosting: bool,
     pub(crate) config: BridgeConfig,
@@ -909,6 +910,7 @@ async fn start_bridge(
     let fixture = debug_scope_fixture(paths.home(), fixture_bootstrap);
     let common = Common {
         local,
+        scope_fixture: fixture,
         #[cfg(target_os = "macos")]
         owned_codex_backends: scope.is_some(),
         #[cfg(target_os = "linux")]
@@ -1037,6 +1039,7 @@ async fn start_bridge(
 /// What every Senate's half of the daemon shares: one Codex transport and
 /// approvals relay, one watch channel, one companion configuration.
 struct Common {
+    scope_fixture: bool,
     local: Option<crate::client::LocalTransport>,
     owned_codex_backends: bool,
     #[cfg(target_os = "macos")]
@@ -1110,6 +1113,7 @@ impl Shared {
             home: common.home.clone(),
         });
         Ok(Arc::new(Shared {
+            scope_fixture: common.scope_fixture,
             #[cfg(target_os = "macos")]
             protected_hosting: common.protected_hosting,
             ladder: Ladder::new_default(
@@ -4865,49 +4869,67 @@ impl Shared {
 
     // ---- checkpoints -------------------------------------------------------
 
-    /// Make the session's worktree `.senate/` match the branch checked out
-    /// there now ([`crate::follow`]), and its committee what that says: a
-    /// checkpoint must carry the notes and committee of the branch it is
-    /// about, never the previous branch's. Returns the session as it is
-    /// now. An explicit `join` is not disturbed.
-    async fn follow_branch(&self, session: &Session) -> Session {
-        let paths = Paths::new(&self.home);
-        let (facts, _) = session::gather_synced(&paths, &session.cwd, Duration::from_secs(2)).await;
+    /// Refresh the session's branch and binding without running the branch
+    /// file-copy workflow from the daemon's checkpoint path.
+    async fn follow_branch(&self, session: &Session, root: &Path) -> Result<Session, IpcError> {
+        let branch = checkpoint::branch(root).await;
+        let directory =
+            crate::safe_path::Directory::open(root).and_then(|dir| dir.child(".senate", false));
+        let committee_file = match directory {
+            Ok(dir) => {
+                match dir.read(crate::follow::MARKER, 4096) {
+                    Ok(bytes)
+                        if crate::follow::checkpoint_marker_matches(&bytes, branch.as_deref()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => {
+                        return Err(IpcError::bad_request(
+                            "The .senate files are out of step with this branch. Run senate where in the worktree before checkpointing.",
+                        ));
+                    }
+                }
+                dir.read("committee", 4096)
+                    .ok()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(IpcError::bad_request(format!(
+                    "Cannot open the worktree .senate directory: {error}"
+                )));
+            }
+        };
         let inferred = session::infer_committee(
-            facts.branch.as_deref(),
-            facts.committee_file.as_deref(),
+            branch.as_deref(),
+            committee_file.as_deref(),
             self.convention.as_ref(),
         );
         let known = session
             .inferred_committee
             .clone()
             .zip(session.committee_source);
-        if facts.branch == session.branch && inferred == known {
-            return session.clone();
+        if branch == session.branch && inferred == known {
+            return Ok(session.clone());
         }
-        if let Err(e) = self.store.set_inferred(
-            &session.session_id,
-            facts.branch.as_deref(),
-            inferred.as_ref(),
-        ) {
+        if let Err(e) =
+            self.store
+                .set_inferred(&session.session_id, branch.as_deref(), inferred.as_ref())
+        {
             tracing::warn!("recording the session's branch: {e}");
-            return session.clone();
+            return Ok(session.clone());
         }
-        if facts.branch != session.branch && session.joined_committee.is_none() {
+        if branch != session.branch && session.joined_committee.is_none() {
             lock(&self.rebinds).insert(
                 session.session_id.clone(),
-                (
-                    facts.branch.clone(),
-                    inferred.as_ref().map(|(c, _)| c.clone()),
-                ),
+                (branch.clone(), inferred.as_ref().map(|(c, _)| c.clone())),
             );
         }
         self.committees_changed.notify_one();
-        self.store
+        Ok(self
+            .store
             .session(&session.session_id)
             .ok()
             .flatten()
-            .unwrap_or_else(|| session.clone())
+            .unwrap_or_else(|| session.clone()))
     }
 
     /// Append a snapshot as the session's agent.
@@ -4954,19 +4976,27 @@ impl Shared {
         &self,
         selector: &SessionSelector,
         summary: Option<String>,
-        files: CheckpointFiles,
+        mut files: CheckpointFiles,
         push: bool,
         id: Option<EventId>,
     ) -> Result<CheckpointReply, IpcError> {
         let session = self.resolve(selector)?;
-        let session = self.follow_branch(&session).await;
-        let committee = self.bound(&session)?;
-        let Some(root) = worktree(&session).await else {
+        let Some(root) = self.checkpoint_cwd(&session) else {
             return Err(IpcError::bad_request(format!(
                 "{} is not in a git worktree; a checkpoint records a branch and a commit",
                 session.cwd.display()
             )));
         };
+        let session = self.follow_branch(&session, &root).await?;
+        let committee = self.bound(&session)?;
+        for text in [&mut files.progress, &mut files.decisions, &mut files.open]
+            .into_iter()
+            .flatten()
+        {
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+        }
         let written = checkpoint::write_files(&root, &files).map_err(|e| {
             IpcError::internal(format!(
                 "writing the checkpoint files under {}: {e}",
@@ -4978,10 +5008,14 @@ impl Shared {
         } else {
             CheckpointTrigger::Tool
         };
-        let (payload, truncated) =
-            checkpoint::snapshot(&root, trigger, session.transcript_path.as_deref())
-                .await
-                .map_err(IpcError::bad_request)?;
+        let (payload, truncated) = checkpoint::snapshot(
+            &root,
+            trigger,
+            session.transcript_path.as_deref(),
+            Some(files),
+        )
+        .await
+        .map_err(IpcError::bad_request)?;
         let posted = self
             .append_checkpoint(&session, committee, &payload, summary, id)
             .await?;
@@ -5017,7 +5051,13 @@ impl Shared {
     /// skipped when the log's latest one of the session's agent already says
     /// the same. Another agent's checkpoint does not count.
     async fn auto_checkpoint(&self, session: &Session, trigger: CheckpointTrigger) {
-        let session = &self.follow_branch(session).await;
+        let Some(root) = self.checkpoint_cwd(session) else {
+            return;
+        };
+        let Ok(session) = self.follow_branch(session, &root).await else {
+            return;
+        };
+        let session = &session;
         let Some(committee) = session.committee().cloned() else {
             return;
         };
@@ -5026,11 +5066,8 @@ impl Shared {
         {
             return;
         }
-        let Some(root) = worktree(session).await else {
-            return;
-        };
         let Ok((payload, _)) =
-            checkpoint::snapshot(&root, trigger, session.transcript_path.as_deref()).await
+            checkpoint::snapshot(&root, trigger, session.transcript_path.as_deref(), None).await
         else {
             return;
         };
@@ -5070,16 +5107,18 @@ impl Shared {
         };
         let mut seen = BTreeSet::new();
         for session in sessions.iter().filter(|s| s.committee().is_some()) {
-            let refreshed = self.follow_branch(session).await;
-            let session = &refreshed;
-            if session.committee().is_none() {
-                continue;
-            }
-            let Some(root) = worktree(session).await else {
+            let Some(root) = self.checkpoint_cwd(session) else {
                 continue;
             };
             let key = (session.agent.clone(), root.clone());
             if !seen.insert(key.clone()) {
+                continue;
+            }
+            let Ok(refreshed) = self.follow_branch(session, &root).await else {
+                continue;
+            };
+            let session = &refreshed;
+            if session.committee().is_none() {
                 continue;
             }
             let Some(head) = checkpoint::head(&root).await else {
@@ -7388,11 +7427,34 @@ async fn checkpointer(shared: Arc<Shared>, mut shutdown: watch::Receiver<bool>) 
     }
 }
 
-/// The worktree root a session's checkpoints are about.
-async fn worktree(session: &Session) -> Option<PathBuf> {
-    match &session.git_root {
-        Some(root) => Some(root.clone()),
-        None => checkpoint::toplevel(&session.cwd).await,
+impl Shared {
+    /// Resolve the worktree from a live process already bound to the session.
+    /// The hook's git_root/cwd claims are not checkpoint paths.
+    fn checkpoint_cwd(&self, session: &Session) -> Option<PathBuf> {
+        if self.scope_fixture {
+            return Some(session.git_root.as_ref().unwrap_or(&session.cwd).clone());
+        }
+        let owner = match self.store.session_host(&session.session_id).ok()? {
+            Some(host) => crate::host::actor_owner(&Paths::new(&self.home), &host)?,
+            None => self
+                .store
+                .verified_native_owner(&session.session_id)
+                .ok()??,
+        };
+        if !owner.live() {
+            return None;
+        }
+        let cwd = kernel_process::cwd(owner.pid).ok()?;
+        if !owner.live() {
+            return None;
+        }
+        for candidate in cwd.ancestors() {
+            let dir = crate::safe_path::Directory::open(candidate).ok()?;
+            if dir.has_git_entry().ok()? {
+                return Some(candidate.to_path_buf());
+            }
+        }
+        None
     }
 }
 

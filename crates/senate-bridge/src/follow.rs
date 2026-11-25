@@ -153,6 +153,11 @@ struct Marker {
     pending: Option<SlotKey>,
 }
 
+pub(crate) fn checkpoint_marker_matches(bytes: &[u8], branch: Option<&str>) -> bool {
+    serde_json::from_slice::<Marker>(bytes)
+        .is_ok_and(|marker| marker.pending.is_none() && marker.key.branch() == branch)
+}
+
 /// What `slot.json` says about a saved copy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotMeta {

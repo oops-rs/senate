@@ -96,6 +96,7 @@ pub mod preside;
 #[doc(hidden)]
 pub mod remote;
 pub mod routing;
+mod safe_path;
 pub mod service;
 pub mod session;
 pub mod sessions;
