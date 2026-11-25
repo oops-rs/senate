@@ -331,3 +331,24 @@ Platform references include [XNU coalitions](https://github.com/apple-oss-distri
 [XNU Unix socket credentials](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/uipc_usrreq.c),
 [Apple XPC per-message requirements](https://developer.apple.com/documentation/xpc/xpc_connection_set_peer_lightweight_code_requirement(_:_:)),
 and [Linux cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html).
+
+
+Explicit checkpoints publish the notes supplied in the request. Automatic
+checkpoints still read the note files. Both use a worktree located from the
+verified session process. Worktree paths and note files are opened without
+following symlinks. Checkpoint writes replace singly linked regular files by renaming a
+temporary file in the opened note directory. If the branch changed and its
+note files still belong to the old branch, the checkpoint waits for the
+worktree's normal sync. Run `senate where` in the worktree to sync manually.
+
+## Known open items
+
+Review references below are to `docs/observe-review-6.md` at `96bea1c1`.
+
+- M2 — Legacy Hook pins can claim an offline senator's name.
+- M3 — A routed desk-worker thread can relay internal replies as final answers.
+- M4 — MCP checkpoint pushes can run programs selected by repository Git configuration.
+- L1 — Desk routing can use destinations outside the grant and can act on revoked roots.
+- L2 — The first agent can become chair without a separate presence check.
+- L3 — Host-switch bylines and Claude approval signals have remaining gaps. Checkpoint metadata still runs read-only Git commands.
+- L4 — Paired attach has remaining device binding, publication recheck and prompt-rate gaps.

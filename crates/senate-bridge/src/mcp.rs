@@ -610,7 +610,7 @@ away and whoever picks the work up knows where it stands. Keep three Markdown fi
 the worktree and pass any you changed: `progress` (`.senate/PROGRESS.md`: done / in progress / \
 next), `decisions` (`.senate/DECISIONS.md`: local decisions, each with the Senate seq it came \
 from) and `open` (`.senate/OPEN.md`: questions you are waiting on, with their thread seqs). Each \
-one given replaces that file; omitted ones are sent as they are on disk. The bridge adds your \
+one given replaces that file; omitted ones are left out of this checkpoint. The bridge adds your \
 branch, commit and whether the commit is on the remote; code never leaves the laptop. `summary`: \
 one line for the log. `push`: also push the branch first (`git push origin HEAD:<branch>`); set \
 it only when your user asks for a handoff (`/senate handoff`). The bridge also checkpoints on \

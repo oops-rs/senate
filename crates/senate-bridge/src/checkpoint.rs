@@ -1,20 +1,10 @@
 //! Checkpoints: the handover note a session's agent leaves in the log.
 //!
-//! The agent keeps three Markdown files in its worktree,
-//! `<git root>/.senate/{PROGRESS,DECISIONS,OPEN}.md`. A checkpoint reads
-//! them (after the `checkpoint` tool has written whatever it was given),
-//! adds what git says about the worktree — branch, commit, `origin`'s URL
-//! without credentials, and whether the branch’s upstream contains the
-//! commit — and the daemon appends it as a `checkpoint` event
-//! ([`senate_core::CheckpointPayload`]). Files too big for
-//! [`MAX_CHECKPOINT_BYTES`] are cut, largest first.
+//! The daemon combines submitted checkpoint notes with read-only Git metadata.
+//! Explicit checkpoints record the submitted notes; automatic checkpoints
+//! read the current files beneath the verified worktree.
 //!
-//! The bridge never pushes on its own: only `checkpoint(push=true)` (what
-//! `/senate handoff` calls) runs `git push origin HEAD:<branch>`, and it
-//! refuses on a detached `HEAD` or without an `origin` remote; the
-//! checkpoint is written either way, with the refusal reported.
-//!
-//! Every git command runs with a timeout and never prompts
+////! Every git command runs with a timeout and never prompts
 //! (`GIT_TERMINAL_PROMPT=0`).
 
 use std::path::{Path, PathBuf};
@@ -35,15 +25,23 @@ pub const TRUNCATED: &str = "\n\n…(truncated to fit the checkpoint)";
 
 /// Run git in `dir`; its trimmed stdout, or why it failed.
 pub async fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
-    let run = tokio::process::Command::new("git")
+    let directory = crate::safe_path::Directory::open(dir).map_err(|error| error.to_string())?;
+    let mut command = tokio::process::Command::new("git");
+    command
         .args(args)
-        .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    // SAFETY: the child only makes the async-signal-safe fchdir syscall
+    // before exec. The captured descriptor lives through the syscall.
+    #[allow(unsafe_code)]
+    unsafe {
+        command.pre_exec(move || rustix::process::fchdir(directory.fd()).map_err(Into::into));
+    }
+    let run = command.output();
     match tokio::time::timeout(timeout, run).await {
         Err(_) => Err(format!("git {} timed out", args.join(" "))),
         Ok(Err(e)) => Err(format!("running git: {e}")),
@@ -161,51 +159,48 @@ pub async fn push(dir: &Path) -> Result<String, String> {
     })
 }
 
-fn file_paths(root: &Path) -> [(PathBuf, &'static str); 3] {
-    let dir = root.join(CHECKPOINT_DIR);
-    [
-        (dir.join(PROGRESS_FILE), PROGRESS_FILE),
-        (dir.join(DECISIONS_FILE), DECISIONS_FILE),
-        (dir.join(OPEN_FILE), OPEN_FILE),
-    ]
-}
-
-/// Write the given files under `<root>/.senate/`; the names written.
+/// Write checkpoint files relative to a pinned worktree directory.
 pub fn write_files(root: &Path, files: &CheckpointFiles) -> std::io::Result<Vec<&'static str>> {
-    let [progress, decisions, open] = file_paths(root);
+    if files.progress.is_none() && files.decisions.is_none() && files.open.is_none() {
+        return Ok(Vec::new());
+    }
+    let dir = crate::safe_path::Directory::open(root)?.child(CHECKPOINT_DIR, true)?;
     let mut written = Vec::new();
-    for ((path, name), text) in [
-        (progress, &files.progress),
-        (decisions, &files.decisions),
-        (open, &files.open),
+    if matches!(dir.read(".gitignore", 1), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        dir.replace(".gitignore", b"*\n", 2)?;
+    }
+    for (name, text) in [
+        (PROGRESS_FILE, &files.progress),
+        (DECISIONS_FILE, &files.decisions),
+        (OPEN_FILE, &files.open),
     ] {
         if let Some(text) = text {
-            // The directory comes with its own `.gitignore`: nothing in
-            // it is ever committed.
-            crate::session::ensure_senate_dir(root)?;
             let mut text = text.clone();
             if !text.ends_with('\n') {
                 text.push('\n');
             }
-            std::fs::write(&path, text)?;
+            dir.replace(name, text.as_bytes(), MAX_CHECKPOINT_BYTES)?;
             written.push(name);
         }
     }
     Ok(written)
 }
 
-/// The three files as they are now; a missing or unreadable file is `None`.
-pub fn read_files(root: &Path) -> CheckpointFiles {
-    let [progress, decisions, open] = file_paths(root);
-    let read = |(path, _): (PathBuf, &str)| {
-        std::fs::read(path)
+fn read_files(root: &Path) -> CheckpointFiles {
+    let dir =
+        crate::safe_path::Directory::open(root).and_then(|root| root.child(CHECKPOINT_DIR, false));
+    let read = |name| {
+        dir.as_ref()
+            .ok()?
+            .read(name, MAX_CHECKPOINT_BYTES)
             .ok()
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
     };
     CheckpointFiles {
-        progress: read(progress),
-        decisions: read(decisions),
-        open: read(open),
+        progress: read(PROGRESS_FILE),
+        decisions: read(DECISIONS_FILE),
+        open: read(OPEN_FILE),
     }
 }
 
@@ -232,12 +227,12 @@ pub fn fit(payload: &mut CheckpointPayload) -> bool {
     cut
 }
 
-/// What a checkpoint of the worktree at `root` says now. `transcript`: the
-/// session's transcript path, recorded only as existing or not.
+/// Read the Git facts for a checkpoint and bound the caller-supplied notes.
 pub async fn snapshot(
     root: &Path,
     trigger: CheckpointTrigger,
     transcript: Option<&str>,
+    files: Option<CheckpointFiles>,
 ) -> Result<(CheckpointPayload, bool), String> {
     let Some(commit) = head(root).await else {
         return Err(format!(
@@ -252,7 +247,7 @@ pub async fn snapshot(
         commit,
         pushed,
         remote_url,
-        files: read_files(root),
+        files: files.unwrap_or_else(|| read_files(root)),
         session_transcript: transcript.is_some_and(|t| Path::new(t).exists()),
         trigger,
     };
@@ -298,6 +293,34 @@ mod tests {
         assert_eq!(p.files.decisions.as_deref(), Some("dddddddddd"));
     }
 
+    #[test]
+    fn automatic_notes_refuse_links_and_linked_note_directories() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let note = outside.path().join(OPEN_FILE);
+        std::fs::write(&note, "outside fixture").unwrap();
+        let dir = root.path().join(CHECKPOINT_DIR);
+        symlink(outside.path(), &dir).unwrap();
+        assert_eq!(read_files(root.path()), CheckpointFiles::default());
+        assert!(
+            write_files(
+                root.path(),
+                &CheckpointFiles {
+                    open: Some("inside".into()),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        std::fs::remove_file(&dir).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        symlink(&note, dir.join(OPEN_FILE)).unwrap();
+        assert_eq!(read_files(root.path()), CheckpointFiles::default());
+        assert_eq!(std::fs::read_to_string(note).unwrap(), "outside fixture");
+    }
+
     #[tokio::test]
     async fn files_round_trip_through_the_worktree() {
         let dir = tempfile::tempdir().unwrap();
@@ -315,7 +338,7 @@ mod tests {
         assert_eq!(files.progress.as_deref(), Some("- done\n"));
         assert_eq!(files.decisions, None);
         assert!(
-            snapshot(dir.path(), CheckpointTrigger::Tool, None)
+            snapshot(dir.path(), CheckpointTrigger::Tool, None, None)
                 .await
                 .is_err(),
             "not a git worktree"

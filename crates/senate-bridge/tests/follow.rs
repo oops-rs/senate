@@ -750,7 +750,7 @@ fn checkpoints(h: &Harness, committee: &str) -> Vec<(CheckpointPayload, Event)> 
         .collect()
 }
 
-async fn checkpoint_tool(h: &Harness, sid: &str) -> CheckpointReply {
+async fn checkpoint_tool(h: &Harness, sid: &str) -> Result<CheckpointReply, ipc::ClientError> {
     ipc::request(
         &h.socket(),
         &Request::Checkpoint {
@@ -766,11 +766,10 @@ async fn checkpoint_tool(h: &Harness, sid: &str) -> CheckpointReply {
         Duration::from_secs(30),
     )
     .await
-    .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_checkpoint_right_after_a_switch_carries_the_checked_out_branchs_notes_and_committee() {
+async fn an_explicit_checkpoint_waits_for_branch_files_and_only_publishes_submitted_notes() {
     let mut h = Harness::new().await;
     h.start().await;
     let wd = repo(h.dir.path(), "r", "a");
@@ -783,28 +782,30 @@ async fn a_checkpoint_right_after_a_switch_carries_the_checked_out_branchs_notes
     h.hook(HookKind::SessionStart, "s1", &wd, None).await;
     let before = dot_git(&wd);
 
-    let reply = checkpoint_tool(&h, "s1").await;
+    let reply = checkpoint_tool(&h, "s1").await.unwrap();
     assert_eq!(reply.branch, "a");
     assert_eq!(reply.posted.committee.as_str(), "refund-v2");
     let (payload, event) = checkpoints(&h, "refund-v2").pop().unwrap();
-    assert_eq!(
-        payload.files.progress.as_deref(),
-        Some("## progress A\n- done A\n")
-    );
+    assert_eq!(payload.files, senate_core::CheckpointFiles::default());
     assert_eq!(event.refs.as_ref().unwrap().branch.as_deref(), Some("a"));
 
-    // The worktree is switched; no hook has run since. The checkpoint tool
-    // swaps first, re-binds the session, and speaks for `b` on b's committee.
+    // A branch switch leaves its old files in place until the worktree
+    // runs the usual sync. The daemon must leave those files alone.
     git(&wd, &["switch", "-q", "b"]);
-    let reply = checkpoint_tool(&h, "s1").await;
+    assert!(
+        checkpoint_tool(&h, "s1")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("out of step")
+    );
+    assert!(checkpoints(&h, "other").is_empty());
+    follow::sync(&h.paths, &tree(&wd)).unwrap();
+    let reply = checkpoint_tool(&h, "s1").await.unwrap();
     assert_eq!(reply.branch, "b");
     assert_eq!(reply.posted.committee.as_str(), "other");
     let (payload, event) = checkpoints(&h, "other").pop().unwrap();
-    assert_eq!(
-        payload.files.progress.as_deref(),
-        Some("## progress B\n- done B\n")
-    );
-    assert_eq!(payload.files.open.as_deref(), Some("- waiting B\n"));
+    assert_eq!(payload.files, senate_core::CheckpointFiles::default());
     assert_eq!(event.refs.as_ref().unwrap().branch.as_deref(), Some("b"));
     // Never B's notes on A's committee.
     for (p, _) in checkpoints(&h, "refund-v2") {
@@ -817,7 +818,7 @@ async fn a_checkpoint_right_after_a_switch_carries_the_checked_out_branchs_notes
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_commit_triggered_checkpoint_swaps_first_too() {
+async fn the_commit_triggered_checkpoint_waits_for_worktree_branch_sync() {
     let mut h = Harness::new().await;
     h.start_with(senate_bridge::Timing {
         checkpoint_poll: Duration::from_millis(150),
@@ -846,6 +847,7 @@ async fn the_commit_triggered_checkpoint_swaps_first_too() {
     // Switch to b and commit there: the poll sees a new HEAD.
     git(&wd, &["switch", "-q", "b"]);
     let head = commit(&wd, "b.txt");
+    follow::sync(&h.paths, &tree(&wd)).unwrap();
     let (payload, _) = eventually("a commit checkpoint on b's committee", WAIT, || {
         checkpoints(&h, "other").pop()
     })
