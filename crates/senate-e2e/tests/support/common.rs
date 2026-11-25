@@ -663,17 +663,23 @@ pub fn fast_timing() -> Timing {
     }
 }
 
+pub async fn start_fixture_bridge(options: DaemonOptions) -> DaemonHandle {
+    let host_binary = std::env::current_exe().unwrap().with_file_name("senate");
+    daemon::start_with_host_binary(options, host_binary)
+        .await
+        .unwrap()
+}
+
 impl Laptop {
     /// Open the lid: start the daemon.
     pub async fn open(&mut self) {
-        let handle = daemon::start(DaemonOptions {
+        let handle = start_fixture_bridge(DaemonOptions {
             paths: self.paths.clone(),
             config: self.config.clone(),
             timing: fast_timing(),
             desktop: None,
         })
-        .await
-        .unwrap();
+        .await;
         self.daemon = Some(handle);
     }
 
