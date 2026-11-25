@@ -2,6 +2,7 @@
 #include <stdatomic.h>
 #include <dispatch/dispatch.h>
 #include <mach/message.h>
+#include <ApplicationServices/ApplicationServices.h>
 #include <Security/Security.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,10 @@
 #define MAX_FRAME (1024 * 1024)
 
 extern void xpc_dictionary_get_audit_token(xpc_object_t, audit_token_t *);
+
+bool senate_accessibility_trusted(void) {
+    return AXIsProcessTrusted();
+}
 
 static SecRequirementRef senate_requirement(const char *expression) {
     CFStringRef source = CFStringCreateWithCString(NULL, expression, kCFStringEncodingUTF8);

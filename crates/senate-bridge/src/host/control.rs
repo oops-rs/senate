@@ -142,14 +142,23 @@ pub(super) async fn next_stop(
     tty: &Tty,
     paths: &Paths,
     host: &EventId,
+    admission: &super::Admission,
 ) -> UnixStream {
     loop {
         let (mut stream, _) = accept(listener).await;
+        if !admission.is_daemon(&stream) {
+            tracing::warn!(%host, "refused a terminal control request from an unverified daemon peer");
+            continue;
+        }
         let Ok(Ok(Some(line))) =
             tokio::time::timeout(HANDSHAKE, ipc::read_line(&mut BufReader::new(&mut stream))).await
         else {
             continue;
         };
+        if let Ok(GrantViewer { viewer }) = serde_json::from_str::<GrantViewer>(&line) {
+            let _ = stream.write_u8(u8::from(admission.grant(viewer))).await;
+            continue;
+        }
         if let Ok(NudgeRequest { nudge }) = serde_json::from_str::<NudgeRequest>(&line) {
             nudge_once(
                 &mut stream,
@@ -217,6 +226,52 @@ pub(super) async fn next_stop(
         let _ = stream.write_u8(ACCEPTED).await;
         return stream;
     }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GrantViewer {
+    viewer: super::ViewTicket,
+}
+
+pub(crate) async fn grant_viewer(
+    paths: &Paths,
+    host: &EventId,
+    peer: u32,
+    writable: bool,
+) -> Result<String, IpcError> {
+    let peer = crate::kernel_process::inspect(peer)
+        .and_then(|process| crate::kernel_process::BoundProcess::capture(process.identity))
+        .map_err(IpcError::internal)?;
+    let mut nonce = [0u8; 32];
+    getrandom::fill(&mut nonce).map_err(IpcError::internal)?;
+    let nonce = hex::encode(nonce);
+    let mut frame = serde_json::to_vec(&GrantViewer {
+        viewer: super::ViewTicket {
+            peer,
+            writable,
+            nonce: nonce.clone(),
+        },
+    })
+    .map_err(IpcError::internal)?;
+    frame.push(b'\n');
+    tokio::time::timeout(HANDSHAKE, async {
+        let mut stream = UnixStream::connect(socket(paths, host)).await?;
+        stream.write_all(&frame).await?;
+        stream.read_u8().await
+    })
+    .await
+    .map_err(IpcError::internal)?
+    .map_err(IpcError::internal)
+    .and_then(|accepted| {
+        if accepted == 1 {
+            Ok(nonce)
+        } else {
+            Err(IpcError::bad_request(
+                "The terminal host declined the viewer",
+            ))
+        }
+    })
 }
 
 /// Type the nudge into the TUI, unless a viewer typed within `quiet` or

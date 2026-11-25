@@ -137,17 +137,18 @@ impl Front {
         Ok(crate::host::actor_owner(&paths, &host))
     }
 
-    pub(super) fn verify_role_owner(
+    pub(super) fn verify_selector_owner(
         &self,
         peer: Option<u32>,
         selector: &SessionSelector,
-    ) -> Result<(), IpcError> {
+    ) -> Result<String, IpcError> {
         let no_owner =
             || IpcError::bad_request("The caller has no verified authority for that session");
         let (_, session) = self
             .locate_with_activity(selector, false)
             .ok_or_else(no_owner)?;
-        self.verify_session_instance(peer, &session)
+        self.verify_session_instance(peer, &session)?;
+        Ok(session.session_id)
     }
 
     pub(super) fn verify_session_instance(
@@ -160,6 +161,18 @@ impl Front {
         let peer = peer.ok_or_else(no_owner)?;
         if !session.is_live() {
             return Err(no_owner());
+        }
+        if Shared::is_companion(session) {
+            let live = self.senates.iter().any(|shared| {
+                lock(&shared.companion).as_ref().is_some_and(|running| {
+                    running.session_id == session.session_id
+                        && running
+                            .owner
+                            .as_ref()
+                            .is_some_and(|owner| owner.contains(peer, 64))
+                })
+            });
+            return if live { Ok(()) } else { Err(no_owner()) };
         }
         let owner = match self.hosted_actor(&session.session_id, session.runtime)? {
             Some(owner) => owner,
@@ -664,8 +677,8 @@ impl Front {
                 )
             }
             request => {
-                if let Some(selector) = approval_guard::role_selector(&request)
-                    && let Err(error) = self.verify_role_owner(session_peer, selector)
+                if let Some(selector) = approval_guard::session_selector(&request)
+                    && let Err(error) = self.verify_selector_owner(session_peer, selector)
                 {
                     return Reply::err(error);
                 }
@@ -933,36 +946,121 @@ impl Front {
     }
 }
 
-/// The session a request names, for the requests that name one.
-fn selector_of(request: &Request) -> Option<&SessionSelector> {
-    match request {
-        Request::Ask { session, .. }
-        | Request::Answer { session, .. }
-        | Request::Spawn { session, .. }
-        | Request::Restore { session, .. }
-        | Request::Stop { session, .. }
-        | Request::CatchUp { session, .. }
-        | Request::Join { session, .. }
-        | Request::JoinAs { session, .. }
-        | Request::Search { session, .. }
-        | Request::Memory { session, .. }
-        | Request::MemoryEdit { session, .. }
-        | Request::Post { session, .. }
-        | Request::Brief { session, .. }
-        | Request::Bound { session }
-        | Request::Task { session, .. }
-        | Request::Escalate { session, .. }
-        | Request::Take { session, .. }
-        | Request::Inbox { session, .. }
-        | Request::Checkpoint { session, .. }
-        | Request::Send { session, .. }
-        | Request::Secretaries { session, .. }
-        | Request::SecretaryWork { session, .. }
-        | Request::ChairDocket { session }
-        | Request::ChairRoute { session, .. }
-        | Request::ChairCover { session, .. }
-        | Request::SecretaryCover { session, .. }
-        | Request::ChairEscalate { session, .. } => Some(session),
-        _ => None,
-    }
+// Use the same exhaustive projection for reading a selector and replacing
+// it with the concrete, authorized session before dispatch.
+macro_rules! request_selector {
+    ($request:expr) => {
+        match $request {
+            Request::Ask { session, .. }
+            | Request::Answer { session, .. }
+            | Request::Spawn { session, .. }
+            | Request::Restore { session, .. }
+            | Request::Stop { session, .. }
+            | Request::CatchUp { session, .. }
+            | Request::Join { session, .. }
+            | Request::JoinAs { session, .. }
+            | Request::Search { session, .. }
+            | Request::Memory { session, .. }
+            | Request::MemoryEdit { session, .. }
+            | Request::Post { session, .. }
+            | Request::Brief { session, .. }
+            | Request::Bound { session, .. }
+            | Request::Task { session, .. }
+            | Request::Escalate { session, .. }
+            | Request::Take { session, .. }
+            | Request::Inbox { session, .. }
+            | Request::Checkpoint { session, .. }
+            | Request::Send { session, .. }
+            | Request::Secretaries { session, .. }
+            | Request::SecretaryWork { session, .. }
+            | Request::ChairDocket { session, .. }
+            | Request::ChairRoute { session, .. }
+            | Request::ChairCover { session, .. }
+            | Request::SecretaryCover { session, .. }
+            | Request::ChairEscalate { session, .. }
+            | Request::SetCard { session, .. }
+            | Request::DeskOpenCommittee { session, .. }
+            | Request::Duty { session, .. }
+            | Request::Say { session, .. }
+            | Request::ChatSend { session, .. }
+            | Request::ChatThread { session, .. }
+            | Request::Thread { session, .. }
+            | Request::Presides { session, .. }
+            | Request::Docket { session, .. }
+            | Request::Route { session, .. }
+            | Request::Cover { session, .. }
+            | Request::Hold { session, .. }
+            | Request::Refer { session, .. }
+            | Request::SpeakerAlias { session, .. }
+            | Request::SpeakerUnseat { session, .. }
+            | Request::Forward { session, .. }
+            | Request::Refuse { session, .. }
+            | Request::SetChair { session, .. } => Some(session),
+            Request::RemoteControl { .. }
+            | Request::ObserveAdmin { .. }
+            | Request::Ping
+            | Request::Status
+            | Request::Profiles
+            | Request::HookDropped(..)
+            | Request::Hook(..)
+            | Request::SessionHook(..)
+            | Request::NativeAuthorityCandidate { .. }
+            | Request::AuthorizeNativeAuthority { .. }
+            | Request::RebindHost { .. }
+            | Request::Replace { .. }
+            | Request::Pause { .. }
+            | Request::Resume { .. }
+            | Request::Sessions
+            | Request::SessionDrop { .. }
+            | Request::Stats { .. }
+            | Request::SessionHistory { .. }
+            | Request::SessionSearch { .. }
+            | Request::SessionForget { .. }
+            | Request::Timeline { .. }
+            | Request::CommitteeThreads { .. }
+            | Request::ActivityWatch { .. }
+            | Request::TimelineWatch { .. }
+            | Request::PruneHosts
+            | Request::AttachInfo { .. }
+            | Request::AttachChoices
+            | Request::ResolveSessionRole { .. }
+            | Request::SessionRoleNames
+            | Request::Attach { .. }
+            | Request::OpenViewer { .. }
+            | Request::Waiting { .. }
+            | Request::SessionEnd { .. }
+            | Request::HostedSessionEnd { .. }
+            | Request::HostedClaudeApproval { .. }
+            | Request::OpenCommittee { .. }
+            | Request::ArchiveCommittee { .. }
+            | Request::ArchivedCommittees
+            | Request::FindSession { .. }
+            | Request::DefaultSecretary
+            | Request::EnsureSecretary
+            | Request::Roster
+            | Request::SetAlias { .. }
+            | Request::Aliases
+            | Request::RemoveAlias { .. }
+            | Request::Receipt { .. }
+            | Request::SetCommitteeSeat { .. }
+            | Request::Seen { .. }
+            | Request::DeskItem { .. }
+            | Request::DeskDecide { .. }
+            | Request::SetSecretarySession { .. }
+            | Request::Desk { .. }
+            | Request::Roles
+            | Request::Approvals
+            | Request::Approve { .. }
+            | Request::ApproveSession { .. }
+            | Request::Watch { .. } => None,
+        }
+    };
+}
+
+pub(crate) fn selector_of(request: &Request) -> Option<&SessionSelector> {
+    request_selector!(request)
+}
+
+pub(super) fn selector_mut(request: &mut Request) -> Option<&mut SessionSelector> {
+    request_selector!(request)
 }

@@ -1493,6 +1493,7 @@ pub struct PersonApprovalPrompt {
     pub id: String,
     pub display: String,
     pub reason: String,
+    pub age_seconds: u64,
 }
 
 #[uniffi::export]
@@ -1503,6 +1504,7 @@ pub fn person_approval_prompts(home: String) -> Vec<PersonApprovalPrompt> {
             id: prompt.id.to_string(),
             display: prompt.display,
             reason: prompt.reason,
+            age_seconds: prompt.age_seconds,
         })
         .collect()
 }

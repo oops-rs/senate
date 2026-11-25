@@ -97,6 +97,25 @@ line publication and withdrawal, native-seat authorization, rebind, chair,
 secretary, role-alias and seat changes, committee archive and unarchive,
 remote-machine administration and pairing, card writes, and operator-only
 host stop, restore, pause, resume and replacement require a local decision.
+History deletion and opening a writable terminal viewer also require local
+authorization. Routine CLI speech uses the operator proof without a presence
+prompt. Requests naming a session use its verified runtime instance.
+
+New terminal hosts admit daemon control commands by process instance and
+check one-use viewer tickets with a five-second lifetime. The ticket binds
+the viewer's process generation and the read or write mode. The daemon
+issues read-only tickets after verifying the operator. A locally authenticated
+writable viewer can reuse the authorization within the same controlling
+TTY and live session-leader instance for at most 12 hours. Missing kernel
+identity disables reuse. Programs sharing that same TTY share the scope.
+Existing hosts must be restarted to pick up the host socket checks. On
+macOS a replacement daemon needs the installed daemon code pin to regain
+control of an existing host. Recovery after an unsigned or Linux daemon
+restart requires a fresh host at present.
+
+These viewer checks cover the terminal host's control, input and screen
+sockets. The dedicated Codex backend socket has a separate protocol and
+still needs receiver-side authentication.
 
 The CLI waits while the pinned app shows the request and requester derived
 from kernel process data. LocalAuthentication uses a fresh context with the
@@ -113,8 +132,15 @@ Client confirmation flags carry no authority.
 The system mediates biometric and password authentication. An ordinary
 Accessibility click carries no biometric evidence and transfers no OS consent
 result to Senate. A tool with UI automation rights can still drive ordinary
-app buttons. Control of the trusted app, usable login credentials, and a
-person accepting a misleading request are outside this guarantee.
+app buttons. A terminal emulator with Accessibility or Automation rights
+can also carry those grants to tools run through it. Check the terminal
+emulators and automation grants in System Settings under Privacy & Security.
+Doctor checks only whether macOS trusts the invoking process for Accessibility.
+It can also warn about indexed team-signed copies with a different code hash.
+Compare the requester's PID and TTY in the authentication sheet to the
+terminal you used. The app cannot independently identify the foreground tab.
+Control of the trusted app, usable login credentials, and a person accepting
+a misleading request are outside this guarantee.
 
 Install or upgrade from the operator's terminal with
 `senate setup service install --yes --app /path/to/Senate.app`. The installer
@@ -130,6 +156,8 @@ release option. This branch does not establish usability of any particular
 private signing key by a hosted agent. Doctor reports a missing, changed, or
 inactive app pin. Unsigned development appliances have no trusted presence
 path. The installed files and pin are part of the trusted-files assumption.
+Pin replacement protection and a tamper-resistant opt-in for app approval
+authentication are pending.
 
 XNU's Unix peer token resolves the socket's last PID when queried. Per-message
 Mach attestation checks the process generation and app identity.

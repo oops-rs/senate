@@ -13,6 +13,7 @@ pub struct Prompt {
     pub id: EventId,
     pub display: String,
     pub reason: String,
+    pub age_seconds: u64,
 }
 
 #[cfg(target_os = "macos")]
@@ -40,6 +41,7 @@ mod queue {
     struct State {
         last_app_poll: Option<Instant>,
         waiting: BTreeMap<EventId, Pending>,
+        terminals: Vec<(Instant, crate::kernel_process::TerminalIdentity)>,
     }
 
     pub(crate) struct ConfirmedRequest(Request);
@@ -79,6 +81,28 @@ mod queue {
     }
 
     impl Queue {
+        pub(crate) fn terminal_ok(
+            &self,
+            terminal: &crate::kernel_process::TerminalIdentity,
+        ) -> bool {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let now = Instant::now();
+            state.terminals.retain(|(expires, _)| *expires > now);
+            state.terminals.iter().any(|(_, known)| known == terminal)
+        }
+
+        pub(crate) fn trust_terminal(&self, terminal: crate::kernel_process::TerminalIdentity) {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let now = Instant::now();
+            state
+                .terminals
+                .retain(|(expires, known)| *expires > now && known != &terminal);
+            if state.terminals.len() < 128 {
+                state
+                    .terminals
+                    .push((now + Duration::from_secs(12 * 60 * 60), terminal));
+            }
+        }
         pub(crate) fn accept_signed_app(&self, request: Request) -> ConfirmedRequest {
             ConfirmedRequest(request)
         }
@@ -161,13 +185,15 @@ mod queue {
             let now = Instant::now();
             state.last_app_poll = Some(now);
             state.expire(now);
-            state
-                .waiting
-                .iter()
+            let mut waiting: Vec<_> = state.waiting.iter().collect();
+            waiting.sort_by_key(|(_, pending)| pending.created);
+            waiting
+                .into_iter()
                 .map(|(id, item)| Prompt {
                     id: id.clone(),
                     display: item.display.clone(),
                     reason: item.reason.clone(),
+                    age_seconds: now.duration_since(item.created).as_secs(),
                 })
                 .collect()
         }
@@ -379,6 +405,7 @@ pub(crate) mod macos {
     }
 
     unsafe extern "C" {
+        fn senate_accessibility_trusted() -> bool;
         fn senate_device_owner_authenticated(reason: *const c_char) -> bool;
         fn senate_guest_team(pid: i32, text: *mut c_char, size: usize) -> bool;
         pub(crate) fn senate_xpc_listen(
@@ -512,6 +539,59 @@ pub(crate) mod macos {
             );
         }
         Check::ok(ID, "The running Senate app matches its installed code pin")
+    }
+
+    pub(crate) fn accessibility_doctor() -> crate::doctor::Check {
+        use crate::doctor::Check;
+        const ID: &str = "person_presence.accessibility";
+        const HELP: &str =
+            "Check Accessibility and Automation for each terminal in System Settings";
+        if unsafe { senate_accessibility_trusted() } {
+            Check::warn(
+                ID,
+                "macOS trusts this invoking process for Accessibility",
+                Some(HELP),
+            )
+        } else {
+            Check::ok(
+                ID,
+                "macOS does not trust this invoking process for Accessibility. Other applications' grants were not checked.",
+            )
+        }
+    }
+
+    pub(crate) fn app_copies_doctor(home: &Path) -> Option<crate::doctor::Check> {
+        use std::os::unix::ffi::OsStringExt as _;
+        let (pinned, expected) = installed(home)?.app?;
+        let rule = requirement("dev.senate.app")?;
+        let result = std::process::Command::new("/usr/bin/mdfind")
+            .args(["-0", "kMDItemCFBundleIdentifier == 'dev.senate.app'"])
+            .output()
+            .ok()?;
+        if !result.status.success() {
+            return None;
+        }
+        let others: Vec<_> = result
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|bytes| !bytes.is_empty())
+            .take(64)
+            .map(|bytes| PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec())))
+            .filter(|path| path != &pinned)
+            .filter(|path| hash_path(path, &rule).is_some_and(|hash| hash != expected))
+            .take(8)
+            .map(|path| format!("{path:?}"))
+            .collect();
+        (!others.is_empty()).then(|| {
+            crate::doctor::Check::warn(
+                "person_presence.app_copies",
+                format!(
+                    "Spotlight found team-signed Senate apps with an unpinned code hash: {}",
+                    others.join(", ")
+                ),
+                Some("Review the copies and open the pinned Senate app"),
+            )
+        })
     }
 
     pub(crate) fn trusted_helper(home: &Path, pid: u32) -> bool {
@@ -738,6 +818,7 @@ pub(crate) fn required(request: &crate::ipc::Request) -> bool {
         | Request::Refuse { .. }
         | Request::DeskOpenCommittee { .. }
         | Request::AuthorizeNativeAuthority { .. }
+        | Request::SessionForget { .. }
         | Request::RebindHost { .. }
         | Request::SetChair { .. }
         | Request::SetSecretarySession { .. }
@@ -753,7 +834,9 @@ pub(crate) fn required(request: &crate::ipc::Request) -> bool {
         | Request::Resume { .. }
         | Request::Replace { .. }
         | Request::PruneHosts
+        | Request::Attach { .. }
         | Request::Desk { set: Some(_) } => true,
+        Request::OpenViewer { writable, .. } => *writable,
         Request::Stop { session, .. } | Request::Restore { session, .. } => {
             session == &SessionSelector::default()
         }

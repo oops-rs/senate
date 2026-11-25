@@ -582,7 +582,9 @@ done
     // The runtime can exit while the daemon is unavailable. No SessionEnd
     // will reach the registry, so the restarted daemon must use the lock.
     h.stop().await;
-    let mut terminal = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let mut terminal = senate_bridge::host::open_fixture_viewer(&socket, true)
+        .await
+        .unwrap();
     begin_viewer(&mut terminal).await;
     terminal.write_all(b"\x02\x00\x02q\r").await.unwrap();
     tokio::time::timeout(TIMEOUT, async {
@@ -778,7 +780,9 @@ sleep 300
     let expected = b"\x1b[?2004;2031h";
     let start = std::time::Instant::now();
     let mut viewer = loop {
-        let mut viewer = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let mut viewer = senate_bridge::host::open_fixture_viewer(&socket, true)
+            .await
+            .unwrap();
         begin_viewer(&mut viewer).await;
         let mut preamble = [0; 13];
         let read =
@@ -1489,7 +1493,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
         model: Default::default(),
     };
     fixture.reject(&spare, "hosted session limit (1)").await;
-    let mut viewer = tokio::net::UnixStream::connect(&fixture.terminal)
+    let mut viewer = senate_bridge::host::open_fixture_viewer(&fixture.terminal, true)
         .await
         .unwrap();
     begin_viewer(&mut viewer).await;
@@ -1580,7 +1584,7 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     let args = hosted_fixture_argv(&fixture.terminal, &fixture.project, TIMEOUT).await;
     assert_eq!(args[0], format!("--session-id={}", restored.session_id));
     // An attachment that has sent no human input does not prevent stop.
-    let mut passive = tokio::net::UnixStream::connect(&fixture.terminal)
+    let mut passive = senate_bridge::host::open_fixture_viewer(&fixture.terminal, true)
         .await
         .unwrap();
     begin_viewer(&mut passive).await;
@@ -1739,7 +1743,7 @@ async fn claude_hook_changes_native_context_without_moving_the_seat_or_its_mail(
     let primary = &spawned.senator;
 
     // The nested process runs the actual hook CLI under the fixture's TUI.
-    let mut viewer = tokio::net::UnixStream::connect(&fixture.terminal)
+    let mut viewer = senate_bridge::host::open_fixture_viewer(&fixture.terminal, true)
         .await
         .unwrap();
     begin_viewer(&mut viewer).await;
@@ -3143,7 +3147,7 @@ impl RawWatcher {
     }
 
     async fn at(dir: &std::path::Path) -> Self {
-        let mut stream = tokio::net::UnixStream::connect(dir.join("see"))
+        let mut stream = senate_bridge::host::open_fixture_viewer(&dir.join("see"), false)
             .await
             .unwrap();
         assert_eq!(stream.read_u8().await.unwrap(), 1, "the watch greeting");
@@ -3286,7 +3290,9 @@ async fn watch_all_hints_when_every_viewer_is_attached_and_all_shows_them() {
         },
     )
     .await;
-    let mut interactive = tokio::net::UnixStream::connect(&tty).await.unwrap();
+    let mut interactive = senate_bridge::host::open_fixture_viewer(&tty, true)
+        .await
+        .unwrap();
     begin_viewer(&mut interactive).await;
 
     let command = || {
@@ -6280,7 +6286,9 @@ async fn the_attached_terminal_keeps_the_sessions_title_and_rings_when_sought() 
     .await;
 
     // The first viewer attaches and asks the agent to paint.
-    let mut first = tokio::net::UnixStream::connect(&tty).await.unwrap();
+    let mut first = senate_bridge::host::open_fixture_viewer(&tty, true)
+        .await
+        .unwrap();
     begin_viewer(&mut first).await;
     first.write_all(&[2, 0, 6]).await.unwrap();
     first.write_all(b"paint\r").await.unwrap();
@@ -6295,7 +6303,9 @@ async fn the_attached_terminal_keeps_the_sessions_title_and_rings_when_sought() 
     );
 
     // A second viewer is refused, and the first rings and flashes.
-    let mut second = tokio::net::UnixStream::connect(&tty).await.unwrap();
+    let mut second = senate_bridge::host::open_fixture_viewer(&tty, true)
+        .await
+        .unwrap();
     assert_eq!(second.read_u8().await.unwrap(), 0, "busy");
     seen.clear();
     read_until(&mut seen, &mut first, b"Senate: this terminal\x07").await;

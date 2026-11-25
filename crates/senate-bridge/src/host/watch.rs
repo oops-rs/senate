@@ -231,13 +231,19 @@ impl Screen {
 }
 
 /// Serve everyone who watches, for as long as the host runs.
-pub(super) async fn serve(listener: &UnixListener, screen: &Arc<Screen>) -> anyhow::Result<()> {
+pub(super) async fn serve(
+    listener: &UnixListener,
+    screen: &Arc<Screen>,
+    admission: &Arc<super::Admission>,
+) -> anyhow::Result<()> {
     let mut watchers = JoinSet::new();
     loop {
         tokio::select! {
-            (stream, _) = super::accept(listener) => {
+            (mut stream, _) = super::accept(listener), if watchers.len() < 128 => {
                 let screen = screen.clone();
+                let admission = admission.clone();
                 watchers.spawn(async move {
+                    if !admission.viewer(&mut stream, false).await { return; }
                     if let Err(error) = watch(stream, &screen).await {
                         tracing::debug!(%error, "a terminal watcher left");
                     }
@@ -627,7 +633,7 @@ impl Watch {
             crate::testenv::confined(socket),
             "watch socket is outside the test directory"
         );
-        let mut stream = UnixStream::connect(socket)
+        let mut stream = open_watch_stream(socket)
             .await
             .context("connect to the hosted terminal's watch socket")?;
         match tokio::time::timeout(Duration::from_secs(3), stream.read_u8()).await?? {
@@ -665,6 +671,15 @@ impl Watch {
     pub(crate) async fn next(&mut self) -> anyhow::Result<Option<Frame>> {
         read_frame(&mut self.from).await
     }
+}
+
+async fn open_watch_stream(socket: &Path) -> anyhow::Result<UnixStream> {
+    #[cfg(test)]
+    if super::viewer_address(socket).is_err() {
+        // The grid-input unit test uses a synthetic screen server without a bridge.
+        return Ok(UnixStream::connect(socket).await?);
+    }
+    super::open_viewer(socket, false).await
 }
 
 async fn read_frame(from: &mut (impl AsyncRead + Unpin)) -> anyhow::Result<Option<Frame>> {

@@ -9,13 +9,17 @@ enum PersonApprovalPresenter {
         while !Task.isCancelled {
             if let home = store.senateHome, NSApp.modalWindow == nil {
                 let prompts = await Task.detached(priority: .utility) {
-                    personApprovalPrompts(home: home).map { (id: $0.id, display: $0.display, reason: $0.reason) }
+                    personApprovalPrompts(home: home).map {
+                        (id: $0.id, display: $0.display, reason: $0.reason, age: $0.ageSeconds)
+                    }
                 }.value
                 shown.formIntersection(prompts.map(\.id))
                 if !Task.isCancelled, let prompt = prompts.first(where: { !shown.contains($0.id) }) {
                     shown.insert(prompt.id)
                     var allowed = false
-                    if confirm(details: prompt.display) && !Task.isCancelled {
+                    let queue = "Requested \(prompt.age)s ago. \(max(0, prompts.count - 1)) other requests waiting."
+                    let origin = "The foreground terminal could not be verified. Match the requester below to the command you ran."
+                    if confirm(details: "\(queue)\n\(origin)\n\n\(prompt.display)") && !Task.isCancelled {
                         let context = LAContext()
                         context.touchIDAuthenticationAllowableReuseDuration = 0
                         allowed = (try? await context.evaluatePolicy(

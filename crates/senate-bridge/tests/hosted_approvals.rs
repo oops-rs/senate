@@ -137,7 +137,9 @@ impl Terminal {
     async fn viewer(&self) -> UnixStream {
         tokio::time::timeout(WAIT, async {
             loop {
-                let mut viewer = UnixStream::connect(&self.socket).await.unwrap();
+                let mut viewer = senate_bridge::host::open_fixture_viewer(&self.socket, true)
+                    .await
+                    .unwrap();
                 if viewer.read_u8().await.unwrap() == 3 {
                     viewer.write_all(b"\x01\0\x18\0\x50").await.unwrap();
                     return viewer;
