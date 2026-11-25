@@ -161,7 +161,7 @@ const SECRETARY: &str = "List, add or remove the secretaries of this session's a
 
 const SPEAKER_DOCKET: &str = "You preside over a Senate as its Speaker (this tool is only given to the session that does). List what awaits the Speaker there: messages written to whichever agent (`senator::*`) when several agents could get them (pick one with speaker_route), messages addressed to the Speaker, questions to agents of that Senate that are away and unanswered (answer for them from their own checkpoint with speaker_cover), and questions for a child Senate that is offline (answer on its behalf with speaker_cover, or say it is held with speaker_hold). For each agent seated there it shows its presence, latest checkpoint and open threads, the facts to pick by; for each away agent an item names, its latest checkpoint in full. `committee`: one committee only; by default every committee of that Senate.";
 
-const SPEAKER_ROUTE: &str = "As Speaker of the Senate you preside over, route an item from speaker_docket to one agent seated there. The message is relayed to that agent in the original sender's name and the item leaves the docket. For a message written to whichever agent, `to` must be one of its candidates; pick by the task and by what each agent is working on (presence, checkpoint, open threads), and escalate with speaker_escalate when unsure. A question to an away agent is never rerouted to a sibling: answer for it with speaker_cover. `committee` and `seq`: as speaker_docket lists the item. `to`: the agent, e.g. `senator::reviewer` or `reviewer`.";
+const SPEAKER_ROUTE: &str = "As Speaker of the Senate you preside over, route an item from speaker_docket to one agent seated there. The message is relayed to that agent in the original sender's name and the item leaves the docket. For desk-worker intake, use target_committee to route to a different committee of this Senate. The final answer returns to the original intake thread. For a message written to whichever agent, `to` must be one of its candidates; pick by the task and by what each agent is working on (presence, checkpoint, open threads), and escalate with speaker_escalate when unsure. A question to an away agent is never rerouted to a sibling: answer for it with speaker_cover. `committee` and `seq`: as speaker_docket lists the item. `to`: the agent, e.g. `senator::reviewer` or `reviewer`.";
 
 const SPEAKER_COVER: &str = "As Speaker of the Senate you preside over, answer a question to an away agent of that Senate on that agent's behalf, from that agent's own latest checkpoint (speaker_docket shows it in full). The answer is labelled as the Speaker answering for that agent, with the takeover word, and points at the checkpoint's branch and commit; the agent's own answer later still counts. Answer only from what the checkpoint says; when it does not cover the question, use speaker_escalate instead. `committee` and `thread`: the question's, as speaker_docket lists it. `body`: the answer, self-contained. `agent`: which of the agents the question went to, when it went to several. The same tool answers a question for a child Senate that is offline on that child's behalf: answer only from what this Senate sees (the brief, checkpoints, the seats the child declared), say what you relied on, and promise nothing in its name; when that does not answer it, use speaker_hold instead.";
 
@@ -734,6 +734,8 @@ pub struct RouteParams {
     pub seq: u64,
     /// The agent to route it to.
     pub to: String,
+    /// Desk-worker intake only: the committee where the recipient sits.
+    pub target_committee: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -2238,6 +2240,7 @@ impl SenateMcp {
         let p = params.0;
         let l = self.locale;
         let committee = committee_arg(Some(p.committee))?.ok_or("`committee` is empty")?;
+        let target_committee = committee_arg(p.target_committee)?;
         let to = parse_address(&p.to)?;
         let Some(to) = to.as_senator().cloned() else {
             return Err(match l {
@@ -2248,9 +2251,10 @@ impl SenateMcp {
         let posted = self
             .append(Request::Route {
                 session: self.selector.clone(),
-                committee,
+                committee: committee.clone(),
                 seq: Seq(p.seq),
                 to: to.clone(),
+                target_committee,
                 id: Some(EventId::new()),
             })
             .await?;
@@ -2258,10 +2262,13 @@ impl SenateMcp {
         let to = Address::senator(&to).in_text();
         Ok(match l {
             Locale::Zh => format!(
-                "已把 {c} 上的 seq {} 交给 {to}（seq {seq}）{again}。",
+                "已把 {committee} 上的 seq {} 交给 {c} 的 {to}（seq {seq}）{again}。",
                 p.seq
             ),
-            Locale::En => format!("Routed seq {} on {c} to {to} (seq {seq}){again}.", p.seq),
+            Locale::En => format!(
+                "Routed seq {} on {committee} to {to} on {c} (seq {seq}){again}.",
+                p.seq
+            ),
         })
     }
 

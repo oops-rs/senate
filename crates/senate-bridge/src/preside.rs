@@ -431,6 +431,12 @@ fn render_items(docket: &SenateDocket, chair: bool, locale: Locale, out: &mut St
                 .unwrap_or_else(|| event.from.to_string());
             let (body, cut) = format::truncate_chars(&event.body, ITEM_CHARS);
             let ellipsis = if cut { "…" } else { "" };
+            if !chair && senate_core::worker::is_intake(event) {
+                out.push_str(locale.pick(
+                    "  Desk worker 收件：可用 speaker_route 的 target_committee 转交到其他委员会。\n",
+                    "  Desk-worker intake. Use speaker_route with target_committee to route it to another committee.\n",
+                ));
+            }
             out.push_str(&format!(
                 "- `{}` seq {} · {} · {}{}: {}\n  │ {}{ellipsis}\n",
                 page.committee,

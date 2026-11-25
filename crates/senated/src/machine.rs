@@ -1027,6 +1027,7 @@ mod tests {
                 .json(&Admin::Issue {
                     worker: "commons-dial".parse().expect("known worker name"),
                     committees: [allowed.clone()].into_iter().collect(),
+                    desk_inbox: None,
                 })
         };
         assert_eq!(issue().send().await?.status(), 404);
@@ -1055,12 +1056,13 @@ mod tests {
         };
         let mut question = Question {
             id: EventId::new(),
-            committee: denied,
+            committee: Some(denied),
+            desk_intake: false,
             question: "fixture question".into(),
             caller: Some("Example\nCaller".into()),
         };
         assert_eq!(send(&question).send().await?.status(), 403);
-        question.committee = allowed.clone();
+        question.committee = Some(allowed.clone());
         let receipt: Receipt = send(&question)
             .send()
             .await?

@@ -771,8 +771,16 @@ enum DeskWorkerCmd {
         #[arg(long)]
         worker: Name,
         /// Existing committee granted to the worker. Repeat to add a committee.
-        #[arg(long = "committee", required = true)]
+        #[arg(long = "committee", required_unless_present = "desk_inbox")]
         committees: Vec<CommitteeId>,
+        /// Existing inbox for committee-free questions.
+        #[arg(long, value_name = "COMMITTEE")]
+        desk_inbox: Option<CommitteeId>,
+    },
+    /// Replace a worker's secret while keeping its scopes and open threads.
+    Rotate {
+        /// The public credential ID returned by issue.
+        id: EventId,
     },
     /// Revoke a previously issued worker credential.
     Revoke {
@@ -3624,10 +3632,16 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         Cmd::DeskWorker { command } => {
             let paths = Paths::from_env()?;
             let command = match command {
-                DeskWorkerCmd::Issue { worker, committees } => senate_core::worker::Admin::Issue {
+                DeskWorkerCmd::Issue {
+                    worker,
+                    committees,
+                    desk_inbox,
+                } => senate_core::worker::Admin::Issue {
                     worker,
                     committees: committees.into_iter().collect(),
+                    desk_inbox,
                 },
+                DeskWorkerCmd::Rotate { id } => senate_core::worker::Admin::Rotate { id },
                 DeskWorkerCmd::Revoke { id } => senate_core::worker::Admin::Revoke { id },
             };
             let issued: Option<senate_core::worker::Issued> =

@@ -10,6 +10,12 @@ use senate_core::{Kind, NewEvent, meta};
 pub(crate) const BRIDGE_KEYS: [&str; 1] = ["verified_origin"];
 
 pub(crate) fn check_bridge_origin(event: &NewEvent, local: bool) -> Result<(), String> {
+    if event.meta.contains_key(meta::DESK_WORKER_INTAKE) {
+        return Err(format!(
+            "meta.{} is written by the desk-worker intake endpoint",
+            meta::DESK_WORKER_INTAKE
+        ));
+    }
     if !local
         && let Some(key) = BRIDGE_KEYS
             .iter()

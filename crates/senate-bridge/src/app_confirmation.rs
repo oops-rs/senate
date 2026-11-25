@@ -283,15 +283,33 @@ pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> 
             format!("Authorize native seat {session_id}")
         }
         Request::DeskWorker {
-            command: senate_core::worker::Admin::Issue { worker, committees },
+            command:
+                senate_core::worker::Admin::Issue {
+                    worker,
+                    committees,
+                    desk_inbox,
+                },
         } => {
             let names = committees
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("Issue a scoped desk-worker credential for {worker} in {names}")
+            let mut scopes = Vec::new();
+            if !names.is_empty() {
+                scopes.push(format!("committees {names}"));
+            }
+            if let Some(inbox) = desk_inbox {
+                scopes.push(format!("desk intake in {inbox}"));
+            }
+            format!(
+                "Issue a scoped desk-worker credential for {worker} with {}",
+                scopes.join(" and ")
+            )
         }
+        Request::DeskWorker {
+            command: senate_core::worker::Admin::Rotate { id },
+        } => format!("Rotate the secret for desk-worker credential {id}"),
         Request::DeskWorker {
             command: senate_core::worker::Admin::Revoke { id },
         } => format!("Revoke desk-worker credential {id}"),

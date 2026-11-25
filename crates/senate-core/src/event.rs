@@ -583,6 +583,8 @@ pub mod meta {
     pub const DESK_PERSON: &str = "desk_person";
     /// The receipt written to the original thread by the desk.
     pub const DESK_OUTCOME: &str = "desk_outcome";
+    /// On the root of a question submitted to a worker's configured desk inbox.
+    pub const DESK_WORKER_INTAKE: &str = "desk_worker_intake";
     /// On the desk's note in an asker's thread: where the message was
     /// forwarded, as a qualified name.
     pub const FORWARDED_TO: &str = "forwarded_to";
