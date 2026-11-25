@@ -351,9 +351,8 @@ pub async fn attach(path: &Path, paths: &Paths, label: &str) -> anyhow::Result<(
         "terminal socket is outside the test directory"
     );
     let drops = super::paste::drop_directory(paths, path).ok();
-    let stream = tokio::time::timeout(ATTACH_STARTUP_TIMEOUT, UnixStream::connect(path))
+    let stream = super::open_viewer(path, true)
         .await
-        .with_context(|| format!("connecting to {label}'s terminal host timed out"))?
         .with_context(|| format!("connect to {label}'s terminal host"))?;
     drive(stream, label, drops, UnixStream::into_split).await
 }

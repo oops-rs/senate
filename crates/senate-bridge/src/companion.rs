@@ -190,6 +190,7 @@ pub fn note_once(home: &Path, name: &SenatorName, locale: Locale) -> Option<Stri
 #[derive(Debug, Clone)]
 pub struct Running {
     pub session_id: String,
+    pub(crate) owner: Option<crate::kernel_process::BoundProcess>,
     /// The agent it answers as: the one the question is for.
     pub agent: SenatorName,
     pub committee: CommitteeId,
@@ -245,13 +246,14 @@ pub enum Outcome {
 
 /// Run one companion to completion (or `max_secs`): resume `resume` as a
 /// fork in `cwd`, as session `session_id`, the daemon's home being `home`.
-pub async fn run(
+pub(crate) async fn run(
     config: &CompanionConfig,
     resume: &str,
     cwd: &Path,
     session_id: &str,
     home: &Path,
     prompt: &str,
+    on_spawn: impl FnOnce(u32),
 ) -> Outcome {
     let spawned = tokio::process::Command::new(&config.claude_bin)
         .args(["-p", "--resume", resume, "--fork-session"])
@@ -279,6 +281,9 @@ pub async fn run(
             return Outcome::Failed(format!("starting {}: {e}", config.claude_bin.display()));
         }
     };
+    if let Some(pid) = child.id() {
+        on_spawn(pid);
+    }
     // Dropping stdin after the write closes it, which ends the prompt.
     if let Some(mut stdin) = child.stdin.take()
         && let Err(e) = stdin.write_all(prompt.as_bytes()).await

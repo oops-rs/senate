@@ -815,6 +815,9 @@ async fn start_bridge(
     paths
         .ensure_home()
         .with_context(|| format!("creating {}", paths.home().display()))?;
+    if let Some(notice) = crate::app_confirmation::security_status(&paths).1 {
+        tracing::error!("{notice}");
+    }
 
     let socket = paths.socket();
     if std::fs::symlink_metadata(&socket).is_ok() {
@@ -3050,9 +3053,13 @@ impl Shared {
         &self,
         id: &str,
         decision: crate::approvals::Decision,
+        expected: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<crate::approvals::Approval, IpcError> {
         let approval = self.relay
             .answer_with(id, decision, None, |approval| {
+                if expected.is_some_and(|expected| approval.received_at != expected) {
+                    return Err("The permission prompt changed while awaiting confirmation".into());
+                }
                 if self
                     .store
                     .session_host(&approval.session_id)
@@ -3181,6 +3188,7 @@ impl Shared {
         let prompt = companion::prompt(&agent, &event, &pushed.text, self.locale);
         *lock(&self.companion) = Some(companion::Running {
             session_id: sid.clone(),
+            owner: None,
             agent: agent.clone(),
             committee: committee.clone(),
             root: event.seq,
@@ -3206,6 +3214,18 @@ impl Shared {
                 &sid,
                 &shared.home,
                 &prompt,
+                |pid| {
+                    if let Some(running) = lock(&shared.companion)
+                        .as_mut()
+                        .filter(|running| running.session_id == sid)
+                    {
+                        running.owner = kernel_process::inspect(pid)
+                            .and_then(|process| {
+                                kernel_process::BoundProcess::capture(process.identity)
+                            })
+                            .ok();
+                    }
+                },
             )
             .await;
             let answered = lock(&shared.companion)
@@ -3473,7 +3493,7 @@ impl Shared {
             }
             Request::Status => wrap(self.on_status()),
             Request::NativeAuthorityCandidate { .. } | Request::AuthorizeNativeAuthority { .. } |
-            Request::RemoteControl { .. } | Request::ObserveAdmin { .. } | Request::SetCard { .. } => {
+            Request::RemoteControl { .. } | Request::ObserveAdmin { .. } | Request::SetCard { .. } | Request::OpenViewer { .. } => {
                 Reply::err(IpcError::bad_request("local person socket only"))
             }
             Request::Profiles => wrap(Ok(&self.config.profiles)),
@@ -3755,7 +3775,7 @@ impl Shared {
                 approvals: self.relay.list(),
             }),
             Request::Approve { id, decision } => wrap(
-                self.answer_desktop_approval(&id, decision)
+                self.answer_desktop_approval(&id, decision, None)
                     .await
                     .map(|approval| ApproveReply { approval, decision }),
             ),
@@ -4050,12 +4070,12 @@ impl Shared {
         });
         Ok(StatusReply {
             descriptors: Some(crate::fd::snapshot()),
-            person_guard_advisory: approval_guard::advisory_notice(self.locale).or_else(|| {
+            person_guard_advisory: crate::app_confirmation::security_status(&Paths::new(&self.home)).1.or_else(|| approval_guard::advisory_notice(self.locale).or_else(|| {
                 shared_codex.then(|| self.locale.pick(
                     "共享 Codex app-server 的托管会话仅受提示性守卫保护。",
                     "Hosted Codex sessions on the shared app-server have advisory process protection.",
                 ))
-            }).map(str::to_owned),
+            }).map(str::to_owned)),
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             person: self.config.person.clone(),
@@ -5148,6 +5168,7 @@ impl Shared {
     /// Append, turning the server's `ambiguous_recipient` into an error that
     /// carries the candidates and tells the asker how to choose.
     async fn post(&self, event: NewEvent) -> Result<Posted, IpcError> {
+        let event = approval_guard::annotate_origin(event);
         let r = match self.api.append(&event).await {
             Ok(r) => r,
             Err(e) => {
@@ -5886,6 +5907,7 @@ impl Shared {
         if let Some(id) = id {
             event = event.with_id(id);
         }
+        let event = approval_guard::annotate_origin(event);
         let r = above.append(&event).await.map_err(server_error)?;
         Ok(Posted {
             committee: r.event.committee,
@@ -6575,7 +6597,7 @@ impl Front {
         &self,
         session: &str,
         attach: bool,
-    ) -> anyhow::Result<PathBuf> {
+    ) -> anyhow::Result<UnixStream> {
         let shared = self.primary();
         // The input is a native session ID. Resolve the host exclusively
         // through this daemon's local session table.
@@ -6597,7 +6619,32 @@ impl Front {
             tty.with_file_name(crate::host::watch::SOCKET)
         };
         ensure!(crate::testenv::confined(&path), "host is outside test home");
-        Ok(path)
+        let ticket = crate::host::control::grant_viewer(&paths, &id, std::process::id(), attach)
+            .await
+            .map_err(|error| anyhow::anyhow!("{}", error.message))?;
+        crate::host::connect_viewer(&path, &ticket).await
+    }
+
+    async fn broker_viewer(&self, host: &EventId, writable: bool, peer: Option<u32>) -> Reply {
+        let Some(peer) = peer else {
+            return Reply::err(IpcError::new(
+                codes::NOT_A_PERSON,
+                "The viewer has no verified caller",
+            ));
+        };
+        let shared = self.primary();
+        let paths = Paths::new(&shared.home);
+        let session = match shared.store.session_for_host(host) {
+            Ok(Some(session)) if !shared.hosts.unpublished(&session) => session,
+            Ok(_) => {
+                return Reply::err(IpcError::bad_request("The terminal is no longer published"));
+            }
+            Err(error) => return Reply::err(internal(error)),
+        };
+        if shared.store.session_host(&session).ok().flatten().as_ref() != Some(host) {
+            return Reply::err(IpcError::bad_request("The terminal binding changed"));
+        }
+        wrap(crate::host::control::grant_viewer(&paths, host, peer, writable).await)
     }
 }
 
@@ -6730,18 +6777,56 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                 let (line, person_peer, session_peer) = (line.as_str(), peer, peer);
                 #[cfg(not(target_os = "macos"))]
                 let (signed_app, remote_operator) = (false, false);
-                let decoded = serde_json::from_str::<Request>(line);
-                let role_refusal = if fixture {
+                let mut decoded = serde_json::from_str::<Request>(line);
+                let origin = if signed_app { "app" } else { "person-terminal" };
+                let identity_refusal = if fixture {
                     None
                 } else {
-                    decoded
-                        .as_ref()
-                        .ok()
-                        .and_then(approval_guard::role_selector)
-                        .and_then(|selector| shared.verify_role_owner(session_peer, selector).err())
+                    decoded.as_mut().ok().and_then(|request| {
+                        if let Request::HostedSessionEnd {
+                            host_id,
+                            session_id,
+                        } = request
+                        {
+                            let runtime = shared.primary();
+                            let paths = Paths::new(&runtime.home);
+                            let owner = crate::host::host_owner(&paths, host_id);
+                            let bound = runtime.store.session_host(session_id).ok().flatten();
+                            let verified = bound.as_ref() == Some(host_id)
+                                && owner.is_some_and(|owner| {
+                                    Some(owner.pid) == session_peer && owner.live()
+                                });
+                            return (!verified).then(|| {
+                                IpcError::bad_request(
+                                    "The caller is not the session's terminal host",
+                                )
+                            });
+                        }
+                        if let Some(selector) = front::selector_mut(request)
+                            .filter(|selector| **selector != SessionSelector::default())
+                        {
+                            return match shared.verify_selector_owner(session_peer, selector) {
+                                Ok(session_id) => {
+                                    *selector = SessionSelector {
+                                        session_id: Some(session_id),
+                                        claude_pid: None,
+                                    };
+                                    None
+                                }
+                                Err(error) => Some(error),
+                            };
+                        }
+                        approval_guard::session_id_claim(request).and_then(|id| {
+                            let selector = SessionSelector {
+                                session_id: Some(id.to_owned()),
+                                claude_pid: None,
+                            };
+                            shared.verify_selector_owner(session_peer, &selector).err()
+                        })
+                    })
                 };
                 match decoded {
-                    Ok(_) if let Some(error) = role_refusal => (Reply::err(error), false),
+                    Ok(_) if let Some(error) = identity_refusal => (Reply::err(error), false),
                     Ok(request)
                         if crate::app_confirmation::required(&request)
                             && (!fixture
@@ -6749,16 +6834,19 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                                     &request,
                                 )) =>
                     {
-                        let reply = Box::pin(shared.app_confirmed_dispatch(
-                            approval_guard::PresencePeer {
-                                operator: person_peer,
-                                session: session_peer,
-                                signed_app,
-                                remote_operator,
-                            },
-                            request,
-                            &mut reader,
-                            shutdown.clone(),
+                        let reply = Box::pin(approval_guard::VERIFIED_ORIGIN.scope(
+                            origin,
+                            shared.app_confirmed_dispatch(
+                                approval_guard::PresencePeer {
+                                    operator: person_peer,
+                                    session: session_peer,
+                                    signed_app,
+                                    remote_operator,
+                                },
+                                request,
+                                &mut reader,
+                                shutdown.clone(),
+                            ),
                         ))
                         .await;
                         (reply, false)
@@ -6776,10 +6864,28 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         };
                         (reply, false)
                     }
+                    Ok(Request::OpenViewer { host, writable }) => {
+                        let authorized = if shared.scope_fixture {
+                            Ok(())
+                        } else {
+                            shared
+                                .refuse_agent_caller(
+                                    person_peer,
+                                    "Open the viewer from your own terminal",
+                                )
+                                .await
+                        };
+                        let reply = match authorized {
+                            Ok(()) => shared.broker_viewer(&host, writable, person_peer).await,
+                            Err(error) => Reply::err(error),
+                        };
+                        (reply, false)
+                    }
                     Ok(Request::Watch { app }) => {
                         // An app that shows notifications itself keeps the
                         // daemon quiet while it is connected.
-                        let _guard = app.then(|| AppClient::enter(shared.app_clients()));
+                        let _guard = (app && (signed_app || shared.scope_fixture))
+                            .then(|| AppClient::enter(shared.app_clients()));
                         serve_watch(&shared, reader, write, shutdown).await;
                         return;
                     }
@@ -6937,7 +7043,11 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         (reply, false)
                     }
                     Ok(request) if let Some(guidance) = approval_guard::person_only(&request) => (
-                        Box::pin(shared.guarded_dispatch(person_peer, guidance, request)).await,
+                        Box::pin(approval_guard::VERIFIED_ORIGIN.scope(
+                            origin,
+                            shared.guarded_dispatch(person_peer, guidance, request),
+                        ))
+                        .await,
                         false,
                     ),
                     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -6950,6 +7060,22 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         .await,
                         false,
                     ),
+                    Ok(request)
+                        if !fixture && approval_guard::session_selector(&request).is_some() =>
+                    {
+                        (
+                            Box::pin(approval_guard::VERIFIED_ORIGIN.scope(
+                                if matches!(request, Request::Take { .. }) {
+                                    "agent-on-behalf"
+                                } else {
+                                    "session"
+                                },
+                                shared.dispatch(request),
+                            ))
+                            .await,
+                            false,
+                        )
+                    }
                     Ok(request) => (shared.dispatch(request).await, false),
                     Err(e) => (
                         Reply::err(IpcError::bad_request(format!("unreadable request: {e}"))),

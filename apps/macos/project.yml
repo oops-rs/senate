@@ -114,7 +114,7 @@ targets:
         LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/Generated
         # What the Rust static library needs from the system
         # (`cargo rustc --print native-static-libs`).
-        OTHER_LDFLAGS: -lsenate_app_core -liconv -framework CoreFoundation -framework Security -framework SystemConfiguration
+        OTHER_LDFLAGS: -lsenate_app_core -liconv -framework CoreFoundation -framework Security -framework SystemConfiguration -framework ApplicationServices
         # Hardened runtime with one entitlement (Apple Events, for Terminal);
         # no App Sandbox: the daemon's unix socket lives in ~/.senate.
         ENABLE_HARDENED_RUNTIME: YES

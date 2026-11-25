@@ -137,7 +137,9 @@ impl Terminal {
     async fn viewer(&self) -> UnixStream {
         tokio::time::timeout(WAIT, async {
             loop {
-                let mut viewer = UnixStream::connect(&self.socket).await.unwrap();
+                let mut viewer = senate_bridge::host::open_fixture_viewer(&self.socket, true)
+                    .await
+                    .unwrap();
                 if viewer.read_u8().await.unwrap() == 3 {
                     viewer.write_all(b"\x01\0\x18\0\x50").await.unwrap();
                     return viewer;
@@ -2420,6 +2422,7 @@ async fn late_claude_hooks_cannot_reopen_a_finished_turn() {
         ipc::ClaudeApprovalSignal::Requested {
             tool: "echo old".into(),
             fingerprint: "old".into(),
+            confirmation_label: None,
         },
         ipc::ClaudeApprovalSignal::Pending,
     ] {

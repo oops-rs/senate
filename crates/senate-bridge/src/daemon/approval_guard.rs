@@ -14,7 +14,10 @@
 //! Sensitive mutations require a decision from the pinned Mac app or an
 //! OS user-authentication result in a trusted component. A decision applies
 //! once to the exact request. Sensitive operations are refused in unsupported
-//! environments. See `docs/person-guard.md` for platform and hook policy.
+//! environments. Writable terminal viewers can reuse device-owner approval
+//! only on the same controlling terminal and live session leader. Session
+//! selectors are checked against the calling runtime instance. See
+//! `docs/person-guard.md` for platform and hook policy.
 
 use std::collections::BTreeMap;
 
@@ -26,6 +29,17 @@ const DEPTH: usize = 64;
 pub(super) const APP_CONFIRMATION: &str = "This operation requires confirmation in the signed Senate app or local user authentication on the hosting Mac. Use the signed app there";
 /// Executable names of the coding runtimes.
 const RUNTIMES: [&str; 3] = ["claude", "codex", "agy"];
+
+tokio::task_local! {
+    pub(super) static VERIFIED_ORIGIN: &'static str;
+}
+
+pub(super) fn annotate_origin(event: NewEvent) -> NewEvent {
+    match VERIFIED_ORIGIN.try_with(|origin| *origin) {
+        Ok(origin) => event.with_meta("verified_origin", serde_json::json!(origin)),
+        Err(_) => event,
+    }
+}
 
 pub(super) struct PresencePeer {
     pub operator: Option<u32>,
@@ -57,10 +71,57 @@ pub(super) fn answers_a_prompt(request: &Request) -> bool {
     )
 }
 
+fn routine_operator_action(request: &Request) -> bool {
+    match request {
+        Request::OpenCommittee { .. }
+        | Request::Seen { .. }
+        | Request::FindSession { .. }
+        | Request::OpenViewer { .. }
+        | Request::Say { .. }
+        | Request::Duty {
+            as_person: true, ..
+        }
+        | Request::Task {
+            as_person: true, ..
+        }
+        | Request::Thread {
+            mark_seen: true, ..
+        } => true,
+        Request::Ask { session, .. }
+        | Request::Answer { session, .. }
+        | Request::Post { session, .. }
+        | Request::Send { session, .. }
+        | Request::Take { session, .. }
+        | Request::Duty { session, .. }
+        | Request::Task { session, .. }
+        | Request::MemoryEdit { session, .. }
+        | Request::Escalate { session, .. }
+        | Request::ChatSend { session, .. }
+        | Request::Checkpoint { session, .. }
+        | Request::Join { session, .. }
+        | Request::JoinAs { session, .. }
+        | Request::Inbox { session, .. }
+        | Request::CatchUp { session, .. }
+            if session == &SessionSelector::default() =>
+        {
+            true
+        }
+        Request::Secretaries {
+            session, action, ..
+        } if session == &SessionSelector::default() && *action != crate::ipc::SecretaryOp::List => {
+            true
+        }
+        _ => false,
+    }
+}
+
 /// What only the person does, and what to tell an agent that asks: `None`
 /// for any other request.
 pub(crate) fn person_only(request: &Request) -> Option<&'static str> {
     Some(match request {
+        request if routine_operator_action(request) => {
+            "Run this operator command from your own terminal or the Senate app"
+        }
         Request::SetCard { session, .. } if session == &SessionSelector::default() => {
             "Manage your profile card from your own terminal or the Senate app"
         }
@@ -131,33 +192,17 @@ pub(crate) fn operator_only(request: &Request) -> bool {
     }
 }
 
-/// Session operations whose authority depends on the session's office or seat.
-pub(crate) fn role_selector(request: &Request) -> Option<&SessionSelector> {
+/// Every explicit session selector carries the authority of its runtime,
+/// including requests that only read private session state.
+pub(crate) fn session_selector(request: &Request) -> Option<&SessionSelector> {
+    super::front::selector_of(request).filter(|selector| **selector != SessionSelector::default())
+}
+
+pub(crate) fn session_id_claim(request: &Request) -> Option<&str> {
     match request {
-        Request::Route { session, .. }
-        | Request::Cover { session, .. }
-        | Request::Hold { session, .. }
-        | Request::Refer { session, .. }
-        | Request::Forward { session, .. }
-        | Request::Refuse { session, .. }
-        | Request::SpeakerAlias { session, .. }
-        | Request::SpeakerUnseat { session, .. }
-        | Request::ChairDocket { session }
-        | Request::ChairRoute { session, .. }
-        | Request::ChairCover { session, .. }
-        | Request::ChairEscalate { session, .. }
-        | Request::SecretaryCover { session, .. }
-        | Request::Docket { session, .. }
-        | Request::DeskOpenCommittee { session, .. }
-        | Request::SecretaryWork { session, .. }
-        | Request::SetChair { session, .. }
-        | Request::Spawn { session, .. }
-        | Request::Restore { session, .. }
-        | Request::Stop { session, .. }
-            if session != &SessionSelector::default() =>
-        {
-            Some(session)
-        }
+        Request::SessionEnd { session_id, .. }
+        | Request::Waiting { session_id }
+        | Request::HostedClaudeApproval { session_id, .. } => Some(session_id),
         _ => None,
     }
 }
@@ -328,6 +373,9 @@ impl Front {
         guidance: &str,
         request: Request,
     ) -> Reply {
+        if self.scope_fixture && routine_operator_action(&request) {
+            return self.dispatch(request).await;
+        }
         match self.refuse_agent_caller(peer, guidance).await {
             Ok(()) => self.dispatch(request).await,
             Err(refused) => Reply::err(refused),
@@ -345,7 +393,9 @@ impl Front {
         use crate::app_confirmation::{EnqueueError, LIFETIME};
         use tokio::io::AsyncBufReadExt;
 
-        let session_action = role_selector(&request).is_some()
+        let home = &self.primary().home;
+        let pin_change = crate::app_confirmation::macos::pending_change(home);
+        let session_action = session_selector(&request).is_some()
             || matches!(&request, Request::SetCard { session, .. } if session != &SessionSelector::default());
         let requester_pid = if session_action {
             peer.session
@@ -358,7 +408,15 @@ impl Front {
             }
             peer.operator
         };
-        if peer.signed_app && !session_action {
+        let requester_instance = requester_pid
+            .and_then(|pid| kernel_process::inspect(pid).ok())
+            .and_then(|process| kernel_process::BoundProcess::capture(process.identity).ok());
+        let require_touch = answers_a_prompt(&request)
+            && crate::app_confirmation::macos::approvals_require_touch(home);
+        if peer.signed_app && !session_action && pin_change.is_none() && !require_touch {
+            if let Request::OpenViewer { host, writable } = &request {
+                return self.broker_viewer(host, *writable, peer.operator).await;
+            }
             return self
                 .dispatch_app_confirmation(
                     self.app_confirmations.accept_signed_app(request),
@@ -381,6 +439,22 @@ impl Front {
             })
         {
             return Reply::err(refusal(APP_CONFIRMATION));
+        }
+        let view = match &request {
+            Request::OpenViewer {
+                host,
+                writable: true,
+            } => Some(host.clone()),
+            _ => None,
+        };
+        let terminal = view
+            .as_ref()
+            .and_then(|_| requester_pid.and_then(kernel_process::terminal_identity));
+        if let (Some(host), Some(terminal)) = (&view, &terminal)
+            && pin_change.is_none()
+            && self.app_confirmations.terminal_ok(terminal)
+        {
+            return self.broker_viewer(host, true, requester_pid).await;
         }
         let requester = requester_pid.map_or_else(
             || "unidentified process".to_owned(),
@@ -410,10 +484,70 @@ impl Front {
                 let terminal = kernel_process::terminal(pid)
                     .map(|name| format!(", {}", name.escape_default()))
                     .unwrap_or_default();
-                format!("{program} (PID {pid}{terminal})")
+                let job = if kernel_process::terminal_foreground(pid) == Some(false) {
+                    ", background job"
+                } else {
+                    ""
+                };
+                format!("{program} (PID {pid}{terminal}{job})")
             },
         );
         let mut reason = crate::app_confirmation::request_reason(&request, &requester);
+        if let Some(host) = &view
+            && let Ok(Some(session_id)) = self.primary().store.session_for_host(host)
+        {
+            let alias = self.primary().shown_session_name(&session_id);
+            reason = format!(
+                "Open a writable terminal for {:?} — requested by {requester}",
+                alias
+            );
+        }
+        let relay_prompt = if let Request::Approve { id, decision } = &request {
+            let Some(approval) = self
+                .primary()
+                .relay
+                .list()
+                .into_iter()
+                .find(|approval| &approval.id == id)
+            else {
+                return Reply::err(IpcError::bad_request(
+                    "The permission prompt is no longer waiting",
+                ));
+            };
+            let subject = self
+                .primary()
+                .store
+                .session(&approval.session_id)
+                .ok()
+                .flatten()
+                .map_or_else(
+                    || approval.session_id.clone(),
+                    |session| {
+                        let alias = self.primary().shown_session_name(&session.session_id);
+                        session.committee().map_or_else(
+                            || alias.clone(),
+                            |committee| format!("{committee}::{alias}"),
+                        )
+                    },
+                );
+            let command = approval
+                .command
+                .as_deref()
+                .unwrap_or(&approval.summary)
+                .lines()
+                .next()
+                .unwrap_or_default();
+            let detail: String =
+                format!("{decision:?} {:?} for {subject}: {command}", approval.kind)
+                    .chars()
+                    .take(512)
+                    .flat_map(char::escape_default)
+                    .collect();
+            reason = format!("{detail} — requested by {requester}");
+            Some(approval.received_at)
+        } else {
+            None
+        };
         let approval_target = if let Request::ApproveSession { senator, decision } = &request {
             match self.primary().pending_hosted_approval(senator).await {
                 Ok(target) => {
@@ -456,16 +590,22 @@ impl Front {
                 Err(error) => return Reply::err(error),
             }
         }
+        if let Some(notice) = crate::app_confirmation::macos::change_notice(home) {
+            reason = format!("{notice}\n{reason}");
+        }
         let authorization = async {
+            if pin_change.is_some() {
+                return Ok(self
+                    .app_confirmations
+                    .authenticate_helper(home, request, &reason)
+                    .await);
+            }
             match self.app_confirmations.enqueue(request.clone(), &reason) {
                 Ok(mut ticket) => Ok((&mut ticket.reply).await.ok().flatten()),
-                Err(EnqueueError::AppUnavailable) => {
-                    let home = &self.primary().home;
-                    Ok(self
-                        .app_confirmations
-                        .authenticate_helper(home, request, &reason)
-                        .await)
-                }
+                Err(EnqueueError::AppUnavailable) => Ok(self
+                    .app_confirmations
+                    .authenticate_helper(home, request, &reason)
+                    .await),
                 Err(EnqueueError::Busy) => {
                     Err(refusal("The Senate app has too many pending confirmations"))
                 }
@@ -487,6 +627,42 @@ impl Front {
         let Some(approved) = approved else {
             return Reply::err(refusal(APP_CONFIRMATION));
         };
+        if !requester_instance.is_some_and(|process| process.live()) {
+            return Reply::err(refusal(
+                "The requesting process changed while waiting for authentication",
+            ));
+        }
+        if crate::app_confirmation::macos::pending_change(home) != pin_change {
+            return Reply::err(refusal(
+                "The installed trust records changed while waiting for authentication",
+            ));
+        }
+        if let Some(change) = &pin_change
+            && let Err(error) = crate::app_confirmation::macos::accept_change(home, change)
+        {
+            return Reply::err(IpcError::bad_request(error.to_string()));
+        }
+        if let Some(host) = view {
+            if let Some(terminal) = terminal
+                && requester_pid
+                    .and_then(kernel_process::terminal_identity)
+                    .as_ref()
+                    == Some(&terminal)
+            {
+                self.app_confirmations.trust_terminal(terminal);
+            }
+            return self.broker_viewer(&host, true, requester_pid).await;
+        }
+        if let Some(expected) = relay_prompt {
+            let Request::Approve { id, decision } = approved.into_request() else {
+                unreachable!("presence request is sealed to its original payload");
+            };
+            return wrap(
+                self.primary()
+                    .answer_desktop_approval(&id, decision, Some(expected))
+                    .await,
+            );
+        }
         if let Some(target) = approval_target {
             let Request::ApproveSession { decision, .. } = approved.into_request() else {
                 unreachable!("presence request is sealed to its original payload");
@@ -684,6 +860,47 @@ fn hook_owner_mismatch() -> IpcError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn person_and_session_writes_require_their_own_proofs() {
+        let person = SessionSelector::default();
+        let runtime = SessionSelector {
+            session_id: Some("runtime".into()),
+            claude_pid: None,
+        };
+        let post = |session| Request::Post {
+            session,
+            body: "fixture".into(),
+            proposal: false,
+            committee: None,
+            agent: None,
+            id: None,
+        };
+        assert!(person_only(&post(person)).is_some());
+        assert!(person_only(&post(runtime.clone())).is_none());
+        assert_eq!(session_selector(&post(runtime.clone())), Some(&runtime));
+        let end = Request::SessionEnd {
+            session_id: "runtime".into(),
+            reason: None,
+        };
+        assert_eq!(session_id_claim(&end), Some("runtime"));
+        assert_eq!(
+            session_id_claim(&Request::Waiting {
+                session_id: "runtime".into()
+            }),
+            Some("runtime")
+        );
+        assert!(crate::app_confirmation::required(&Request::SessionForget {
+            session_id: "runtime".into()
+        }));
+        for writable in [false, true] {
+            let request = Request::OpenViewer {
+                host: EventId::new(),
+                writable,
+            };
+            assert!(person_only(&request).is_some());
+            assert_eq!(crate::app_confirmation::required(&request), writable);
+        }
+    }
 
     #[test]
     fn the_persons_own_acts_are_guarded_and_a_sessions_are_not() {

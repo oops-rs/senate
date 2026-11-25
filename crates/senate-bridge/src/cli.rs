@@ -3253,6 +3253,12 @@ fn run_doctor(json: bool) -> anyhow::Result<()> {
     checks.extend(completion::doctor(locale));
     #[cfg(target_os = "macos")]
     checks.push(crate::app_confirmation::macos::pin_doctor(paths.home()));
+    #[cfg(target_os = "macos")]
+    checks.push(crate::app_confirmation::macos::accessibility_doctor());
+    #[cfg(target_os = "macos")]
+    checks.extend(crate::app_confirmation::macos::app_copies_doctor(
+        paths.home(),
+    ));
     checks.extend(crate::remote::authority::installation_checks());
     if let Some(line) = crate::remote::authority::latest_history(&paths) {
         checks.push(crate::doctor::Check::ok("remote.last_administration", line));

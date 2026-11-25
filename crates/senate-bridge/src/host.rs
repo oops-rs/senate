@@ -24,6 +24,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::{Context, bail, ensure};
 use pty_process::{OwnedWritePty, Size};
@@ -398,6 +399,161 @@ pub struct SessionCommand<'a> {
 
 pub(crate) const READY: u8 = 1;
 pub(crate) const PUBLISHED: u8 = 1;
+const VIEW_TICKET_TTL: Duration = Duration::from_secs(5);
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ViewTicket {
+    pub peer: crate::kernel_process::BoundProcess,
+    pub writable: bool,
+    pub nonce: String,
+}
+
+pub(super) struct Admission {
+    #[cfg(target_os = "macos")]
+    paths: Paths,
+    daemon: crate::kernel_process::BoundProcess,
+    tickets: Mutex<Vec<(Instant, ViewTicket)>>,
+}
+
+impl Admission {
+    fn peer(stream: &UnixStream) -> Option<u32> {
+        let credentials = stream.peer_cred().ok()?;
+        if credentials.uid() != rustix::process::geteuid().as_raw() {
+            return None;
+        }
+        u32::try_from(credentials.pid()?).ok()
+    }
+
+    async fn is_daemon(&self, stream: &UnixStream) -> bool {
+        let Some(pid) = Self::peer(stream) else {
+            return false;
+        };
+        if self.daemon.live() {
+            return pid == self.daemon.pid;
+        }
+        #[cfg(target_os = "macos")]
+        return replacement_daemon(&self.paths, pid).await;
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
+
+    fn grant(&self, ticket: ViewTicket) -> bool {
+        let mut tickets = self
+            .tickets
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let now = Instant::now();
+        tickets.retain(|(expires, _)| *expires > now);
+        if tickets.len() >= 64 {
+            return false;
+        }
+        tickets.push((now + VIEW_TICKET_TTL, ticket));
+        true
+    }
+
+    async fn viewer(&self, stream: &mut UnixStream, writable: bool) -> bool {
+        let Some(pid) = Self::peer(stream) else {
+            return false;
+        };
+        let eligible = self
+            .tickets
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .any(|(expires, ticket)| {
+                *expires > Instant::now()
+                    && ticket.writable == writable
+                    && ticket.peer.pid == pid
+                    && ticket.peer.live()
+            });
+        if !eligible {
+            return false;
+        }
+        let mut nonce = [0u8; 32];
+        if !tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut nonce))
+            .await
+            .is_ok_and(|read| read.is_ok())
+        {
+            return false;
+        }
+        let mut tickets = self
+            .tickets
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let now = Instant::now();
+        tickets.retain(|(expires, _)| *expires > now);
+        let nonce = hex::encode(nonce);
+        let Some(index) = tickets.iter().position(|(_, ticket)| {
+            ticket.writable == writable
+                && ticket.nonce == nonce
+                && ticket.peer.pid == pid
+                && ticket.peer.live()
+        }) else {
+            return false;
+        };
+        tickets.swap_remove(index);
+        true
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn replacement_daemon(paths: &Paths, pid: u32) -> bool {
+    if !crate::app_confirmation::macos::trusted_helper(paths.home(), pid) {
+        return false;
+    }
+    tokio::time::timeout(
+        Duration::from_millis(300),
+        UnixStream::connect(paths.socket()),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok_and(|stream| Admission::peer(&stream) == Some(pid)))
+}
+
+fn viewer_address(socket: &Path) -> anyhow::Result<(Paths, EventId)> {
+    let dir = socket.parent().context("missing host directory")?;
+    let host = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("missing host identifier")?
+        .parse()?;
+    let home = dir
+        .parent()
+        .and_then(Path::parent)
+        .context("missing Senate home")?;
+    Ok((Paths::new(home), host))
+}
+
+pub(crate) async fn open_viewer(socket: &Path, writable: bool) -> anyhow::Result<UnixStream> {
+    let (paths, host) = viewer_address(socket)?;
+    let nonce: String = ipc::request(
+        &paths.socket(),
+        &ipc::Request::OpenViewer { host, writable },
+        Duration::from_secs(1),
+        crate::app_confirmation::LIFETIME + Duration::from_secs(5),
+    )
+    .await?;
+    connect_viewer(socket, &nonce).await
+}
+
+/// Connect an integration fixture that owns the host's launching process.
+#[doc(hidden)]
+pub async fn open_fixture_viewer(socket: &Path, writable: bool) -> anyhow::Result<UnixStream> {
+    let (paths, host) = viewer_address(socket)?;
+    ensure!(
+        cfg!(debug_assertions) && crate::testenv::confined(socket),
+        "outside a host fixture"
+    );
+    let nonce = control::grant_viewer(&paths, &host, std::process::id(), writable)
+        .await
+        .map_err(|error| anyhow::anyhow!("{}", error.message))?;
+    connect_viewer(socket, &nonce).await
+}
+
+pub(crate) async fn connect_viewer(socket: &Path, nonce: &str) -> anyhow::Result<UnixStream> {
+    let mut stream = UnixStream::connect(socket).await?;
+    stream.write_all(&hex::decode(nonce)?).await?;
+    Ok(stream)
+}
 pub const HOSTED_CLAUDE_ENV: &str = "SENATE_HOSTED_CLAUDE";
 /// The host of a Senate-hosted agy, for its hooks: agy picks its own
 /// conversation ID once it starts, and its first SessionStart hook names
@@ -546,6 +702,15 @@ pub async fn run(
     cwd: &Path,
     session: &SessionCommand<'_>,
 ) -> anyhow::Result<()> {
+    let daemon = crate::kernel_process::inspect(std::os::unix::process::parent_id())
+        .and_then(|process| crate::kernel_process::BoundProcess::capture(process.identity))
+        .context("bind the terminal host to its launching daemon")?;
+    let admission = Arc::new(Admission {
+        #[cfg(target_os = "macos")]
+        paths: paths.clone(),
+        daemon,
+        tickets: Mutex::default(),
+    });
     if let Err(error) = crate::fd::cap_host_limit() {
         tracing::warn!(%error, "could not lower the terminal host file descriptor limit");
     }
@@ -554,7 +719,7 @@ pub async fn run(
     )
     .context("open the daemon publication pipe")?;
     let dir = directory(paths, id);
-    let _backend_lease = match session.codex_lease {
+    let mut backend_lease = match session.codex_lease {
         Some(path) => {
             let lease = UnixStream::connect(path)
                 .await
@@ -571,6 +736,16 @@ pub async fn run(
     // As session leader the host leads its own process group, under its pid.
     std::fs::write(dir.join(HOST_PID), std::process::id().to_string())
         .context("record the host's process ID")?;
+    let process = crate::kernel_process::inspect(std::process::id())?;
+    let process = crate::kernel_process::BoundProcess::capture(process.identity)?;
+    serde_json::to_writer(
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dir.join("host-process"))?,
+        &process,
+    )?;
     let mut terminate = signal(SignalKind::terminate())?;
     let socket = socket(paths, id);
     let listener = UnixListener::bind(&socket).context("listen for terminal attachments")?;
@@ -597,6 +772,12 @@ pub async fn run(
         .and_then(|pid| i32::try_from(pid).ok())
         .and_then(Pid::from_raw)
         .context("the coding TUI has no process ID")?;
+    if let Some(lease) = &mut backend_lease {
+        lease
+            .write_u32(pid.as_raw_pid() as u32)
+            .await
+            .context("register the dedicated Codex TUI")?;
+    }
     if let Ok(owner) = crate::kernel_process::inspect(pid.as_raw_pid() as u32)
         .and_then(|process| crate::kernel_process::BoundProcess::capture(process.identity))
     {
@@ -697,11 +878,11 @@ pub async fn run(
             tracing::warn!(dir = %dir.display(), "the host's directory is gone; stopping its TUI");
             stop_group(&mut child, pid).await
         }
-        served = serve(&listener, &tty, &viewer) => served,
-        served = watch::serve(&watchers, &tty.screen) => served,
+        served = serve(&listener, &tty, &viewer, &admission) => served,
+        served = watch::serve(&watchers, &tty.screen, &admission) => served,
         prompted = prompt::watch(&dir, &tty.screen, session.prompt_quiet) => prompted,
         fitted = tty.fit() => fitted,
-        peer = control::next_stop(&controls, &viewer, &tty, paths, id) => {
+        peer = control::next_stop(&controls, &viewer, &tty, paths, id, &admission) => {
             stop = Some(peer);
             stop_group(&mut child, pid).await
         }
@@ -1012,6 +1193,13 @@ pub(crate) fn mark_shared_codex_thread(paths: &Paths, id: &EventId) -> io::Resul
     File::create(directory(paths, id).join("shared-codex")).map(drop)
 }
 
+pub(crate) fn host_owner(
+    paths: &Paths,
+    id: &EventId,
+) -> Option<crate::kernel_process::BoundProcess> {
+    serde_json::from_slice(&std::fs::read(directory(paths, id).join("host-process")).ok()?).ok()
+}
+
 pub(crate) fn clear_shared_codex_thread(paths: &Paths, id: &EventId) -> io::Result<()> {
     match std::fs::remove_file(directory(paths, id).join("shared-codex")) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -1221,9 +1409,17 @@ async fn accept(listener: &UnixListener) -> (UnixStream, tokio::net::unix::Socke
     }
 }
 
-async fn serve(listener: &UnixListener, tty: &Tty, viewer: &Mutex<Viewer>) -> anyhow::Result<()> {
+async fn serve(
+    listener: &UnixListener,
+    tty: &Tty,
+    viewer: &Mutex<Viewer>,
+    admission: &Admission,
+) -> anyhow::Result<()> {
     loop {
-        let (stream, _) = accept(listener).await;
+        let (mut stream, _) = accept(listener).await;
+        if !admission.viewer(&mut stream, true).await {
+            continue;
+        }
         {
             let mut viewer = Viewer::lock(viewer);
             viewer.activity.attached = true;
@@ -1242,7 +1438,10 @@ async fn serve(listener: &UnixListener, tty: &Tty, viewer: &Mutex<Viewer>) -> an
                         }
                         break;
                     }
-                    (other, _) = accept(listener) => {
+                    (mut other, _) = accept(listener) => {
+                        if !admission.viewer(&mut other, true).await {
+                            continue;
+                        }
                         let _ = other.try_write(&[BUSY]);
                         // The one who asked can now see which terminal has it.
                         tty.find.notify_one();
@@ -1480,6 +1679,39 @@ async fn forward_keys(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn viewer_ticket_requires_its_process_and_mode_and_is_consumed() -> anyhow::Result<()> {
+        let bind = |pid| {
+            crate::kernel_process::inspect(pid)
+                .and_then(|process| crate::kernel_process::BoundProcess::capture(process.identity))
+        };
+        let peer = bind(std::process::id())?;
+        let dir = tempfile::tempdir()?;
+        let admission = Admission {
+            #[cfg(target_os = "macos")]
+            paths: Paths::new(dir.path()),
+            daemon: bind(std::os::unix::process::parent_id())?,
+            tickets: Mutex::default(),
+        };
+        let socket = dir.path().join("test.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let (mut sender, (mut receiver, _)) =
+            tokio::try_join!(UnixStream::connect(&socket), listener.accept(),)?;
+        assert!(!admission.is_daemon(&receiver).await);
+        assert!(!admission.viewer(&mut receiver, false).await);
+
+        let nonce = [37; 32];
+        assert!(admission.grant(ViewTicket {
+            peer,
+            writable: false,
+            nonce: hex::encode(nonce),
+        }));
+        assert!(!admission.viewer(&mut receiver, true).await);
+        sender.write_all(&nonce).await?;
+        assert!(admission.viewer(&mut receiver, false).await);
+        assert!(!admission.viewer(&mut receiver, false).await);
+        Ok(())
+    }
     use super::*;
 
     fn choice(model: Option<&str>, effort: Option<&str>) -> HostedModel {

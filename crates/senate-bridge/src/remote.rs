@@ -1167,31 +1167,31 @@ impl Service {
             )
             .await;
         }
-        let path = match front.remote_terminal(&session, attach).await {
-            Ok(path) => path,
-            Err(_) => {
-                self.audit.record(
-                    device,
-                    if attach {
-                        "attach_unavailable"
-                    } else {
-                        "watch_unavailable"
-                    },
-                    Some(peer),
-                    None,
-                );
-                return reply(
-                    &mut wire,
-                    Reply::Refused {
-                        message: "no running hosted terminal for that session".into(),
-                    },
-                )
-                .await;
-            }
-        };
+        let host =
+            match tokio::time::timeout(HANDSHAKE, front.remote_terminal(&session, attach)).await {
+                Ok(Ok(host)) => host,
+                _ => {
+                    self.audit.record(
+                        device,
+                        if attach {
+                            "attach_unavailable"
+                        } else {
+                            "watch_unavailable"
+                        },
+                        Some(peer),
+                        None,
+                    );
+                    return reply(
+                        &mut wire,
+                        Reply::Refused {
+                            message: "no running hosted terminal for that session".into(),
+                        },
+                    )
+                    .await;
+                }
+            };
         self.audit
             .record(device, action, Some(peer), Some(&session));
-        let host = tokio::time::timeout(HANDSHAKE, tokio::net::UnixStream::connect(path)).await??;
         reply(&mut wire, Reply::Stream).await?;
         terminal::relay(wire, host, attach).await
     }

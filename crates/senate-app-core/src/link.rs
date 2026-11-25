@@ -63,7 +63,7 @@ impl Link {
 
     /// One request on a fresh connection.
     pub async fn call<T: DeserializeOwned>(&self, request: &Request) -> Result<T, ClientError> {
-        let timeout = match request {
+        let mut timeout = match request {
             Request::Answer { .. }
             | Request::Take { .. }
             | Request::Task { .. }
@@ -75,6 +75,9 @@ impl Link {
             Request::EnsureSecretary => SPAWN_TIMEOUT,
             _ => READ_TIMEOUT,
         };
+        if senate_bridge::app_confirmation::required(request) {
+            timeout += Duration::from_secs(65);
+        }
         ipc::request(&self.socket, request, CONNECT_TIMEOUT, timeout).await
     }
 

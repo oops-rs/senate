@@ -1200,6 +1200,10 @@ pub enum Request {
     Attach {
         senator: AliasName,
     },
+    OpenViewer {
+        host: EventId,
+        writable: bool,
+    },
     /// How many messages wait for `session_id`'s next hook.
     Waiting {
         session_id: String,
@@ -2911,11 +2915,15 @@ pub async fn request_line(socket: &Path, request: &Request) -> Result<Vec<u8>, C
                     | Request::TimelineWatch { .. }
                     | Request::DeskDecide { .. }
                     | Request::Sessions
+                    | Request::Watch { app: true }
             ) {
             Some(ProofKind::Operator)
-        } else if matches!(request, Request::Hook(_) | Request::SessionHook(_))
-            || matches!(request, Request::SetCard { session, .. } if session != &SessionSelector::default())
-            || crate::daemon::approval_guard::role_selector(request).is_some()
+        } else if matches!(
+            request,
+            Request::Hook(_) | Request::SessionHook(_) | Request::HostedSessionEnd { .. }
+        ) || matches!(request, Request::SetCard { session, .. } if session != &SessionSelector::default())
+            || crate::daemon::approval_guard::session_selector(request).is_some()
+            || crate::daemon::approval_guard::session_id_claim(request).is_some()
         {
             Some(ProofKind::Session)
         } else if crate::app_confirmation::required(request) {
