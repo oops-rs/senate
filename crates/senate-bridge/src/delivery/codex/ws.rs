@@ -16,6 +16,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, Wr
 pub const MAX_MESSAGE: usize = 16 << 20;
 /// Largest upgrade response accepted.
 const MAX_HEAD: usize = 16 << 10;
+/// Room made in the reader's buffer before each read.
+const READ_CHUNK: usize = 8192;
 
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
@@ -106,15 +108,14 @@ impl WebSocket {
             if buf.len() > MAX_HEAD {
                 return Err(bad("upgrade response too long"));
             }
-            let mut chunk = [0u8; 4096];
-            let n = stream.read(&mut chunk).await?;
+            buf.reserve(4096);
+            let n = stream.read_buf(&mut buf).await?;
             if n == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "closed before the WebSocket upgrade",
                 ));
             }
-            buf.extend_from_slice(&chunk[..n]);
         };
         let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
         let status = head.lines().next().unwrap_or("");
@@ -190,15 +191,18 @@ pub struct WsReader {
 impl WsReader {
     async fn need(&mut self, n: usize) -> io::Result<()> {
         while self.buf.len() < n {
-            let mut chunk = [0u8; 8192];
-            let got = self.read.read(&mut chunk).await?;
+            // Straight into the reader's buffer. An array here would live
+            // across the await, inside this future and inside every future
+            // that awaits it, up to the daemon's dispatch: 8 KiB each, which
+            // an unoptimised build copies onto the stack at each await.
+            self.buf.reserve(READ_CHUNK);
+            let got = self.read.read_buf(&mut self.buf).await?;
             if got == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "the app-server closed the connection",
                 ));
             }
-            self.buf.extend_from_slice(&chunk[..got]);
         }
         Ok(())
     }
@@ -345,5 +349,32 @@ mod tests {
         assert_eq!(&long[..4], &[0x81, 0x80 | 126, 0x01, 0x2c]);
         let huge = client_frame(1, &vec![0u8; 70_000], [0; 4]);
         assert_eq!(huge[1], 0x80 | 127);
+    }
+
+    /// A read buffer kept across the await is a part of this future, of
+    /// every app-server call, and of every daemon handler that can make
+    /// one. It once made the daemon's dispatch overflow a debug build's
+    /// stack.
+    #[tokio::test]
+    async fn reading_keeps_no_buffer_in_the_future() {
+        let (near, mut far) = tokio::io::duplex(64);
+        let (read, _write) = tokio::io::split(Box::new(near) as Box<dyn Stream>);
+        let mut reader = WsReader {
+            read,
+            buf: Vec::new(),
+            message: Vec::new(),
+            in_message: false,
+        };
+        {
+            let need = reader.need(2);
+            assert!(
+                std::mem::size_of_val(&need) <= 256,
+                "{} bytes",
+                std::mem::size_of_val(&need)
+            );
+        }
+        far.write_all(&[0x81, 0x00]).await.unwrap();
+        reader.need(2).await.unwrap();
+        assert_eq!(reader.buf, [0x81, 0x00]);
     }
 }

@@ -148,11 +148,13 @@ pub async fn push(
     // after a complete write says nothing about the message, so it ends the
     // read like silence does.
     let deadline = tokio::time::Instant::now() + options.linger;
+    // Straight into `reply`: an array here would be carried in this future
+    // and in every one that awaits it.
     let mut reply = Vec::new();
-    let mut chunk = [0u8; 4096];
     while reply.len() < MAX_REPLY {
-        match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
-            Ok(Ok(n)) if n > 0 => reply.extend_from_slice(&chunk[..n]),
+        reply.reserve(4096);
+        match tokio::time::timeout_at(deadline, stream.read_buf(&mut reply)).await {
+            Ok(Ok(n)) if n > 0 => {}
             Ok(Ok(_)) | Ok(Err(_)) | Err(_) => break,
         }
     }

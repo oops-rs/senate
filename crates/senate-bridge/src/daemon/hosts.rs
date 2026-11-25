@@ -196,7 +196,7 @@ impl Shared {
         model: HostedModel,
         limit: Option<usize>,
         attempt: Option<&mut SpawnAttempt>,
-        audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send,
+        audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send + Sync,
     ) -> Result<HostedLaunch, IpcError>
     where
         Fut: std::future::Future<Output = Result<(), IpcError>> + Send,
@@ -212,9 +212,11 @@ impl Shared {
                 "unknown committee {committee}"
             )));
         }
-        self.launch_host(
-            runtime, committee, alias, cwd, None, model, limit, attempt, audit,
-        )
+        on_heap(|| {
+            self.launch_host(
+                runtime, committee, alias, cwd, None, model, limit, attempt, audit,
+            )
+        })
         .await
     }
 
@@ -785,7 +787,7 @@ impl Shared {
         target: RestoreTarget,
         model: HostedModel,
         limit: Option<usize>,
-        audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send,
+        audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send + Sync,
     ) -> Result<HostedLaunch, IpcError>
     where
         Fut: std::future::Future<Output = Result<(), IpcError>> + Send,
@@ -808,22 +810,24 @@ impl Shared {
                 .map_err(internal)?
                 .is_some()
             && !claude_has_transcript(&session)?;
-        self.launch_host(
-            target.runtime,
-            target.committee,
-            None,
-            session.cwd,
-            Some(HostResume {
-                recorded_model: target.model,
-                session_id: session.session_id,
-                senator: session.agent,
-                start_empty,
-            }),
-            model,
-            limit,
-            None,
-            audit,
-        )
+        on_heap(|| {
+            self.launch_host(
+                target.runtime,
+                target.committee,
+                None,
+                session.cwd,
+                Some(HostResume {
+                    recorded_model: target.model,
+                    session_id: session.session_id,
+                    senator: session.agent,
+                    start_empty,
+                }),
+                model,
+                limit,
+                None,
+                audit,
+            )
+        })
         .await
     }
 
@@ -1085,7 +1089,7 @@ impl Shared {
         model: HostedModel,
         limit: Option<usize>,
         mut attempt: Option<&mut SpawnAttempt>,
-        audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send,
+        audit: impl Fn(LaunchAudit, SpawnReply, HostedRuntime) -> Fut + Send + Sync,
     ) -> Result<HostedLaunch, IpcError>
     where
         Fut: std::future::Future<Output = Result<(), IpcError>> + Send,

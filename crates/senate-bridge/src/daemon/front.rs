@@ -520,13 +520,13 @@ impl Front {
                             .map_err(internal)
                     }),
             ),
-            Request::ObserveAdmin { command } => self.on_observe_admin(command).await,
+            Request::ObserveAdmin { command } => on_heap(|| self.on_observe_admin(command)).await,
             Request::SetCard {
                 session,
                 target,
                 document,
             } if session == SessionSelector::default() => {
-                wrap(self.set_observer_card(None, target, &document).await)
+                wrap(on_heap(|| self.set_observer_card(None, target, &document)).await)
             }
             Request::SetCard { .. } => Reply::err(IpcError::bad_request(
                 "Card writes require a verified session",
@@ -554,8 +554,8 @@ impl Front {
                 .await;
                 wrap(self.status())
             }
-            Request::Hook(report) => wrap(self.on_hook(report, false).await),
-            Request::SessionHook(report) => wrap(self.on_hook(report, true).await),
+            Request::Hook(report) => wrap(on_heap(|| self.on_hook(report, false)).await),
+            Request::SessionHook(report) => wrap(on_heap(|| self.on_hook(report, true)).await),
             Request::SessionEnd { session_id, reason } => {
                 let mut reply = Reply::ok(&serde_json::json!({}));
                 for shared in &self.senates {
@@ -573,12 +573,12 @@ impl Front {
             }
             Request::Presides {
                 session, runtime, ..
-            } => wrap(self.on_presides(&session, runtime).await),
+            } => wrap(on_heap(|| self.on_presides(&session, runtime)).await),
             Request::DeskItem { committee, seq } => {
-                wrap(self.primary().on_desk_item(committee, seq).await)
+                wrap(on_heap(|| self.primary().on_desk_item(committee, seq)).await)
             }
             Request::Docket { session, committee } => {
-                wrap(self.on_docket(&session, committee).await)
+                wrap(on_heap(|| self.on_docket(&session, committee)).await)
             }
             Request::Route {
                 session,
@@ -589,7 +589,7 @@ impl Front {
                 id,
             } => match self.presiding(&session) {
                 Ok((seat, speaker)) => wrap(
-                    seat.on_route(&speaker, committee, seq, to, target_committee, id)
+                    on_heap(|| seat.on_route(&speaker, committee, seq, to, target_committee, id))
                         .await,
                 ),
                 Err(e) => Reply::err(e),
@@ -603,8 +603,7 @@ impl Front {
                 id,
             } => match self.presiding(&session) {
                 Ok((seat, speaker)) => wrap(
-                    seat.on_cover(&speaker, committee, thread, body, agent, id)
-                        .await,
+                    on_heap(|| seat.on_cover(&speaker, committee, thread, body, agent, id)).await,
                 ),
                 Err(e) => Reply::err(e),
             },
@@ -614,7 +613,9 @@ impl Front {
                 seq,
                 id,
             } => match self.presiding(&session) {
-                Ok((seat, speaker)) => wrap(seat.on_hold(&speaker, committee, seq, id).await),
+                Ok((seat, speaker)) => {
+                    wrap(on_heap(|| seat.on_hold(&speaker, committee, seq, id)).await)
+                }
                 Err(e) => Reply::err(e),
             },
             Request::Refer {
@@ -625,7 +626,7 @@ impl Front {
                 id,
             } => match self.presiding(&session) {
                 Ok((seat, speaker)) => {
-                    wrap(seat.on_refer(&speaker, committee, seq, reason, id).await)
+                    wrap(on_heap(|| seat.on_refer(&speaker, committee, seq, reason, id)).await)
                 }
                 Err(e) => Reply::err(e),
             },
@@ -636,8 +637,7 @@ impl Front {
                 alias,
             } => match self.presiding(&session) {
                 Ok((seat, speaker)) => wrap(
-                    seat.on_speaker_alias(&speaker, committee, senator, alias)
-                        .await,
+                    on_heap(|| seat.on_speaker_alias(&speaker, committee, senator, alias)).await,
                 ),
                 Err(e) => Reply::err(e),
             },
@@ -647,10 +647,9 @@ impl Front {
                 senator,
                 id,
             } => match self.presiding(&session) {
-                Ok((seat, speaker)) => wrap(
-                    seat.on_speaker_unseat(&speaker, committee, senator, id)
-                        .await,
-                ),
+                Ok((seat, speaker)) => {
+                    wrap(on_heap(|| seat.on_speaker_unseat(&speaker, committee, senator, id)).await)
+                }
                 Err(e) => Reply::err(e),
             },
             Request::Forward {
@@ -659,7 +658,9 @@ impl Front {
                 seq,
                 id,
             } => match self.presiding(&session) {
-                Ok((seat, speaker)) => wrap(seat.on_forward(&speaker, committee, seq, id).await),
+                Ok((seat, speaker)) => {
+                    wrap(on_heap(|| seat.on_forward(&speaker, committee, seq, id)).await)
+                }
                 Err(e) => Reply::err(e),
             },
             Request::Refuse {
@@ -670,7 +671,7 @@ impl Front {
                 id,
             } => match self.presiding(&session) {
                 Ok((seat, speaker)) => {
-                    wrap(seat.on_refuse(&speaker, committee, seq, reason, id).await)
+                    wrap(on_heap(|| seat.on_refuse(&speaker, committee, seq, reason, id)).await)
                 }
                 Err(e) => Reply::err(e),
             },
@@ -683,7 +684,7 @@ impl Front {
             } if session.session_id.is_some() || session.claude_pid.is_some() => {
                 match self.presiding(&session) {
                     Ok((seat, actor)) => wrap(
-                        seat.on_set_chair(&session, committee, senator, Some(&actor))
+                        on_heap(|| seat.on_set_chair(&session, committee, senator, Some(&actor)))
                             .await,
                     ),
                     Err(e) => Reply::err(e),
@@ -694,7 +695,7 @@ impl Front {
                     .and_then(|selector| self.locate(selector))
                     .map(|(shared, _)| shared)
                     .unwrap_or_else(|| self.primary().clone());
-                Box::pin(target.dispatch(other)).await
+                on_heap(|| target.dispatch(other)).await
             }
         }
     }
