@@ -54,7 +54,6 @@ use std::time::Duration;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use unicode_width::UnicodeWidthStr as _;
 
 use super::scroll::{self, Mouse};
 use super::terminal::{RESET_DISPLAY, RawTerminal, split_input};
@@ -62,7 +61,9 @@ use super::watch::{Mirror, SyncFrames, Watch};
 use crate::paths::Paths;
 
 mod finder;
+mod widths;
 use finder::{Edit, Finder};
+use widths::Widths;
 
 /// The least a tile is given, its header row included.
 pub const MIN_TILE_COLS: u16 = 40;
@@ -327,13 +328,10 @@ fn rect(slot: u16, across: u16, down: u16, rows: u16, cols: u16) -> Rect {
 
 // ----- painting --------------------------------------------------------------
 
-/// Budget for terminals that render ambiguous characters as wide, and for
-/// prompt glyphs some terminals render with a double-width symbol font.
+/// Budget for text the view writes itself (headers, notes, the finder):
+/// as wide as any terminal may draw it ([`Widths::WIDEST`]).
 fn paint_width(text: &str) -> usize {
-    match text {
-        "›" | "⏺" => 2,
-        _ => text.width().max(text.width_cjk()),
-    }
+    Widths::WIDEST.of(text)
 }
 
 /// `text` cut or padded to at most `width` columns on either terminal.
@@ -459,7 +457,8 @@ impl Frame {
 }
 
 /// Paint `rows` × `cols` of `screen` from its row `top`, left edge, at
-/// (`row`, `col`). Returns where the session's cursor is in the terminal,
+/// (`row`, `col`), each glyph as wide as this terminal draws it
+/// ([`Widths`]). Returns where the session's cursor is in the terminal,
 /// when it is shown and inside what was painted.
 fn paint_screen(
     frame: &mut Frame,
@@ -467,6 +466,7 @@ fn paint_screen(
     area: Rect,
     top: u16,
     dim: bool,
+    widths: Widths,
 ) -> Option<(u16, u16)> {
     let reset = if dim { "\x1b[0;2m" } else { "\x1b[0m" };
     for line in 0..area.rows {
@@ -480,9 +480,9 @@ fn paint_screen(
             let cell = screen.cell(top + line, col);
             let wide = cell.is_some_and(vt100::Cell::is_wide);
             let step = if wide { 2 } else { 1 };
-            let width = cell.filter(|cell| cell.has_contents()).map_or(1, |cell| {
-                paint_width(cell.contents()).max(usize::from(step))
-            });
+            let width = cell
+                .filter(|cell| cell.has_contents())
+                .map_or(1, |cell| widths.of(cell.contents()).max(usize::from(step)));
             match cell {
                 // A wide character cut by the tile's edge, or the half of
                 // one that starts left of it: a blank.
@@ -593,6 +593,7 @@ fn paint_tile(
     area: Rect,
     focused: bool,
     behind: bool,
+    widths: Widths,
 ) -> Option<(u16, u16)> {
     let state = shown(&tile.shown);
     let dim = tile.session.dim || state.note.is_some() || behind;
@@ -626,7 +627,7 @@ fn paint_tile(
     match (&state.mirror, &state.note) {
         (Some(mirror), None) => {
             let screen = mirror.screen();
-            paint_screen(frame, screen, body, top_row(screen, body.rows), dim)
+            paint_screen(frame, screen, body, top_row(screen, body.rows), dim, widths)
         }
         (_, note) => {
             paint_note(frame, body, note.as_deref().unwrap_or("connecting…"));
@@ -788,6 +789,8 @@ struct Viewer {
     g: bool,
     /// What the finder last found by: `n` and `N` find by it again.
     last_find: String,
+    /// How wide this terminal draws the glyphs terminals disagree on.
+    widths: Widths,
 }
 
 /// The most a count is taken to be.
@@ -806,6 +809,7 @@ impl Viewer {
             count: None,
             g: false,
             last_find: String::new(),
+            widths: Widths::WIDEST,
         }
     }
 
@@ -1037,6 +1041,7 @@ impl Viewer {
                             area,
                             top_row(screen, area.rows),
                             false,
+                            self.widths,
                         );
                     }
                     (_, note) => {
@@ -1079,6 +1084,7 @@ impl Viewer {
                                 area,
                                 page * per_page + slot == self.focus,
                                 self.help || self.finder.is_some(),
+                                self.widths,
                             );
                         }
                         None => paint_note(&mut frame, area, ""),
@@ -1185,12 +1191,14 @@ async fn stay(
     mut relist: Option<&mut GridListing<'_>>,
 ) -> anyhow::Result<Left> {
     let terminal = RawTerminal::open(true).await?;
+    let (widths, typed) = Widths::measure(&terminal).await;
+    viewer.widths = widths;
     let mut winch = signal(SignalKind::window_change())?;
     let mut hup = signal(SignalKind::hangup())?;
     let mut term = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut listing = tokio::time::interval(RELIST);
-    let mut pending = Vec::new();
+    let mut pending = typed;
     let mut input = [0u8; 256];
     let mut dirty = true;
     let mut stuck = false;
@@ -1488,7 +1496,7 @@ mod tests {
             rows: 4,
             cols: 12,
         };
-        let cursor = paint_screen(&mut out, session.screen(), area, 3, false);
+        let cursor = paint_screen(&mut out, session.screen(), area, 3, false, Widths::WIDEST);
         let terminal = shows(10, 40, &out.changes(None, false));
         let rows: Vec<String> = terminal.screen().rows(0, 40).collect();
         assert_eq!(rows[1], "");
@@ -1515,7 +1523,7 @@ mod tests {
             rows: 2,
             cols: 4,
         };
-        paint_screen(&mut out, session.screen(), area, 0, false);
+        paint_screen(&mut out, session.screen(), area, 0, false, Widths::WIDEST);
         let terminal = shows(4, 20, &out.changes(None, false));
         let cell = terminal.screen().cell(0, 0).unwrap();
         assert_eq!(cell.contents(), "b");
@@ -1724,7 +1732,7 @@ mod tests {
             rows: 1,
             cols: 3,
         };
-        paint_screen(&mut out, session.screen(), area, 0, false);
+        paint_screen(&mut out, session.screen(), area, 0, false, Widths::WIDEST);
         let terminal = shows(2, 10, &out.changes(None, false));
         assert_eq!(terminal.screen().rows(0, 10).next().unwrap(), "ab ");
     }
@@ -1752,6 +1760,7 @@ mod tests {
             },
             false,
             false,
+            Widths::WIDEST,
         );
         let before = "NNNNNNNNN\r\n".repeat(6);
         let terminal = shows(7, 9, &(before + &out.changes(None, false)));
@@ -1765,6 +1774,45 @@ mod tests {
         for symbol in ["›", "•", "⏺", "─"] {
             assert_eq!(paint_width(symbol), 2);
         }
+    }
+
+    /// A TUI's composer rules span its whole width. A tile fitted to the
+    /// session shows them whole on a terminal that draws `─` one column
+    /// wide, and never past its edge on one that draws it two.
+    #[tokio::test]
+    async fn a_full_width_rule_fills_its_tile_as_wide_as_the_terminal_draws_it() {
+        let rule = "─".repeat(46);
+        let painted = format!("\x1b[2;1H{rule}\x1b[3;1H● high · /effort");
+        let area = Rect {
+            row: 0,
+            col: 0,
+            rows: 4,
+            cols: 47,
+        };
+        let shown_with = |widths: Widths| {
+            use super::super::watch::Frame as Said;
+            let tile = tile("composer", "", false);
+            if let Some(mirror) = shown(&tile.shown).mirror.as_mut() {
+                mirror.apply(&Said::Size(3, 46));
+                mirror.apply(&Said::Output(painted.clone().into_bytes()));
+            }
+            let mut out = Frame::default();
+            paint_tile(&mut out, &tile, area, false, false, widths);
+            // The tile asked to be fitted to its body: the session's size.
+            assert_eq!(asked(&tile), Some((3, 46)));
+            let terminal = shows(4, 60, &out.changes(None, false));
+            terminal
+                .screen()
+                .rows(0, 60)
+                .map(|row| row.trim_end().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let narrow = shown_with(Widths::measured([1, 1, 1]));
+        assert_eq!(narrow[2], rule, "the whole rule, as the TUI drew it");
+        assert_eq!(narrow[3], "● high · /effort");
+        // Each `─` takes two columns there: half of them fill the tile.
+        let wide = shown_with(Widths::WIDEST);
+        assert_eq!(wide[2], "─".repeat(23));
     }
 
     #[tokio::test]

@@ -3298,6 +3298,62 @@ async fn a_watcher_fits_an_unattached_session_and_never_an_attached_one() {
     watcher.until((9, 40), "resized to 9 40").await;
 }
 
+/// Whoever decides the size, the TUI (its `stty size`, printed on each
+/// WINCH) and the host's screen (the size it tells watchers) end at the
+/// same one: a session started with nobody looking and then attached at
+/// another size; a burst of resizes; a tile's fit once the viewer leaves;
+/// and an attach again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tui_and_the_hosts_screen_agree_on_the_size_after_every_change() {
+    let (h, alias, _typed) = watched_session().await;
+    let mut watcher = RawWatcher::open(&h).await;
+    let tty: PathBuf = call(
+        &h,
+        &Request::Attach {
+            senator: path(&alias).into(),
+        },
+    )
+    .await;
+    let resize = |rows: u16, cols: u16| {
+        let mut frame = vec![1];
+        frame.extend_from_slice(&rows.to_be_bytes());
+        frame.extend_from_slice(&cols.to_be_bytes());
+        frame
+    };
+    // Started at 24 × 80 with nobody attached; attached at 30 × 100.
+    let mut viewer = senate_bridge::host::open_fixture_viewer(&tty, true)
+        .await
+        .unwrap();
+    assert_eq!(viewer.read_u8().await.unwrap(), 3);
+    viewer.write_all(&resize(30, 100)).await.unwrap();
+    watcher.until((30, 100), "resized to 30 100").await;
+    let (mut screen, mut viewer) = viewer.into_split();
+    let draining = tokio::spawn(async move {
+        let mut buf = [0; 4096];
+        while screen.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+    });
+    // A burst, as a window being dragged sends: the last one stands.
+    let mut burst = resize(30, 100);
+    for (rows, cols) in [(20, 70), (12, 40), (31, 101), (40, 120)] {
+        burst.extend_from_slice(&resize(rows, cols));
+    }
+    viewer.write_all(&burst).await.unwrap();
+    watcher.until((40, 120), "resized to 40 120").await;
+    // The viewer leaves; a tile's fit applies.
+    drop(viewer);
+    draining.await.unwrap();
+    watcher.fit(15, 60).await;
+    watcher.until((15, 60), "resized to 15 60").await;
+    // Attached again, at the viewer's size whatever the tile asked.
+    let mut viewer = senate_bridge::host::open_fixture_viewer(&tty, true)
+        .await
+        .unwrap();
+    assert_eq!(viewer.read_u8().await.unwrap(), 3);
+    viewer.write_all(&resize(40, 120)).await.unwrap();
+    watcher.until((40, 120), "resized to 40 120").await;
+    drop(viewer);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watch_all_hints_when_every_viewer_is_attached_and_all_shows_them() {
     let (h, _) = watched_sessions(&["north"]).await;
