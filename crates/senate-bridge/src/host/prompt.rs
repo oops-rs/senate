@@ -210,14 +210,26 @@ pub(super) async fn watch(dir: &Path, screen: &Screen, quiet: Duration) -> anyho
     let marker = dir.join(MARKER);
     let quiet = u64::try_from(quiet.as_nanos()).unwrap_or(u64::MAX);
     let mut shown: Option<ScreenPrompt> = None;
+    // The last screen read, and what it looked like: an idle TUI's screen
+    // is read once, not twice a second for as long as it stays idle.
+    let mut looked: Option<(u64, bool)> = None;
     let mut tick = tokio::time::interval(EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
         let since = screen.last_output();
-        let now = if (shown.is_some() || observed_at().saturating_sub(since) >= quiet)
-            && looks_like_prompt(&screen.rows())
-        {
+        let now = if (shown.is_some() || observed_at().saturating_sub(since) >= quiet) && {
+            // Before the rows: a change in between is seen at the next tick.
+            let revision = screen.revision();
+            match looked {
+                Some((at, looks)) if at == revision => looks,
+                _ => {
+                    let looks = looks_like_prompt(&screen.rows());
+                    looked = Some((revision, looks));
+                    looks
+                }
+            }
+        } {
             shown.or(Some(ScreenPrompt { since }))
         } else {
             None
