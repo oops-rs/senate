@@ -353,7 +353,11 @@ async fn a_codex_push_is_seen_in_its_rollout_and_an_unseen_one_is_told_once() {
         "{}",
         note.body
     );
-    assert_eq!(h.reach_of("codex", second.seq.0), Some(("injected", true)));
+    // The note is posted first and the item marked right after it.
+    eventually("the item is marked stuck", WAIT, || {
+        (h.reach_of("codex", second.seq.0) == Some(("injected", true))).then_some(())
+    })
+    .await;
     assert_eq!(h.reach_of("codex", first.seq.0), Some(("seen", false)));
     // Told once, and pushed once: nothing is sent again to a session
     // Senate cannot wake.

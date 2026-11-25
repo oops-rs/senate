@@ -5328,7 +5328,11 @@ async fn an_idle_hosted_agy_is_woken_a_bounded_number_of_times_and_never_over_a_
         "{}",
         stuck.body
     );
-    assert_eq!(h.reach_of(agent, second.seq.0), Some(("queued", true)));
+    // The note is posted first and the item marked right after it.
+    eventually("the item is marked stuck", TIMEOUT, || {
+        (h.reach_of(agent, second.seq.0) == Some(("queued", true))).then_some(())
+    })
+    .await;
     // What comes next is not typed for again; its sender is told as well,
     // and the note that says so is never itself reported.
     let third = note("third note");
