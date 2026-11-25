@@ -68,14 +68,14 @@ struct Snapshot {
 
 /// What a pass writes about a session whatever its transcript holds
 /// ([`crate::stats::scan::session`], and where its transcript is).
-type Facts = Vec<(
-    String,
+type Fact = (
     i64,
     &'static str,
     Option<CommitteeId>,
     Option<PathBuf>,
     Option<PathBuf>,
-)>;
+);
+type Facts = BTreeMap<String, Fact>;
 
 fn facts(sessions: &[Session]) -> Facts {
     sessions
@@ -83,28 +83,38 @@ fn facts(sessions: &[Session]) -> Facts {
         .map(|session| {
             (
                 session.session_id.clone(),
-                session.started_at.timestamp(),
-                session.runtime.as_str(),
-                session.committee().cloned(),
-                session.git_root.clone(),
-                timeline::path(session),
+                (
+                    session.started_at.timestamp(),
+                    session.runtime.as_str(),
+                    session.committee().cloned(),
+                    session.git_root.clone(),
+                    timeline::path(session),
+                ),
             )
         })
         .collect()
 }
 
-/// A pass that finds every input as the last full pass left it does
-/// nothing. One full pass still runs this often: it retries a transcript
-/// that could not be read last time though its file has not changed since.
+/// A pass reads again only the sessions whose facts or transcript file
+/// changed since the last pass, and none at all when nothing did. One pass
+/// in this long still reads them all: it retries a transcript that could
+/// not be read last time though its file has not changed since.
 const FULL_PASS_EVERY: Duration = Duration::from_secs(300);
+
+/// What the last completed pass left behind.
+struct Walked {
+    /// When a pass last read every session.
+    full_at: Instant,
+    facts: Facts,
+    sources: Arc<Sources>,
+}
 
 struct Status {
     progress: Option<SessionIndexProgress>,
     error: Option<String>,
     complete: Option<Snapshot>,
     active: Option<Snapshot>,
-    /// When the last full pass ended, and the session facts it wrote.
-    walked: Option<(Instant, Facts)>,
+    walked: Option<Walked>,
 }
 
 pub(super) struct Background {
@@ -255,22 +265,35 @@ fn refresh_index(shared: &Shared, shutdown: &watch::Receiver<bool>) -> anyhow::R
     }
     sessions
         .sort_unstable_by(|a, b| (b.last_seen, &b.session_id).cmp(&(a.last_seen, &a.session_id)));
-    // Nothing a pass reads has changed since the last full one: the same
-    // sessions, the same transcript files, the same index. Most ticks end
-    // here, without opening the index or reading a session again.
-    let mut written = facts(&sessions);
-    written.sort_unstable();
-    {
+    // Against the last pass, while it is recent and wrote this same index
+    // file: a session whose facts and transcript file are as that pass
+    // left them is not read again, and when that is all of them the pass
+    // ends here, without opening the index. Most ticks do.
+    let written = facts(&sessions);
+    let (unchanged, full_at) = {
         let status = lock(&shared.history_background.status);
-        if status.covers(&snapshot.sources, snapshot.index)
-            && status
-                .walked
-                .as_ref()
-                .is_some_and(|(at, last)| at.elapsed() < FULL_PASS_EVERY && *last == written)
-        {
-            return Ok(snapshot);
+        let same_index = status
+            .complete
+            .as_ref()
+            .is_some_and(|complete| complete.index == snapshot.index);
+        match &status.walked {
+            Some(last) if same_index && last.full_at.elapsed() < FULL_PASS_EVERY => {
+                if last.facts == written && last.sources == snapshot.sources {
+                    return Ok(snapshot);
+                }
+                let unchanged: BTreeSet<String> = written
+                    .iter()
+                    .filter(|(id, fact)| {
+                        last.facts.get(*id) == Some(*fact)
+                            && last.sources.get(*id) == snapshot.sources.get(*id)
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                (unchanged, Some(last.full_at))
+            }
+            _ => (BTreeSet::new(), None),
         }
-    }
+    };
     let total = sessions.len();
     {
         let mut status = lock(&shared.history_background.status);
@@ -289,6 +312,9 @@ fn refresh_index(shared: &Shared, shutdown: &watch::Receiver<bool>) -> anyhow::R
             break;
         }
         loop {
+            if unchanged.contains(&old.session_id) {
+                break;
+            }
             let (changed, more) = {
                 let _guard = lock(&shared.history_index);
                 // Recheck the live store under the same lock used by forget.
@@ -310,7 +336,14 @@ fn refresh_index(shared: &Shared, shutdown: &watch::Receiver<bool>) -> anyhow::R
         });
     }
     if !*shutdown.borrow() {
-        lock(&shared.history_background.status).walked = Some((Instant::now(), written));
+        lock(&shared.history_background.status).walked = Some(Walked {
+            // A pass that skipped a session leaves the last full one's time.
+            full_at: full_at
+                .filter(|_| !unchanged.is_empty())
+                .unwrap_or_else(Instant::now),
+            facts: written,
+            sources: snapshot.sources.clone(),
+        });
     }
     // Publish the inputs observed before the walk. A request for an append
     // that arrived during the pass may still need a later pass.
