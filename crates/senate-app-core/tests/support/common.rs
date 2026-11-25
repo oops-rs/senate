@@ -92,6 +92,7 @@ pub fn status(sessions: Vec<Session>) -> StatusReply {
         hosted_unbound: Default::default(),
         host_health: Default::default(),
         hosted_viewer_unavailable: Default::default(),
+        delivery: Default::default(),
         dropped_hooks: None,
         queue: QueueCounts::default(),
         speaker: Some(SpeakerSeat::Senator(path("claude"))),
@@ -1338,6 +1339,7 @@ pub fn hosted_sessions() -> SessionsReply {
         prompt: None,
         working: false,
         last_activity: Utc::now() - chrono::Duration::minutes(2),
+        delivery: Default::default(),
         title: None,
         branch: None,
     };
@@ -1986,6 +1988,7 @@ pub fn session_tree(w: &mut World) {
                 paused: false,
                 working: false,
                 last_activity: ago(1),
+                delivery: Default::default(),
                 title: None,
                 branch: Some("main".into()),
             }
@@ -2039,6 +2042,7 @@ pub fn session_tree(w: &mut World) {
         branch: Some("main".into()),
         working: false,
         last_activity: ago(minutes),
+        delivery: Default::default(),
         title: None,
     };
     let mut codex = local(
@@ -2508,6 +2512,7 @@ pub fn marathon(w: &mut World, n: usize) {
         branch: Some("feat/app-sessions".into()),
         working: true,
         last_activity: Utc::now(),
+        delivery: Default::default(),
         title: Some("A long chair session".into()),
     });
     let big: String = (0..900)
@@ -2723,6 +2728,7 @@ pub fn working_sessions(w: &mut World, n: usize) {
             branch: Some("main".into()),
             working: true,
             last_activity: Utc::now(),
+            delivery: Default::default(),
             title: None,
         });
     }
@@ -2748,6 +2754,7 @@ pub fn streaming(w: &mut World) {
         branch: Some("main".into()),
         working: true,
         last_activity: Utc::now(),
+        delivery: Default::default(),
         title: Some("A streamed reply".into()),
     });
     let user = |text: &str| TimelineKind::UserMessage { text: text.into() };
@@ -2843,6 +2850,7 @@ pub fn seat_secretary(w: &mut World, state: senate_bridge::ipc::DefaultSecretary
         prompt: None,
         working: false,
         last_activity: Utc::now(),
+        delivery: Default::default(),
         title: Some("Your secretary".into()),
         branch: None,
     });
@@ -2858,6 +2866,7 @@ pub fn seat_secretary(w: &mut World, state: senate_bridge::ipc::DefaultSecretary
         branch: None,
         working: false,
         last_activity: Utc::now(),
+        delivery: Default::default(),
         title: Some("Your secretary".into()),
     });
     w.timelines.entry(id.into()).or_insert_with(|| {
@@ -2904,6 +2913,7 @@ fn revive(w: &mut World, r: &senate_bridge::ipc::SessionHistoryRow) {
         prompt: None,
         working: false,
         last_activity: Utc::now(),
+        delivery: Default::default(),
         title: r.title.clone(),
         branch: r.branch.clone(),
     });
@@ -2919,6 +2929,7 @@ fn revive(w: &mut World, r: &senate_bridge::ipc::SessionHistoryRow) {
         branch: r.branch.clone(),
         working: false,
         last_activity: Utc::now(),
+        delivery: Default::default(),
         title: r.title.clone(),
     });
 }

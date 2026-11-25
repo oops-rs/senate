@@ -563,6 +563,7 @@ fn session(label: &str, running: bool, prompt: bool) -> SessionRow {
         host_health: None,
         codex_scope_advisory: false,
         paused: false,
+        delivery: crate::ipc::SessionDelivery::default(),
         chair: false,
         shown_name: None,
         host_id: EventId::new(),

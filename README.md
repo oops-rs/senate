@@ -574,7 +574,8 @@ senate spawn claude --secretary --alias desk # add a Speaker’s desk secretary
 senate attach reviewer                 # restore or resume as needed (Ctrl-] detaches)
 senate session find reviewer           # which panel holds it? its terminal rings and flashes
 senate attach ledger::chair            # open the current chair's hosted session
-senate session list                    # active hosted sessions (a waiting command: its first line)
+senate session list                    # active hosted sessions (a waiting command: its first line;
+                                       # what each is doing and what waits for it unseen)
 senate session list --all               # include stopped and paused sessions
 senate session history --committee project    # past sessions
 senate session history --search "build error"  # search local conversations
@@ -811,6 +812,60 @@ the authenticated person is the Speaker, and accepts no one acting for the
 office. A person's agents use the person's token too, so the server alone
 cannot tell them apart; the machine refuses the request from inside a
 coding session's process tree, and no agent tool offers it.
+
+### Whether a message got through
+
+A message to an agent is recorded in the log and handed to its session. Senate
+then follows it, the same way for every runtime:
+
+| State | What it rests on |
+| :--- | :--- |
+| `queued` | It waits in Senate: for a session, or for the session's next hook. |
+| `injected` | The runtime took it: Claude Code's inbox accepted it, Codex's app-server started or steered a turn, or it went out in a hook's reply. |
+| `seen` | It is in the session's own record of its conversation (Claude Code's transcript, Codex's rollout, agy's conversation store), or the agent read it with `catch_up`. |
+| `acted` | The agent wrote in that thread afterwards. |
+
+The `receipt` tool shows the state for each recipient on this machine. A
+session with no record Senate can read (an ACP client, for one) stays at
+`injected`: Senate does not claim more than it can show.
+
+`senate session list` says what each hosted session is doing (ACTIVITY) and
+what waits for it unseen (WAITING, the count and how long the oldest has
+waited). `senate status` adds the same count to a session's push column, and
+the app shows it on the session's row.
+
+| ACTIVITY | Meaning |
+| :--- | :--- |
+| `active` | A turn is running: its hooks say so, or its TUI wrote to its terminal in the last 10 seconds. |
+| `idle` | It sits at its prompt. |
+| `prompt` | A permission prompt or a choice waits in its terminal. |
+| `not responding` | A message for it is not getting through; its sender and the chair were told. |
+
+When something waits unseen for a hosted session that sits idle, its host
+types Senate's own line `[senate] new messages` and Enter into its terminal.
+That prompt's hook hands the messages over (Claude Code, agy) or starts the
+push again (Codex). For Claude Code and Codex the push always comes first; the
+line follows only when the session's record still does not show the message
+45 seconds later, and the message is then offered again, marked as sent again.
+The line is never anything a peer wrote, and the host does not type it:
+
+- onto a line someone typed and has not sent (it never adds to it, clears it
+  or sends it);
+- into a permission prompt or a choice on the screen;
+- within 10 seconds of someone typing there (a read-only watcher does not
+  count), or of the TUI writing to its terminal (a turn is running).
+
+A session is woken at most three times, a minute apart, without answering;
+one of its own hooks or a person typing there starts the count again.
+
+When a message is still not getting through, Senate says so once, in the
+message's thread, to its sender and the committee's chair (the Speaker when
+the chair is the one stuck): after three unanswered wakes, or after five
+minutes behind a prompt, behind a person's unsent line, or in a terminal
+Senate does not host (it never types into one). The note says which seq, how
+long it has waited, why, and what a person can do. A second note follows when
+the message gets through. A session that is simply busy is not reported; only
+30 minutes of work without a pause is, and as busy.
 
 ### Where Each Command Lives
 
@@ -1182,7 +1237,7 @@ Running `senate setup install --yes` registers these tools into your agent runti
 - `join`: Switch or bind the current session to a committee.
 - `card`: Replace the bound seat card or the committee card if you chair it.
 - `secretary_work`: Read and claim shared work items across a secretary team.
-- `receipt`: Verify log publication status and local delivery receipts.
+- `receipt`: Verify log publication status and how far the message got to each recipient on this machine (`queued`, `injected`, `seen`, `acted`).
 - `terminal`: Read and drive a scratch terminal the session opened with `senate terminal open -- <command>` (`list`, `screen`, `type`, `key`, `wait`, `resize`, `close`); for a chair, read a hosted senator's screen. It starts no program. See [Terminal Use](#terminal-use).
 
 #### Presiding & Chair Tools
@@ -1213,16 +1268,11 @@ waits for it at its hooks: the brief and its messages arrive as a user
 message before its next model call, and a turn that ends while a message is
 waiting goes on to read it. agy offers no channel Senate can push into, so a
 message that lands while an agy session you started yourself sits idle waits
-for its next prompt (`senate status` shows its delivery as `at hooks`). A
-hosted agy (below) does not wait: when something arrives for it while it is
-idle, its host types Senate's own line `[senate] new messages` and Enter into
-its terminal, and that prompt's hook hands the messages over. It types that
-line once per idle spell, never anything a peer wrote, and not while someone
-has typed in the terminal in the last 10 seconds (it waits for them; a
-read-only watcher does not count). Nor while a line typed in its prompt is
-not yet submitted: the nudge never adds to it, clears it or sends it.
-Pressing Enter sends that prompt, whose hook hands the messages over too;
-clearing the line (Ctrl-U, Ctrl-C) lets the nudge come.
+for its next prompt (`senate status` shows its delivery as `at hooks`, and
+what waits beside it). A hosted agy (below) does not wait: when something
+arrives for it while it is idle, its host wakes it, as it wakes any hosted
+session with a message it has not taken in
+([Whether a message got through](#whether-a-message-got-through)).
 
 Host one like any other runtime:
 

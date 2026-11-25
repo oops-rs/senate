@@ -1256,6 +1256,7 @@ esac
 {RECORD_HOSTED_ARGV}
 while :; do
     IFS= read -r line || continue
+    printf '%s\n' "$line" >> "$output/typed"
     [ "$line" != "paint" ] || printf 'fixture TUI\n'
     if [ "$line" = "nested" ]; then
         /bin/sh -c '
@@ -3543,8 +3544,10 @@ async fn a_spawn_prompt_is_an_ordinary_request_to_the_new_seat() {
     assert_eq!(sent.to, vec![senate_core::Address::senator(&reply.senator)]);
     assert_eq!(sent.body, "Review the open PR on the gateway");
     assert!(sent.thread.is_none());
-    // Nothing was typed into its terminal: not the prompt, and not the
-    // idle nudge, which is agy's alone, even asked as agy's Stop asks.
+    // The prompt is never typed into its terminal: it is a message, and
+    // goes the way of any other. Nor is anything else typed this soon: a
+    // wake waits for the terminal to have been quiet, even asked as a
+    // turn's end asks.
     let waiting: senate_bridge::ipc::WaitingReply = call(
         &h,
         &Request::Waiting {
@@ -4681,10 +4684,12 @@ async fn a_hosted_agy_that_never_names_its_conversation_is_rolled_back() {
 }
 
 /// A stand-in for agy that takes turns: every line typed into it (but
-/// `paint` and `q`) is recorded in `.fixture-typed` and, unless
+/// `paint`, `q` and `spin`) is recorded in `.fixture-typed` and, unless
 /// `.fixture-hold` exists, starts a turn as agy's does: its PreInvocation
 /// hook (output appended to `.fixture-prompts`), then its Stop hook, again
-/// while Stop says to go on. It ends its seed turn the same way.
+/// while Stop says to go on. It ends its seed turn the same way. `spin`
+/// makes it write to its terminal, as a running turn does, until
+/// `.fixture-spin` is removed.
 const AGY_SWITCHED: &str = "a9d49af4-cc85-445f-9f85-e80aae712e71";
 
 fn agy_turn_fixture(dir: &std::path::Path, conversation: &str) -> PathBuf {
@@ -4736,6 +4741,11 @@ while IFS= read -r line; do
         check-process)
             {BIN:?} stats > .fixture-guard.tmp 2>&1
             mv .fixture-guard.tmp .fixture-guard
+            ;;
+        spin)
+            # A running turn keeps repainting until `.fixture-spin` is gone.
+            : > .fixture-spin
+            (while [ -e .fixture-spin ]; do printf '.'; sleep 0.2; done) &
             ;;
         *)
             printf '%s\n' "$line" >> .fixture-typed
@@ -5056,10 +5066,13 @@ async fn repair_a_legacy_hosted_agy_split_preserves_each_seats_authority_and_que
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typing_or_a_draft() {
-    use senate_core::{Address, Kind, NewEvent};
+/// How long the delivery check may take at test speed: a quiet terminal,
+/// then its wakes or its bound, each a few seconds ([`fast_timing`]).
+const CHECKED: Duration = Duration::from_secs(25);
 
+/// A hosted stand-in agy (`agy_turn_fixture`) on a daemon of its own, its
+/// seed turn over: the harness, its seat and its directory.
+async fn idle_hosted_agy(alias: &str) -> (Harness, SpawnReply, PathBuf) {
     let mut h = Harness::new().await;
     h.config.hosted_session_limit = Some(1);
     h.dir = tempfile::tempdir_in("/tmp").unwrap();
@@ -5083,7 +5096,7 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
             runtime: Some(HostedRuntime::Agy),
             profile: None,
             committee: committee(),
-            alias: Some(path("idler")),
+            alias: Some(path(alias)),
             cwd: project.clone(),
             chair: false,
             secretary: false,
@@ -5092,33 +5105,59 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
         },
     )
     .await;
+    eventually("the seed turn ended", TIMEOUT, || {
+        std::fs::read_to_string(project.join(".fixture-stops"))
+            .is_ok_and(|stops| !stops.is_empty())
+            .then_some(())
+    })
+    .await;
+    (h, seat, project)
+}
+
+/// A note from the person to `seat`.
+fn note_to(h: &Harness, seat: &SpawnReply, body: &str) -> senate_core::Event {
+    use senate_core::{Address, Kind, NewEvent};
+    h.server.append(
+        NewEvent::new(
+            committee(),
+            Kind::Note,
+            Address::senior(&h.config.person),
+            body,
+        )
+        .to(Address::senator(&seat.senator)),
+    )
+}
+
+/// What the session list says the delivery check knows of `session`.
+async fn delivery_of(h: &Harness, session: &str) -> ipc::SessionDelivery {
+    let list: ipc::SessionsReply = call(h, &Request::Sessions).await;
+    list.rows
+        .into_iter()
+        .find(|row| row.session_id == session)
+        .expect("the hosted session is listed")
+        .delivery
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_hosted_agy_is_woken_a_bounded_number_of_times_and_never_over_a_person() {
+    use senate_bridge::ipc::SessionActivity;
+    use senate_core::Address;
+
+    let (mut h, seat, project) = idle_hosted_agy("idler").await;
+    let agent = seat.senator.as_str();
     let read = |name: &str| std::fs::read_to_string(project.join(name)).unwrap_or_default();
     let typed = || read(".fixture-typed");
-    let nudges = || {
+    let wakes = || {
         typed()
             .lines()
             .filter(|l| *l == "[senate] new messages")
             .count()
     };
-    let note = |body: &str| {
-        h.server.append(
-            NewEvent::new(
-                committee(),
-                Kind::Note,
-                Address::senior(&h.config.person),
-                body,
-            )
-            .to(Address::senator(&seat.senator)),
-        );
-    };
-    eventually("the seed turn ended", TIMEOUT, || {
-        (!read(".fixture-stops").is_empty()).then_some(())
-    })
-    .await;
+    let note = |body: &str| note_to(&h, &seat, body);
 
-    // Idle with something waiting: one nudge, and its prompt hook takes it.
+    // Idle with something waiting: one wake, and its prompt hook takes it.
     note("first note for the idle agy");
-    eventually("the first nudge delivered", TIMEOUT, || {
+    eventually("the first wake delivered", CHECKED, || {
         read(".fixture-prompts")
             .contains("first note for the idle agy")
             .then_some(())
@@ -5127,27 +5166,55 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
     assert_eq!(typed(), "[senate] new messages\n");
     // Its turn ends idle: what arrives from here on is a new batch.
     let turns = || read(".fixture-stops").lines().count();
-    eventually("the nudged turn ended", TIMEOUT, || {
+    eventually("the woken turn ended", TIMEOUT, || {
         (turns() == 2).then_some(())
     })
     .await;
 
-    // A new batch after that PreInvocation is nudged again. This time the
-    // agy does not take its turn: what comes next waits, un-nudged.
+    // A new batch, and this time the agy takes no turn however it is
+    // woken. It is woken three times and no more; then the person who
+    // wrote and the Speaker (no chair here) are told, in the note's thread.
     std::fs::write(project.join(".fixture-hold"), "").unwrap();
-    note("second note");
-    eventually("the second nudge", TIMEOUT, || {
-        (nudges() == 2).then_some(())
+    let second = note("second note");
+    let stuck = eventually("the sender is told", CHECKED, || {
+        h.delivery_notes("stuck").into_iter().next()
     })
     .await;
-    note("third note");
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(nudges(), 2, "{}", typed());
+    assert_eq!(wakes(), 4, "one answered, three not: {}", typed());
+    assert_eq!(stuck.from, Address::senator(&seat.senator));
+    assert_eq!(stuck.kind, senate_core::Kind::Note);
+    assert_eq!(stuck.thread, Some(second.seq));
+    // To its sender, who chairs this committee: told once.
+    assert_eq!(stuck.to, [Address::senior(&h.config.person)]);
+    assert!(
+        stuck
+            .body
+            .contains(&format!("has not taken in seq {}", second.seq))
+            && stuck.body.contains("did not respond to 3 wake attempts")
+            && stuck.body.contains(&format!("senate attach {agent}")),
+        "{}",
+        stuck.body
+    );
+    assert_eq!(h.reach_of(agent, second.seq.0), Some(("queued", true)));
+    // What comes next is not typed for again; its sender is told as well,
+    // and the note that says so is never itself reported.
+    let third = note("third note");
+    eventually("the third note's sender is told", CHECKED, || {
+        (h.delivery_notes("stuck").len() == 2).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(wakes(), 4, "{}", typed());
+    assert_eq!(h.delivery_notes("stuck").len(), 2);
     assert!(!read(".fixture-prompts").contains("third note"));
+    let listed = delivery_of(&h, &seat.session_id).await;
+    assert_eq!(listed.activity, Some(SessionActivity::NotResponding));
+    assert_eq!((listed.waiting, listed.stuck), (2, true));
 
-    // A person types a prompt and that turn takes what waited. The host's
-    // quiet period starts with those keys. The turn and hooks can use part
-    // or all of it before the fourth note arrives.
+    // A person types a prompt and that turn takes what waited: one note
+    // per thread says it got through. The host's quiet period starts with
+    // those keys. The turn and hooks can use part or all of it before the
+    // fourth note arrives.
     std::fs::remove_file(project.join(".fixture-hold")).unwrap();
     let typed_at = std::time::Instant::now();
     attach(&h, "idler", b"prompt\r\x1d").await;
@@ -5161,39 +5228,72 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
         (turns() == 3).then_some(())
     })
     .await;
+    let through = eventually("the senders are told it got through", CHECKED, || {
+        let notes = h.delivery_notes("through");
+        (notes.len() == 2).then_some(notes)
+    })
+    .await;
+    assert_eq!(through[0].thread, Some(second.seq));
+    assert_eq!(through[1].thread, Some(third.seq));
+    assert!(
+        through[0]
+            .body
+            .ends_with(&format!("has now taken seq {} at its prompt.", second.seq)),
+        "{}",
+        through[0].body
+    );
+    assert_eq!(h.reach_of(agent, second.seq.0), Some(("injected", false)));
+    let listed = delivery_of(&h, &seat.session_id).await;
+    assert_eq!((listed.waiting, listed.stuck), (0, false));
+    // It answered: wakes count from nothing again.
     note("fourth note");
-    eventually("the fourth note is delivered by a nudge", TIMEOUT, || {
+    eventually("the fourth note is delivered by a wake", CHECKED, || {
         read(".fixture-prompts")
             .contains("fourth note")
             .then_some(())
     })
     .await;
-    assert_eq!(nudges(), 3, "{}", typed());
-    assert!(typed_at.elapsed() >= fast_timing().agy_nudge_quiet);
-    eventually("the third nudged turn ended", TIMEOUT, || {
+    assert_eq!(wakes(), 5, "{}", typed());
+    assert!(typed_at.elapsed() >= fast_timing().check.wake_quiet);
+    eventually("the fifth turn ended", TIMEOUT, || {
         (turns() == 4).then_some(())
     })
     .await;
 
-    // A person leaves half a line in the prompt: no nudge is typed onto it,
-    // however long it sits there. Once they clear it, the nudge comes.
+    // A person leaves half a line in the prompt: nothing is typed onto it,
+    // however long it sits there, and past the bound the sender is told
+    // why. Once they clear it, the wake comes.
     attach(&h, "idler", b"dra\x1d").await;
-    note("fifth note");
-    tokio::time::sleep(Duration::from_millis(3500)).await;
-    assert_eq!(nudges(), 3, "nudged onto a draft: {}", typed());
+    let fifth = note("fifth note");
+    let told = eventually("the sender is told of the draft", CHECKED, || {
+        h.delivery_notes("stuck").into_iter().nth(2)
+    })
+    .await;
+    assert_eq!(told.thread, Some(fifth.seq));
+    assert!(
+        told.body.contains("left text unsent in its input")
+            && told.body.contains("Senate does not type over it"),
+        "{}",
+        told.body
+    );
+    assert_eq!(wakes(), 5, "typed onto a draft: {}", typed());
     attach_typing(&h, "idler", false, b"\x15\x1d").await;
-    eventually("the nudge once the draft is cleared", TIMEOUT, || {
+    eventually("the wake once the draft is cleared", CHECKED, || {
         read(".fixture-prompts")
             .contains("fifth note")
             .then_some(())
     })
     .await;
-    assert_eq!(nudges(), 4, "{}", typed());
+    assert_eq!(wakes(), 6, "{}", typed());
     assert!(
         !typed().contains("dra"),
         "the draft was submitted: {}",
         typed()
     );
+    eventually("the sender is told the fifth got through", CHECKED, || {
+        (h.delivery_notes("through").len() == 3).then_some(())
+    })
+    .await;
     let _: ipc::PauseReply = call(
         &h,
         &Request::Pause {
@@ -5232,7 +5332,7 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
     .await;
     eventually(
         "resumed without a seed turn and received the backlog",
-        TIMEOUT,
+        CHECKED,
         || {
             read(".fixture-prompts")
                 .contains("backlog while paused")
@@ -5240,6 +5340,213 @@ async fn an_idle_hosted_agy_is_nudged_once_per_turn_and_never_over_a_person_typi
         },
     )
     .await;
+    h.stop().await;
+}
+
+/// For Claude Code the push into its inbox is the first move. When its own
+/// transcript shows the message, that is the end of it: seen, nothing typed.
+/// Only a push the transcript never shows is followed by the wake line, the
+/// message offered again and marked as sent again; three wakes unanswered
+/// and its sender is told; when the transcript shows it at last, told again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosted_claude_is_typed_into_only_when_its_transcript_never_shows_a_push() {
+    use senate_bridge::ipc::{HookEvent, HookReply, SessionActivity};
+    use std::io::Write as _;
+
+    let mut fixture = HostedClaude::launch(false).await;
+    let h = &fixture.h;
+    let pid = fixture.pid();
+    let native = fixture.seat.session_id.clone();
+    let agent = fixture.seat.senator.as_str().to_owned();
+    let inbox = common::FakeInbox::bind(h.dir.path().join("fixture-inbox.sock"));
+    let transcript = fixture.project.join(format!("{native}.jsonl"));
+    std::fs::write(&transcript, "").unwrap();
+    let mut hook = fixture.hook(
+        &native,
+        HookEvent::SessionStart,
+        Some("startup"),
+        Some(pid),
+        &[pid],
+    );
+    let Request::SessionHook(report) = &mut hook else {
+        unreachable!()
+    };
+    report.socket = Some(inbox.path.clone());
+    let _: HookReply = call(h, &hook).await;
+    let typed = || std::fs::read_to_string(h.dir.path().join("typed")).unwrap_or_default();
+    // Claude Code writes a pushed message into its transcript when it takes
+    // it off its queue: a `user` record carrying the text.
+    let record = |text: &str| {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        let row = serde_json::json!({
+            "type": "user", "isMeta": true, "origin": {"kind": "peer"},
+            "timestamp": chrono::Utc::now(),
+            "message": {"role": "user",
+                "content": format!("Another Claude session sent a message:\n{text}")},
+        });
+        writeln!(file, "{row}").unwrap();
+    };
+
+    // Pushed, and its transcript shows it: seen, and nothing is typed.
+    let first = note_to(h, &fixture.seat, "first note for claude");
+    let pushed = inbox.wait_messages(1).await;
+    assert!(pushed[0].contains("first note for claude"), "{}", pushed[0]);
+    assert_eq!(h.reach_of(&agent, first.seq.0), Some(("injected", false)));
+    record(&pushed[0]);
+    eventually("its transcript shows the first", CHECKED, || {
+        (h.reach_of(&agent, first.seq.0)? == ("seen", false)).then_some(())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(typed(), "", "typed into a Claude that had the message");
+    assert_eq!(inbox.messages().len(), 1);
+    assert_eq!(delivery_of(h, &native).await.waiting, 0);
+
+    // Pushed, and its transcript never shows it. The wake line follows, and
+    // the message is pushed again, saying it is sent again.
+    let second = note_to(h, &fixture.seat, "second note for claude");
+    let pushed = inbox.wait_messages(2).await;
+    assert!(!pushed[1].contains("are sent again"), "{}", pushed[1]);
+    let again = eventually("the wake and the second push", CHECKED, || {
+        let messages = inbox.messages();
+        (typed().contains("[senate] new messages") && messages.len() >= 3)
+            .then(|| messages[2].clone())
+    })
+    .await;
+    assert!(
+        again.contains("second note for claude") && again.contains("are sent again"),
+        "{again}"
+    );
+    assert!(!again.contains("first note for claude"), "{again}");
+    // Three wakes unanswered: its sender is told, once.
+    let stuck = eventually("the sender is told", CHECKED, || {
+        h.delivery_notes("stuck").into_iter().next()
+    })
+    .await;
+    assert_eq!(stuck.thread, Some(second.seq));
+    assert!(
+        stuck.body.contains("did not respond to 3 wake attempts"),
+        "{}",
+        stuck.body
+    );
+    assert_eq!(
+        typed().matches("[senate] new messages").count(),
+        3,
+        "{}",
+        typed()
+    );
+    let listed = delivery_of(h, &native).await;
+    assert_eq!(listed.activity, Some(SessionActivity::NotResponding));
+    assert_eq!((listed.waiting, listed.stuck), (1, true));
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    assert_eq!(typed().matches("[senate] new messages").count(), 3);
+    assert_eq!(h.delivery_notes("stuck").len(), 1);
+
+    // Its transcript shows it at last: its sender is told it was read.
+    record(&again);
+    let through = eventually("the sender is told it was read", CHECKED, || {
+        h.delivery_notes("through").into_iter().next()
+    })
+    .await;
+    assert!(
+        through
+            .body
+            .ends_with(&format!("has now read seq {}.", second.seq)),
+        "{}",
+        through.body
+    );
+    assert_eq!(h.reach_of(&agent, second.seq.0), Some(("seen", false)));
+    let listed = delivery_of(h, &native).await;
+    assert_eq!(listed.activity, Some(SessionActivity::Idle));
+    assert_eq!((listed.waiting, listed.stuck), (0, false));
+    fixture.h.stop().await;
+}
+
+/// Idle is what the terminal shows, not what the daemon remembers of the
+/// last hook: an agy that went idle before the daemon restarted is woken
+/// for what arrives after it. (It used to wait for a person to type.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_hosted_agy_is_woken_after_a_daemon_restart() {
+    let (mut h, seat, project) = idle_hosted_agy("sleeper").await;
+    h.stop().await;
+    start(&mut h).await;
+    let read = |name: &str| std::fs::read_to_string(project.join(name)).unwrap_or_default();
+    let note = note_to(&h, &seat, "arrived after the restart");
+    eventually("the wake delivered it", CHECKED, || {
+        read(".fixture-prompts")
+            .contains("arrived after the restart")
+            .then_some(())
+    })
+    .await;
+    assert_eq!(read(".fixture-typed"), "[senate] new messages\n");
+    assert_eq!(
+        h.reach_of(seat.senator.as_str(), note.seq.0),
+        Some(("injected", false))
+    );
+    assert!(h.delivery_notes("stuck").is_empty());
+    h.stop().await;
+}
+
+/// A session whose TUI keeps writing is in a turn: nothing is typed into
+/// it, and it is not reported as stuck. Only work without a pause past the
+/// long bound is told, as busy. When the turn ends, the wake comes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_busy_hosted_session_is_never_typed_into_and_is_not_called_stuck() {
+    use senate_bridge::ipc::SessionActivity;
+
+    let (mut h, seat, project) = idle_hosted_agy("worker").await;
+    let read = |name: &str| std::fs::read_to_string(project.join(name)).unwrap_or_default();
+    attach(&h, "worker", b"spin\r\x1d").await;
+    let note = note_to(&h, &seat, "while it works");
+    // Well past the wake's quiet period and the bound for a blocked
+    // session: still nothing typed, nobody told.
+    tokio::time::sleep(Duration::from_millis(6500)).await;
+    assert_eq!(read(".fixture-typed"), "", "typed into a running turn");
+    assert!(h.delivery_notes("stuck").is_empty());
+    let listed = delivery_of(&h, &seat.session_id).await;
+    assert_eq!(listed.activity, Some(SessionActivity::Active));
+    assert_eq!((listed.waiting, listed.stuck), (1, false));
+
+    // Past the long bound: one note, and it says busy, not stuck.
+    let busy = eventually("the sender is told it is busy", CHECKED, || {
+        h.delivery_notes("busy").into_iter().next()
+    })
+    .await;
+    assert_eq!(busy.thread, Some(note.seq));
+    assert!(
+        busy.body.contains(&format!(
+            "is busy and has not taken in seq {} yet",
+            note.seq
+        )),
+        "{}",
+        busy.body
+    );
+    assert_eq!(read(".fixture-typed"), "");
+    let listed = delivery_of(&h, &seat.session_id).await;
+    assert_eq!(
+        (listed.activity, listed.stuck),
+        (Some(SessionActivity::Active), false),
+        "busy shows as active, not as not responding"
+    );
+    // Said once, however long the turn goes on.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(h.delivery_notes("busy").len(), 1);
+
+    // The turn ends: the terminal goes quiet and the wake delivers it.
+    std::fs::remove_file(project.join(".fixture-spin")).unwrap();
+    eventually("the wake after the turn", CHECKED, || {
+        read(".fixture-prompts")
+            .contains("while it works")
+            .then_some(())
+    })
+    .await;
+    assert_eq!(read(".fixture-typed"), "[senate] new messages\n");
+    // It was never stuck: nothing more is said of it.
+    assert!(h.delivery_notes("stuck").is_empty());
+    assert!(h.delivery_notes("through").is_empty());
     h.stop().await;
 }
 

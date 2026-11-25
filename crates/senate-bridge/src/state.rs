@@ -163,6 +163,9 @@ CREATE TABLE IF NOT EXISTS queue (
     enqueued_at  INTEGER NOT NULL,
     delivered_at INTEGER,
     redelivered  INTEGER NOT NULL DEFAULT 0,
+    seen_at      INTEGER,
+    acted_at     INTEGER,
+    stuck_at     INTEGER,
     PRIMARY KEY (agent, committee, seq)
 );
 CREATE INDEX IF NOT EXISTS queue_by_status ON queue (status, agent, committee, seq);
@@ -308,6 +311,70 @@ impl QueueItem {
             self.event.committee.clone(),
             self.event.seq,
         )
+    }
+}
+
+/// How far a message has got towards one agent. `Delivered` in the queue
+/// only says a runtime took it; these say what Senate can show beyond that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Reach {
+    /// Waiting in Senate: for a session, a triage verdict, or the next hook.
+    Queued,
+    /// Handed to the runtime: its inbox or app-server took it, or it went
+    /// out in a hook's reply. Nothing yet shows the agent has it.
+    Injected,
+    /// It is in the session's own conversation record, or the agent read
+    /// it with `catch_up`.
+    Seen,
+    /// The agent wrote in the thread afterwards.
+    Acted,
+}
+
+impl Reach {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Injected => "injected",
+            Self::Seen => "seen",
+            Self::Acted => "acted",
+        }
+    }
+}
+
+/// A queue item with what the delivery check recorded of it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tracked {
+    pub item: QueueItem,
+    pub via: Option<String>,
+    /// When a runtime took it.
+    pub injected_at: Option<DateTime<Utc>>,
+    pub seen_at: Option<DateTime<Utc>>,
+    pub acted_at: Option<DateTime<Utc>>,
+    /// When the sender and the chair were told it is not getting through.
+    pub stuck_at: Option<DateTime<Utc>>,
+}
+
+impl Tracked {
+    /// `None` for an item that was withdrawn ([`ItemStatus::Cancelled`]).
+    pub fn reach(&self) -> Option<Reach> {
+        Some(match self.item.status {
+            ItemStatus::Cancelled => return None,
+            ItemStatus::Pending | ItemStatus::Inflight | ItemStatus::Queued => Reach::Queued,
+            ItemStatus::Delivered if self.acted_at.is_some() => Reach::Acted,
+            ItemStatus::Delivered if self.seen_at.is_some() => Reach::Seen,
+            ItemStatus::Delivered => Reach::Injected,
+        })
+    }
+
+    /// Reported as not getting through, and not yet reported as through.
+    pub fn stuck(&self) -> bool {
+        self.stuck_at.is_some()
+    }
+
+    /// Since when it has been where it is: handed over, or else received.
+    pub fn waiting_since(&self) -> DateTime<Utc> {
+        self.injected_at.unwrap_or(self.item.enqueued_at)
     }
 }
 
@@ -581,6 +648,21 @@ fn item_from_row(row: &Row<'_>) -> rusqlite::Result<QueueItem> {
         session_id: row.get(3)?,
         enqueued_at: ms_to_time(row.get(4)?),
         redelivered: row.get::<_, i64>(5)? != 0,
+    })
+}
+
+/// A row of `ITEM_COLS, via, delivered_at, seen_at, acted_at, stuck_at`.
+fn tracked_from_row(row: &Row<'_>) -> rusqlite::Result<Tracked> {
+    let time = |idx| -> rusqlite::Result<Option<DateTime<Utc>>> {
+        Ok(row.get::<_, Option<i64>>(idx)?.map(ms_to_time))
+    };
+    Ok(Tracked {
+        item: item_from_row(row)?,
+        via: row.get(6)?,
+        injected_at: time(7)?,
+        seen_at: time(8)?,
+        acted_at: time(9)?,
+        stuck_at: time(10)?,
     })
 }
 
@@ -942,6 +1024,20 @@ impl Store {
                 "ALTER TABLE queue ADD COLUMN relay_reminded INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
+        }
+        // A database from before the delivery check: nothing in it is known
+        // seen, so what was delivered long ago stays `injected` and is left
+        // alone ([`Store::unseen`] looks at recent rows only).
+        for column in ["seen_at", "acted_at", "stuck_at"] {
+            if !conn
+                .prepare("SELECT 1 FROM pragma_table_info('queue') WHERE name = ?1")?
+                .exists([column])?
+            {
+                conn.execute(
+                    &format!("ALTER TABLE queue ADD COLUMN {column} INTEGER"),
+                    [],
+                )?;
+            }
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -2629,28 +2725,22 @@ impl Store {
         &self,
         event: &Event,
     ) -> Result<Vec<crate::ipc::LocalDelivery>, StoreError> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT agent, status, via FROM queue WHERE committee = ?1 AND seq = ?2
-             AND json_extract(event, '$.id') = ?3 ORDER BY agent",
-        )?;
-        let rows = stmt.query_map(
-            params![
-                event.committee.as_str(),
-                seq_sql(event.seq),
-                event.id.to_string()
-            ],
-            |row| {
-                let raw: String = row.get(1)?;
-                Ok(crate::ipc::LocalDelivery {
-                    agent: agent_col(row, 0)?,
-                    state: ItemStatus::parse(&raw)
-                        .ok_or_else(|| conversion(1, format!("unknown item status {raw}")))?,
-                    via: row.get(2)?,
-                })
-            },
-        )?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        Ok(self
+            .tracked_deliveries(event)?
+            .into_iter()
+            .map(|row| crate::ipc::LocalDelivery {
+                reach: row.reach(),
+                since: Some(
+                    row.acted_at
+                        .or(row.seen_at)
+                        .unwrap_or_else(|| row.waiting_since()),
+                ),
+                stuck: row.stuck(),
+                agent: row.item.agent,
+                state: row.item.status,
+                via: row.via,
+            })
+            .collect())
     }
 
     pub fn counts(&self) -> Result<QueueCounts, StoreError> {
@@ -2834,13 +2924,195 @@ impl Store {
 
     /// `catch_up` showed these to the agent: nothing left to push.
     pub fn mark_read(&self, keys: &[ItemKey], session: &str) -> Result<Vec<ItemKey>, StoreError> {
-        self.transition(
+        let read = self.transition(
             keys,
             ItemStatus::Delivered,
             Some(session),
             Some("catch_up"),
             "status IN ('pending', 'queued')",
-        )
+        )?;
+        // The agent asked for them and the tool's result carried them.
+        self.agent_saw(&read)?;
+        Ok(read)
+    }
+
+    // ---- the delivery check ([`crate::daemon`], `delivery_check`) ---------
+
+    /// What is handed or held for a live session and not known seen by its
+    /// agent: items held for its hooks, and items a runtime took within
+    /// `window` whose session shows no evidence of them yet. A companion's
+    /// item (`spawned`) is not followed: the session was started with it.
+    pub fn unseen(&self, window: Duration) -> Result<Vec<Tracked>, StoreError> {
+        let cutoff = now_ms() - i64::try_from(window.as_millis()).unwrap_or(i64::MAX);
+        let sql = format!(
+            "SELECT {ITEM_COLS}, via, delivered_at, seen_at, acted_at, stuck_at FROM queue
+             WHERE session_id IS NOT NULL AND (status = 'queued'
+                OR (status = 'delivered' AND seen_at IS NULL
+                    AND COALESCE(via, '') NOT IN ('spawned', 'catch_up')
+                    AND delivered_at >= ?1))
+             ORDER BY agent, committee, seq"
+        );
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([cutoff], tracked_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// One item with what the delivery check knows of it.
+    pub fn tracked(
+        &self,
+        agent: &SenatorName,
+        committee: &CommitteeId,
+        seq: Seq,
+    ) -> Result<Option<Tracked>, StoreError> {
+        let sql = format!(
+            "SELECT {ITEM_COLS}, via, delivered_at, seen_at, acted_at, stuck_at FROM queue
+             WHERE agent = ?1 AND committee = ?2 AND seq = ?3"
+        );
+        Ok(self
+            .conn()
+            .query_row(
+                &sql,
+                params![agent_text(agent), committee.as_str(), seq_sql(seq)],
+                tracked_from_row,
+            )
+            .optional()?)
+    }
+
+    /// The session's own record shows these: its agent has them. Returns
+    /// how many were not known seen before.
+    pub fn agent_saw(&self, keys: &[ItemKey]) -> Result<usize, StoreError> {
+        let conn = self.conn();
+        let mut seen = conn.prepare(
+            "UPDATE queue SET seen_at = ?4 WHERE agent = ?1 AND committee = ?2 AND seq = ?3
+               AND status = 'delivered' AND seen_at IS NULL",
+        )?;
+        let mut marked = 0;
+        for key in keys {
+            marked += seen.execute(params![
+                agent_text(&key.0),
+                key.1.as_str(),
+                seq_sql(key.2),
+                now_ms()
+            ])?;
+        }
+        Ok(marked)
+    }
+
+    /// `agent` wrote in thread `root` of `committee`: it has acted on what
+    /// it was handed there, and so has seen it.
+    pub fn mark_acted(
+        &self,
+        agent: &SenatorName,
+        committee: &CommitteeId,
+        root: Seq,
+    ) -> Result<usize, StoreError> {
+        Ok(self.conn().execute(
+            "UPDATE queue SET acted_at = COALESCE(acted_at, ?4), seen_at = COALESCE(seen_at, ?4)
+             WHERE agent = ?1 AND committee = ?2 AND status = 'delivered'
+               AND (seq = ?3 OR json_extract(event, '$.thread') = ?3)",
+            params![
+                agent_text(agent),
+                committee.as_str(),
+                seq_sql(root),
+                now_ms()
+            ],
+        )?)
+    }
+
+    /// Items reported as not getting through that have got through since:
+    /// seen, or taken by the session at one of its own hooks.
+    pub fn recovered(&self) -> Result<Vec<Tracked>, StoreError> {
+        let sql = format!(
+            "SELECT {ITEM_COLS}, via, delivered_at, seen_at, acted_at, stuck_at FROM queue
+             WHERE stuck_at IS NOT NULL AND status = 'delivered'
+               AND (seen_at IS NOT NULL OR (via = 'hook' AND delivered_at > stuck_at))
+             ORDER BY agent, committee, seq"
+        );
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], tracked_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The sender and the chair have been told these got through.
+    pub fn clear_stuck(&self, keys: &[ItemKey]) -> Result<(), StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "UPDATE queue SET stuck_at = NULL WHERE agent = ?1 AND committee = ?2 AND seq = ?3",
+        )?;
+        for key in keys {
+            stmt.execute(params![agent_text(&key.0), key.1.as_str(), seq_sql(key.2)])?;
+        }
+        Ok(())
+    }
+
+    /// The sender and the chair are being told these are not getting
+    /// through. Returns the ones not reported before.
+    pub fn mark_stuck(&self, keys: &[ItemKey]) -> Result<Vec<ItemKey>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "UPDATE queue SET stuck_at = ?4 WHERE agent = ?1 AND committee = ?2 AND seq = ?3
+               AND stuck_at IS NULL AND seen_at IS NULL",
+        )?;
+        let mut marked = Vec::new();
+        for key in keys {
+            if stmt.execute(params![
+                agent_text(&key.0),
+                key.1.as_str(),
+                seq_sql(key.2),
+                now_ms()
+            ])? > 0
+            {
+                marked.push(key.clone());
+            }
+        }
+        Ok(marked)
+    }
+
+    /// Offer again what `session` was handed and shows no sign of: back to
+    /// held for it, flagged re-sent, so the delivery that follows says it
+    /// may already have been seen.
+    pub fn offer_again(&self, keys: &[ItemKey], session: &str) -> Result<Vec<ItemKey>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "UPDATE queue SET status = 'queued', redelivered = 1, delivered_at = NULL
+             WHERE agent = ?1 AND committee = ?2 AND seq = ?3 AND session_id = ?4
+               AND status = 'delivered' AND seen_at IS NULL",
+        )?;
+        let mut moved = Vec::new();
+        for key in keys {
+            if stmt.execute(params![
+                agent_text(&key.0),
+                key.1.as_str(),
+                seq_sql(key.2),
+                session
+            ])? > 0
+            {
+                moved.push(key.clone());
+            }
+        }
+        Ok(moved)
+    }
+
+    /// Every delivery of one event on this machine, for `receipt`.
+    fn tracked_deliveries(&self, event: &Event) -> Result<Vec<Tracked>, StoreError> {
+        let sql = format!(
+            "SELECT {ITEM_COLS}, via, delivered_at, seen_at, acted_at, stuck_at FROM queue
+             WHERE committee = ?1 AND seq = ?2 AND json_extract(event, '$.id') = ?3
+             ORDER BY agent"
+        );
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![
+                event.committee.as_str(),
+                seq_sql(event.seq),
+                event.id.to_string()
+            ],
+            tracked_from_row,
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// At daemon start nothing is really in flight: items still marked so
@@ -4028,6 +4300,156 @@ mod tests {
             .unwrap();
         assert!(!flagged(2).redelivered);
         assert!(s.redelivered(&[key(&claude(), 2)]).unwrap().is_empty());
+    }
+
+    /// queued → injected → seen → acted, each on its own evidence, and what
+    /// is offered again says so.
+    #[test]
+    fn an_item_is_followed_from_the_runtime_taking_it_to_the_agent_acting_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("state.db")).unwrap();
+        for i in 1..=4 {
+            s.ingest(&claude(), &event(i), true, None).unwrap();
+        }
+        let reach = |seq| {
+            s.tracked(&claude(), &committee(), Seq(seq))
+                .unwrap()
+                .unwrap()
+                .reach()
+        };
+        let window = Duration::from_secs(3600);
+        let unseen = || -> Vec<u64> {
+            s.unseen(window)
+                .unwrap()
+                .iter()
+                .map(|row| row.item.event.seq.0)
+                .collect()
+        };
+        assert_eq!(reach(1), Some(Reach::Queued));
+        assert!(
+            unseen().is_empty(),
+            "nothing is held for or handed to a session yet"
+        );
+
+        // 1 and 2 pushed, 3 held for the session's hooks, 4 read by catch_up.
+        s.claim_inflight(&[key(&claude(), 1), key(&claude(), 2)], "a")
+            .unwrap();
+        s.finish_inflight(&[key(&claude(), 1), key(&claude(), 2)], "a", "inbox")
+            .unwrap();
+        s.hold_pending_for_hooks(&[key(&claude(), 3)], "a").unwrap();
+        s.mark_read(&[key(&claude(), 4)], "a").unwrap();
+        assert_eq!(reach(1), Some(Reach::Injected), "taken, not known seen");
+        assert_eq!(reach(3), Some(Reach::Queued));
+        assert_eq!(reach(4), Some(Reach::Seen), "the agent read it itself");
+        assert_eq!(unseen(), [1, 2, 3]);
+
+        // The session's record shows 1.
+        assert_eq!(s.agent_saw(&[key(&claude(), 1)]).unwrap(), 1);
+        assert_eq!(s.agent_saw(&[key(&claude(), 1)]).unwrap(), 0, "once");
+        assert_eq!(
+            s.agent_saw(&[key(&claude(), 3)]).unwrap(),
+            0,
+            "an item still held was not handed over, whatever a record says"
+        );
+        assert_eq!(reach(1), Some(Reach::Seen));
+        assert_eq!(unseen(), [2, 3]);
+
+        // 2 is offered again: held for the session, flagged re-sent.
+        assert_eq!(
+            s.offer_again(&[key(&claude(), 1), key(&claude(), 2)], "a")
+                .unwrap(),
+            [key(&claude(), 2)],
+            "what was seen is not sent twice"
+        );
+        let again = s.item(&claude(), &committee(), Seq(2)).unwrap().unwrap();
+        assert_eq!(again.status, ItemStatus::Queued);
+        assert!(again.redelivered);
+        assert_eq!(reach(2), Some(Reach::Queued));
+        s.claim_for_hook(&[key(&claude(), 2)], "a").unwrap();
+        assert_eq!(reach(2), Some(Reach::Injected));
+
+        // The agent writes in thread 2: acted on, and so seen.
+        assert_eq!(s.mark_acted(&claude(), &committee(), Seq(2)).unwrap(), 1);
+        assert_eq!(reach(2), Some(Reach::Acted));
+        assert_eq!(reach(1), Some(Reach::Seen), "another thread");
+        assert_eq!(unseen(), [3]);
+
+        // What a runtime took long ago is no longer looked for.
+        s.claim_for_hook(&[key(&claude(), 3)], "a").unwrap();
+        assert_eq!(unseen(), [3]);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(s.unseen(Duration::ZERO).unwrap().is_empty());
+    }
+
+    /// A reported item stays reported until it gets through: seen, or taken
+    /// by the session at one of its own hooks.
+    #[test]
+    fn a_stuck_item_is_reported_once_and_recovers_when_seen_or_taken_at_a_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("state.db")).unwrap();
+        for i in 1..=3 {
+            s.ingest(&claude(), &event(i), true, None).unwrap();
+        }
+        let keys = [key(&claude(), 1), key(&claude(), 2), key(&claude(), 3)];
+        s.claim_inflight(&keys[..1], "a").unwrap();
+        s.finish_inflight(&keys[..1], "a", "inbox").unwrap();
+        s.hold_pending_for_hooks(&keys[1..], "a").unwrap();
+        assert_eq!(s.mark_stuck(&keys).unwrap(), keys);
+        assert!(s.mark_stuck(&keys).unwrap().is_empty(), "told once");
+        let recovered = || -> Vec<u64> {
+            s.recovered()
+                .unwrap()
+                .iter()
+                .map(|row| row.item.event.seq.0)
+                .collect()
+        };
+        assert!(recovered().is_empty());
+        assert!(
+            s.unseen(Duration::from_secs(60))
+                .unwrap()
+                .iter()
+                .all(Tracked::stuck)
+        );
+
+        // 1 pushed again without its record showing it: still stuck.
+        s.offer_again(&keys[..1], "a").unwrap();
+        s.claim_inflight_with_held(&keys[..1], "a").unwrap();
+        s.finish_inflight(&keys[..1], "a", "inbox").unwrap();
+        assert!(recovered().is_empty());
+        // 2 taken at the session's hook; 1 shown by its record.
+        std::thread::sleep(Duration::from_millis(5));
+        s.claim_for_hook(&keys[1..2], "a").unwrap();
+        s.agent_saw(&keys[..1]).unwrap();
+        assert_eq!(recovered(), [1, 2]);
+        s.clear_stuck(&keys[..2]).unwrap();
+        assert!(recovered().is_empty());
+        let three = s.tracked(&claude(), &committee(), Seq(3)).unwrap().unwrap();
+        assert!(three.stuck(), "still held, still reported");
+        // Seen first is never reported.
+        assert!(s.mark_stuck(&keys[..1]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_database_from_before_the_delivery_check_gets_its_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let s = Store::open(&path).unwrap();
+            s.ingest(&claude(), &event(1), true, None).unwrap();
+            s.claim_inflight(&[key(&claude(), 1)], "a").unwrap();
+            s.finish_inflight(&[key(&claude(), 1)], "a", "inbox")
+                .unwrap();
+            let conn = s.conn();
+            for column in ["seen_at", "acted_at", "stuck_at"] {
+                conn.execute(&format!("ALTER TABLE queue DROP COLUMN {column}"), [])
+                    .unwrap();
+            }
+        }
+        let s = Store::open(&path).unwrap();
+        let row = s.tracked(&claude(), &committee(), Seq(1)).unwrap().unwrap();
+        assert_eq!(row.reach(), Some(Reach::Injected));
+        assert_eq!(row.via.as_deref(), Some("inbox"));
+        assert!(!row.stuck());
     }
 
     #[test]

@@ -836,8 +836,9 @@ async fn ask_answer_and_catch_up_end_to_end() {
     let (err, delivered) = mcp
         .call("receipt", json!({"committee":"refund-v2","seq":2}))
         .await;
+    // The agent read it itself: seen, not merely handed over.
     assert!(
-        !err && delivered.contains("delivered (catch_up)"),
+        !err && delivered.contains("[senator::claude]  seen (catch_up)"),
         "{delivered}"
     );
     let (_, text) = mcp.call("catch_up", json!({})).await;

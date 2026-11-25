@@ -137,13 +137,16 @@ pub(super) async fn serve(
     }
 }
 
-enum Source {
+/// A session's own record of its conversation, read as it grows: the
+/// timeline the person is shown, and what the delivery check looks in for
+/// a message it handed over ([`super::delivery_check`]).
+pub(super) enum Source {
     Jsonl(Box<Transcript>),
     Agy(Box<timeline::agy::Watch>),
 }
 
 impl Source {
-    fn open(path: PathBuf, runtime: Runtime, after: u64) -> Result<Self, IpcError> {
+    pub(super) fn open(path: PathBuf, runtime: Runtime, after: u64) -> Result<Self, IpcError> {
         if runtime == Runtime::Agy {
             return timeline::agy::Watch::open(path, after)
                 .map(Box::new)
@@ -156,7 +159,9 @@ impl Source {
             .map_err(|_| IpcError::bad_request("the session has no readable timeline transcript"))
     }
 
-    fn updates(
+    /// What was added since the last call; `None` when the record was
+    /// replaced or cannot be read, and must be opened again.
+    pub(super) fn updates(
         &mut self,
         path: &Path,
         runtime: Runtime,

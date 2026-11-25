@@ -1902,7 +1902,16 @@ pub fn fast_timing() -> Timing {
         // Off unless a test turns it on (`tests/checkpoint.rs`).
         checkpoint_poll: Duration::from_secs(3600),
         checkpoint_interval: Duration::from_secs(7200),
-        agy_nudge_quiet: Duration::from_secs(2),
+        // The delivery check at test speed: a wake once a TUI has been
+        // quiet 2 s, three of them 2 s apart, and the sender told after 6 s
+        // behind a prompt or a draft.
+        check: senate_bridge::daemon::CheckTiming {
+            wake_quiet: Duration::from_secs(2),
+            seen_within: Duration::from_secs(2),
+            wake_spacing: Duration::from_secs(2),
+            stuck_after: Duration::from_secs(6),
+            busy_after: Duration::from_secs(8),
+        },
         screen_prompt_quiet: Duration::from_millis(600),
         pause_quiet: Duration::from_millis(300),
         shutdown_pause: Duration::from_secs(90),
@@ -2011,6 +2020,31 @@ impl Harness {
         self.item_of("claude", seq)
     }
 
+    /// How far `agent`'s item for `seq` on refund-v2 has got towards it
+    /// (`queued`, `injected`, `seen`, `acted`), and whether its sender was
+    /// told it is not getting through.
+    pub fn reach_of(&self, agent: &str, seq: u64) -> Option<(&'static str, bool)> {
+        let row = self
+            .store()
+            .tracked(&path(agent), &committee(), Seq(seq))
+            .unwrap()?;
+        Some((row.reach()?.as_str(), row.stuck()))
+    }
+
+    /// The notes the delivery check wrote on refund-v2 saying messages are
+    /// `stuck` or got `through`, in log order.
+    pub fn delivery_notes(&self, state: &str) -> Vec<Event> {
+        self.server
+            .events("refund-v2")
+            .into_iter()
+            .filter(|e| {
+                e.meta
+                    .get(senate_core::meta::DELIVERY_CHECK)
+                    .is_some_and(|m| m["state"] == state)
+            })
+            .collect()
+    }
+
     /// `agent`'s queue item for `seq` on refund-v2.
     pub fn item_of(&self, agent: &str, seq: u64) -> Option<senate_bridge::state::QueueItem> {
         self.store()
@@ -2091,10 +2125,27 @@ impl Harness {
         env: &HookEnv,
         runtime: Option<senate_bridge::session::Runtime>,
     ) -> Option<Value> {
+        // A path nothing writes: the session keeps no record Senate reads.
+        let nowhere = PathBuf::from(format!("/tmp/{session_id}.jsonl"));
+        self.hook_recording(kind, session_id, cwd, env, runtime, &nowhere)
+            .await
+    }
+
+    /// [`Harness::hook_as`] for a session that keeps its conversation in
+    /// `transcript`, which the test writes as the runtime would.
+    pub async fn hook_recording(
+        &self,
+        kind: HookKind,
+        session_id: &str,
+        cwd: &Path,
+        env: &HookEnv,
+        runtime: Option<senate_bridge::session::Runtime>,
+        transcript: &Path,
+    ) -> Option<Value> {
         let stdin = serde_json::json!({
             "session_id": session_id,
             "cwd": cwd,
-            "transcript_path": format!("/tmp/{session_id}.jsonl"),
+            "transcript_path": transcript,
             "hook_event_name": kind.event_name(),
             "source": "startup",
         })

@@ -140,6 +140,79 @@ async fn directed_question_is_pushed_once_with_the_inbox_framing() {
     h.stop().await;
 }
 
+/// Where a session keeps no record Senate can read (an ACP client, a
+/// session that never named a transcript), nothing can show that a message
+/// was seen. It stays `injected`, the weakest honest state: not counted as
+/// waiting, never reported as not getting through, and not sent again.
+/// The agent answering in its thread is evidence of its own: acted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_no_record_to_read_a_push_stays_injected_and_is_never_reported() {
+    let mut h = Harness::new().await;
+    h.start().await;
+    let inbox = h.inbox("s1");
+    let wd = h.workdir("w1", Some("refund-v2"));
+    h.hook(HookKind::SessionStart, "s1", &wd, Some(&inbox))
+        .await;
+    h.wait_stream("refund-v2").await;
+    let asked = h
+        .server
+        .append(question(claude("bob"), claude("alice"), "Which header?"));
+    inbox.wait_messages(1).await;
+    eventually("the inbox took it", WAIT, || {
+        (h.reach_of("claude", asked.seq.0)? == ("injected", false)).then_some(())
+    })
+    .await;
+    // Past every bound of the check at test speed.
+    tokio::time::sleep(Duration::from_secs(9)).await;
+    assert_eq!(h.reach_of("claude", asked.seq.0), Some(("injected", false)));
+    assert!(h.delivery_notes("stuck").is_empty());
+    assert_eq!(inbox.messages().len(), 1, "pushed once");
+    let status: StatusReply = ipc::request(&h.socket(), &Request::Status, WAIT, WAIT)
+        .await
+        .unwrap();
+    assert!(status.delivery.is_empty(), "{:?}", status.delivery);
+    let receipt: ipc::EventReceipt = ipc::request(
+        &h.socket(),
+        &Request::Receipt {
+            committee: committee(),
+            seq: asked.seq,
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    let text = receipt.render(senate_core::Locale::En);
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("[senator::claude]  injected (inbox) for ")),
+        "{text}"
+    );
+
+    // It answers: acted on, and so seen.
+    let _: Value = ipc::request(
+        &h.socket(),
+        &Request::Answer {
+            session: ipc::SessionSelector {
+                session_id: Some("s1".into()),
+                claude_pid: None,
+            },
+            thread: asked.seq,
+            body: "Idempotency-Key".into(),
+            id: None,
+            committee: None,
+            agent: None,
+            as_person: false,
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    assert_eq!(h.reach_of("claude", asked.seq.0), Some(("acted", false)));
+    h.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_burst_becomes_one_inbox_message_in_seq_order() {
     let mut h = Harness::new().await;
@@ -313,7 +386,7 @@ async fn restart_resumes_from_the_persisted_cursor() {
 /// already have been seen; a normal push does not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_batch_in_flight_at_a_crash_is_sent_again_and_says_so() {
-    const NOTE: &str = "sent again after the Senate daemon restarted";
+    const NOTE: &str = "are sent again: Senate could not tell that they reached you";
     let mut h = Harness::new().await;
     h.start().await;
     let inbox = h.inbox("s1");
@@ -685,6 +758,7 @@ async fn streams_follow_sessions_and_configured_committees() {
             hosted_unbound: Default::default(),
             host_health: Default::default(),
             hosted_viewer_unavailable: Default::default(),
+            delivery: Default::default(),
             dropped_hooks: None,
             queue: status.queue,
             locale: status.locale,

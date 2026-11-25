@@ -1223,22 +1223,26 @@ pub fn dropped_note(dropped: u64, locale: Locale) -> String {
     }
 }
 
-/// The line saying a batch holds messages sent again after a daemon
-/// restart, which the session may have taken already. Delivery is at least
-/// once ([`crate::delivery`], "Delivery guarantee").
+/// The line saying a batch holds messages sent again, which the session
+/// may have taken already: the daemon restarted while handing them over,
+/// or the session's own record showed no sign of them and they were offered
+/// again with a wake ([`crate::state::Store::offer_again`]). Delivery is at
+/// least once ([`crate::delivery`], "Delivery guarantee").
 pub fn redelivered_note(locale: Locale) -> String {
     match locale {
         Locale::Zh => {
-            "[senate] 这里发给你的消息中，有的是 Senate 守护进程重启后再次发送的：重启前它们可能\
-             已经送到过你这里，你也许已经看过。再次回答或行动之前，先按标头里的 seq 查一下它的\
-             讨论串（你的对话记录、mcp__senate__search），看你是否已经回答或处理过。"
+            "[senate] 这里发给你的消息中，有的是再次发送的：Senate 无法确认它们第一次已经送到你\
+             这里（守护进程在投递时重启，或你的会话里没有出现它们），你也许已经看过。再次回答或\
+             行动之前，先按标头里的 seq 查一下它的讨论串（你的对话记录、mcp__senate__search），\
+             看你是否已经回答或处理过。"
                 .to_string()
         }
-        Locale::En => "[senate] Some of the messages addressed to you here are sent again after \
-             the Senate daemon restarted: they may have reached you before the restart, so you \
-             may have seen them already. Before answering or acting on one again, check its \
-             thread by the seq in its header (your conversation, mcp__senate__search) for \
-             whether you already did."
+        Locale::En => "[senate] Some of the messages addressed to you here are sent again: \
+             Senate could not tell that they reached you the first time (its daemon restarted \
+             while handing them over, or your session showed no sign of them), so you may have \
+             seen them already. Before answering or acting on one again, check its thread by \
+             the seq in its header (your conversation, mcp__senate__search) for whether you \
+             already did."
             .to_string(),
     }
 }
@@ -2474,8 +2478,8 @@ mod tests {
             ..PushNotes::default()
         };
         for (locale, marker) in [
-            (EN, "sent again after the Senate daemon restarted"),
-            (ZH, "重启后再次发送"),
+            (EN, "are sent again: Senate could not tell"),
+            (ZH, "有的是再次发送的"),
         ] {
             let normal = render_push(&events, &alice(), 10_000, 0, locale).text;
             assert!(!normal.contains(marker), "{normal}");

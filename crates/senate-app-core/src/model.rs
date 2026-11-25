@@ -860,6 +860,7 @@ mod tests {
             hosted_unbound: Default::default(),
             host_health: Default::default(),
             hosted_viewer_unavailable: Default::default(),
+            delivery: Default::default(),
             dropped_hooks: None,
             queue: Default::default(),
             speaker: None,
