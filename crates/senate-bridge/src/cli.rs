@@ -2477,15 +2477,15 @@ fn the_waiting_prompt(
 
 /// How to add a launch profile, for `senate profiles` with none.
 fn profiles_example(config: &std::path::Path, locale: Locale) -> String {
-    let example = "[profiles.review]\nruntime = \"codex\"\neffort = \"high\"\nnote = \"Independent diff review.\"";
+    let example = crate::config::PROFILE_EXAMPLE;
     match locale {
         Locale::Zh => format!(
-            "在 {} 里加一个，例如：\n\n{example}\n\n然后重启 daemon，用 `senate spawn --profile review` 启动。",
+            "在 {} 里加一个，例如：\n\n{example}\n\n然后用 `senate spawn --profile review` 启动；不用重启 daemon。",
             config.display()
         ),
         Locale::En => format!(
-            "Add one to {}, for example:\n\n{example}\n\nthen restart the daemon and start it \
-             with `senate spawn --profile review`.",
+            "Add one to {}, for example:\n\n{example}\n\nthen start it with `senate spawn \
+             --profile review`; the daemon needs no restart.",
             config.display()
         ),
     }
@@ -5537,7 +5537,9 @@ fn no_profiles_shows_one_to_copy_and_where() {
         text.contains("[profiles.review]\nruntime = \"codex\""),
         "{text}"
     );
-    assert!(text.ends_with("`senate spawn --profile review`."), "{text}");
+    assert!(text.contains("`senate spawn --profile review`"), "{text}");
+    // The daemon reads the file at each use.
+    assert!(text.ends_with("the daemon needs no restart."), "{text}");
     // What it shows parses as a profile.
     let toml = text.split("\n\n").nth(1).unwrap();
     let parsed: toml::Table = toml.parse().unwrap();

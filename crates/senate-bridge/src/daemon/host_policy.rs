@@ -206,6 +206,24 @@ impl Shared {
         })
     }
 
+    /// The launch profiles as the configuration file has them now, so an
+    /// added or edited profile needs no restart and `senate profiles`
+    /// (which reads the file) and the daemon never disagree. A file that
+    /// no longer parses is an error naming what is wrong, not the old
+    /// profiles; with no file at all (a daemon configured in memory) they
+    /// are the ones it started with.
+    pub(super) fn launch_profiles(
+        &self,
+    ) -> Result<BTreeMap<String, crate::config::LaunchProfile>, IpcError> {
+        match crate::config::BridgeConfig::load_unchecked(&Paths::new(&self.home).config()) {
+            Ok(config) => Ok(config.profiles),
+            Err(crate::config::ConfigError::Missing(_)) => Ok(self.config.profiles.clone()),
+            Err(error) => Err(IpcError::bad_request(format!(
+                "cannot read the launch profiles: {error}"
+            ))),
+        }
+    }
+
     fn spawn_settings(
         &self,
         runtime: Option<HostedRuntime>,
@@ -222,7 +240,8 @@ impl Shared {
                 .map(|runtime| (runtime, alias, model))
                 .ok_or_else(|| IpcError::bad_request("specify a runtime or launch profile"));
         };
-        let profile = self.config.profiles.get(&name).ok_or_else(|| {
+        let profiles = self.launch_profiles()?;
+        let profile = profiles.get(&name).ok_or_else(|| {
             IpcError::bad_request(format!(
                 "unknown launch profile {name:?}; see senate profiles"
             ))

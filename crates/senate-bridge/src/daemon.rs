@@ -3558,7 +3558,7 @@ impl Shared {
             Request::RemoteControl { .. } | Request::ObserveAdmin { .. } | Request::SetCard { .. } | Request::OpenViewer { .. } => {
                 Reply::err(IpcError::bad_request("local person socket only"))
             }
-            Request::Profiles => wrap(Ok(&self.config.profiles)),
+            Request::Profiles => wrap(self.launch_profiles()),
             Request::Sessions => wrap(on_heap(|| self.on_sessions(false)).await),
             Request::CommitteeThreads { committee, include_archived, limit, cursor } =>
                 wrap(on_heap(|| self.on_committee_threads(committee, include_archived, limit, cursor)).await),

@@ -226,26 +226,12 @@ async fn chair_discovers_and_spawns_a_profile_with_existing_role_checks() {
     h.paths.ensure_home().unwrap();
     let project = h.workdir("project", Some(committee().as_str()));
     let fixture = agy_fixture(h.dir.path(), "8b135e59-a160-4ed4-a0e9-105ed957be07");
-    let config = toml::to_string(&h.config).unwrap();
-    std::fs::write(
-        h.paths.config(),
-        format!(
-            r#"{config}
-[agy]
-bin = {fixture:?}
-[profiles.triage]
-runtime = "agy"
-model = "flash"
-effort = "high"
-note = "Use for test triage."
-[profiles.quick]
-runtime = "codex"
-speed = "ultrafast"
-note = "Use for quick checks."
-"#
-        ),
-    )
-    .unwrap();
+    // The daemon starts with no profile: they are added while it runs.
+    let config = format!(
+        "{}\n[agy]\nbin = {fixture:?}\n",
+        toml::to_string(&h.config).unwrap()
+    );
+    std::fs::write(h.paths.config(), &config).unwrap();
     h.config = senate_bridge::BridgeConfig::load(&h.paths.config()).unwrap();
     h.config.committees.push(committee());
     h.daemon = Some(
@@ -295,6 +281,23 @@ note = "Use for quick checks."
             .iter()
             .any(|tool| tool["name"] == "launch_profiles")
     );
+    // With none, the tool says how one is added and where.
+    let (error, none) = chair.call("launch_profiles", json!({})).await;
+    assert!(!error, "{none}");
+    assert!(
+        none.starts_with("No launch profiles are configured"),
+        "{none}"
+    );
+    assert!(none.contains("[profiles.review]\nruntime = \"codex\""));
+    assert!(
+        none.contains(&h.paths.config().display().to_string()),
+        "{none}"
+    );
+    assert!(none.contains("no restart"), "{none}");
+
+    // Added to the file, they are listed and usable with the daemon as it is.
+    let triage = "[profiles.triage]\nruntime = \"agy\"\nmodel = \"flash\"\neffort = \"high\"\nnote = \"Use for test triage.\"\n[profiles.quick]\nruntime = \"codex\"\nspeed = \"ultrafast\"\nnote = \"Use for quick checks.\"\n";
+    std::fs::write(h.paths.config(), format!("{config}{triage}")).unwrap();
     let (error, profiles) = chair.call("launch_profiles", json!({})).await;
     assert!(!error, "{profiles}");
     assert_eq!(
@@ -349,6 +352,14 @@ note = "Use for quick checks."
         "{argv:?}"
     );
     assert!(argv.contains(&"--effort=high".to_owned()), "{argv:?}");
+
+    // A profile that does not parse is reported by name, not passed over
+    // in favour of what the daemon read earlier.
+    let broken = "[profiles.broken]\nruntime = \"nope\"\nnote = \"x\"\n";
+    std::fs::write(h.paths.config(), format!("{config}{triage}{broken}")).unwrap();
+    let (error, message) = chair.call("launch_profiles", json!({})).await;
+    assert!(error, "{message}");
+    assert!(message.contains("[profiles.broken]"), "{message}");
     h.stop().await;
 }
 

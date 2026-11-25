@@ -209,6 +209,11 @@ pub struct BridgeConfig {
     pub uplink: Option<Uplink>,
 }
 
+/// A profile to copy into the configuration file, shown where none is
+/// configured (`senate profiles`, the `launch_profiles` tool).
+pub const PROFILE_EXAMPLE: &str =
+    "[profiles.review]\nruntime = \"codex\"\neffort = \"high\"\nnote = \"Independent diff review.\"";
+
 /// A machine-local launch profile. Model names are resolved by the runtime
 /// at launch, when its model catalog is available.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

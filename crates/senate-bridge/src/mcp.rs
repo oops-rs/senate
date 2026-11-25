@@ -2665,6 +2665,9 @@ impl SenateMcp {
             .call(&Request::Profiles)
             .await
             .map_err(|error| describe(error, self.locale))?;
+        if profiles.is_empty() {
+            return Ok(no_profiles(&self.daemon_socket, self.locale));
+        }
         serde_json::to_string_pretty(&profiles).map_err(|error| error.to_string())
     }
 
@@ -3284,6 +3287,28 @@ pub fn render_escalated(reply: &EscalateReply, thread: Seq, locale: Locale) -> S
             "Handed thread {thread} on {c} to a person (seq {seq}){again}. The Speaker \
              mentions them in the thread and tells the asker; do not answer it yourself unless \
              they ask you to."
+        ),
+    }
+}
+
+/// What `launch_profiles` tells when the machine has none: that spawn still
+/// works by runtime, and what the person adds, where, to have one. The
+/// configuration file sits beside the daemon's socket.
+fn no_profiles(daemon_socket: &std::path::Path, locale: Locale) -> String {
+    let home = daemon_socket.parent().unwrap_or(daemon_socket);
+    let config = crate::paths::Paths::new(home).config();
+    let (config, example) = (config.display(), crate::config::PROFILE_EXAMPLE);
+    match locale {
+        Locale::Zh => format!(
+            "这台机器没有配置 launch profile。spawn 仍可只用 `runtime`（claude、codex 或 agy），\
+             模型和 effort 取该 runtime 的默认值。profile 由你的用户在自己的配置文件 {config} 里添加，例如：\n\n\
+             {example}\n\n加好后下一次调用就能用，不用重启 daemon。"
+        ),
+        Locale::En => format!(
+            "No launch profiles are configured on this machine. spawn still works with a \
+             `runtime` alone (claude, codex or agy), at that runtime's default model and effort. \
+             A profile is added by your user in their own configuration file, {config}, for \
+             example:\n\n{example}\n\nIt is usable at the next call; the daemon needs no restart."
         ),
     }
 }
