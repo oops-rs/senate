@@ -396,24 +396,27 @@ async fn serve(mut stream: UnixStream, state: Arc<Mutex<CodexState>>, conn: usiz
                 &json!({"method": "remoteControl/status/changed", "params": {"status": "disabled"}}),
             );
         }
-        let reply = {
+        {
             let mut st = state.lock().unwrap();
             st.calls.push((method.clone(), params.clone()));
             let reply = answer(&mut st, &method, &params);
-            if method == "thread/resume" && reply.is_ok() {
+            let subscribed = method == "thread/resume" && reply.is_ok();
+            let out = match reply {
+                Ok(result) => json!({"id": id, "result": result}),
+                Err(message) => json!({"id": id, "error": {"code": -32600, "message": message}}),
+            };
+            send(&tx, &out);
+            // Codex sends the resume response before delivering approvals to
+            // the joining client. Expose the subscriber only after that frame
+            // is queued, under the same lock used by approval broadcasts.
+            if subscribed {
                 let thread = params["threadId"].as_str().unwrap_or_default().to_string();
                 st.subscribers
                     .entry(thread)
                     .or_default()
                     .push((conn, tx.clone()));
             }
-            reply
-        };
-        let out = match reply {
-            Ok(result) => json!({"id": id, "result": result}),
-            Err(message) => json!({"id": id, "error": {"code": -32600, "message": message}}),
-        };
-        send(&tx, &out);
+        }
     }
     {
         let mut st = state.lock().unwrap();

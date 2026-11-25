@@ -7,6 +7,7 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::time::Duration;
 
 use common::{
@@ -129,14 +130,26 @@ async fn pty_attach_command(h: &Harness, args: &[&str], paint: bool, keys: &[u8]
 }
 
 async fn wait_terminal_output(output: &mut (impl tokio::io::AsyncRead + Unpin), marker: &[u8]) {
+    assert!(
+        terminal_contains(output, marker).await.unwrap(),
+        "terminal closed before {marker:?}"
+    );
+}
+
+async fn terminal_contains(
+    output: &mut (impl tokio::io::AsyncRead + Unpin),
+    marker: &[u8],
+) -> std::io::Result<bool> {
     let mut observed = Vec::new();
     let mut buf = [0; 4096];
     loop {
-        let n = output.read(&mut buf).await.unwrap();
-        assert_ne!(n, 0, "terminal closed before {marker:?}");
+        let n = output.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(false);
+        }
         observed.extend_from_slice(&buf[..n]);
         if observed.windows(marker.len()).any(|bytes| bytes == marker) {
-            return;
+            return Ok(true);
         }
         let discard = observed.len().saturating_sub(marker.len() - 1);
         observed.drain(..discard);
@@ -183,7 +196,8 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
         }
         if running {
             let owner = std::fs::File::create(dir.join("owner")).unwrap();
-            flock(&owner, FlockOperation::NonBlockingLockExclusive).unwrap();
+            // A daemon liveness check can briefly hold a shared lock here.
+            flock(&owner, FlockOperation::LockExclusive).unwrap();
             owners.push(owner);
         }
         if i < 3 {
@@ -237,7 +251,12 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
             .kill_on_drop(true);
         let (pty, pts) = pty_process::open().unwrap();
         pty.resize(pty_process::Size::new(24, 80)).unwrap();
-        let child = pty_process::Command::from(cmd).spawn(pts).unwrap();
+        // The slave closes when the command exits. Keep its error
+        // independently of the PTY so the test can check the exit reason.
+        let child = pty_process::Command::from(cmd)
+            .stderr(Stdio::piped())
+            .spawn(pts)
+            .unwrap();
         let (output, input) = pty.into_split();
         (child, output, input)
     };
@@ -251,23 +270,41 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
             (Some(primaries[0].as_str()), None),
             (None, Some("Attach to which session?")),
         ] {
-            let start = Instant::now();
+            let opening = Instant::now();
             let (mut child, mut output, mut input) = open(selector);
-            let mut first = [0];
-            tokio::time::timeout(TIMEOUT, output.read_exact(&mut first))
-                .await
-                .unwrap()
-                .unwrap();
-            let first = start.elapsed();
+            let start = Instant::now();
+            let launch = start.duration_since(opening);
             if let Some(prompt) = picker {
-                tokio::time::timeout(
+                let shown = tokio::time::timeout(
                     TIMEOUT,
-                    wait_terminal_output(&mut output, prompt.as_bytes()),
+                    terminal_contains(&mut output, prompt.as_bytes()),
                 )
                 .await
                 .unwrap();
+                if !matches!(shown, Ok(true)) {
+                    let exit = tokio::time::timeout(TIMEOUT, child.wait_with_output())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let error = String::from_utf8_lossy(&exit.stderr);
+                    // The alias table is required to choose safely. On a
+                    // delayed lookup the client can reach its own deadline
+                    // before the table arrives and report the reason.
+                    assert!(
+                        selector == Some("main")
+                            && !delay.is_zero()
+                            && !exit.status.success()
+                            && error.contains(
+                                "look up alias main: the Senate bridge daemon did not answer in time"
+                            )
+                            && error.contains("senate attach --session <session-id>"),
+                        "{delay:?} {selector:?}: no picker ({shown:?}), {}: {error}",
+                        exit.status
+                    );
+                    continue;
+                }
                 let painted = start.elapsed();
-                eprintln!("{delay:?} {selector:?}: first byte {first:?}, picker {painted:?}");
+                eprintln!("{delay:?} {selector:?}: CLI launch {launch:?}, picker {painted:?}");
                 let bound = if selector.is_none() { 1 } else { 2 };
                 picker_times.push((selector, delay, painted, Duration::from_secs(bound)));
                 input.write_all(b"\r").await.unwrap();
@@ -282,10 +319,7 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
             )
             .await
             .unwrap();
-            eprintln!(
-                "{delay:?} {selector:?}: first byte {first:?}, screen {:?}",
-                start.elapsed()
-            );
+            eprintln!("{delay:?} {selector:?}: screen {:?}", start.elapsed());
             input.write_all(b"\x1d").await.unwrap();
             assert!(
                 tokio::time::timeout(TIMEOUT, child.wait())
@@ -297,30 +331,27 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
         }
     }
     let mut failures = Vec::new();
-    for (primary, expected) in [
-        (&primaries[1], "terminal host did not answer in time"),
+    for (primary, probe, expected) in [
+        (&primaries[1], false, "terminal host did not answer in time"),
         (
             &primaries[2],
+            true,
             "terminal host did not send its initial screen in time",
         ),
     ] {
+        let (child, mut output, mut input) = open(Some(primary));
         let start = Instant::now();
-        let (mut child, mut output, _input) = open(Some(primary));
-        let mut printed = Vec::new();
-        let mut first = None;
         let outcome = tokio::time::timeout(Duration::from_secs(4), async {
-            let mut bytes = [0; 1024];
-            while let Ok(n @ 1..) = output.read(&mut bytes).await {
-                first.get_or_insert_with(|| start.elapsed());
-                printed.extend_from_slice(&bytes[..n]);
+            if probe {
+                // Complete the separate terminal capability probe before
+                // testing the deadline for the host's initial screen.
+                wait_terminal_output(&mut output, b"\x1b[c").await;
+                input.write_all(b"\x1b[?62;22c").await.unwrap();
             }
-            child.wait().await.unwrap()
+            child.wait_with_output().await.unwrap()
         })
         .await;
-        let elapsed = start.elapsed();
-        let printed = String::from_utf8_lossy(&printed).into_owned();
-        eprintln!("{primary}: first byte {first:?}, exit {elapsed:?} {outcome:?} {printed}");
-        failures.push((primary, expected, outcome, printed, elapsed));
+        failures.push((primary, expected, outcome, start.elapsed()));
     }
     drop(silent);
     healthy_task.abort();
@@ -332,12 +363,15 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
             "{selector:?} with {delay:?} alias lookup: picker took {elapsed:?}"
         );
     }
-    for (primary, expected, outcome, printed, elapsed) in failures {
+    for (primary, expected, outcome, elapsed) in failures {
+        let exit = outcome.unwrap_or_else(|error| panic!("{primary}: {error}"));
+        let stderr = String::from_utf8_lossy(&exit.stderr);
+        eprintln!("{primary}: exit {elapsed:?} {} {stderr}", exit.status);
         assert!(elapsed < Duration::from_secs(3), "{primary}: {elapsed:?}");
-        assert!(!outcome.unwrap().success());
+        assert!(!exit.status.success());
         assert!(
-            printed.contains(primary) && printed.contains(expected),
-            "{printed}"
+            stderr.contains(primary) && stderr.contains(expected),
+            "{stderr}"
         );
     }
 }

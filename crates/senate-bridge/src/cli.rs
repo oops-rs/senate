@@ -2808,23 +2808,32 @@ fn choose_alias(
     let rows = rt
         .block_on(attach_choices(&paths))
         .map(|reply| reply.rows)
-        .unwrap_or_default();
+        .ok();
     let choices: Vec<crate::host::Choice> = candidates
         .iter()
-        .map(|q| match rows.iter().find(|row| row.primary == q.primary) {
-            Some(row) => crate::host::Choice {
-                label: q.to_string(),
-                ..crate::host::Choice::of_row(row)
-            },
-            None => crate::host::Choice {
-                label: q.to_string(),
-                detail: format!(
-                    "{} · not hosted here",
-                    senate_core::Address::senator(&q.primary).in_text()
-                ),
-                primary: q.primary.clone(),
-                dim: false,
-            },
+        .map(|q| {
+            match rows
+                .as_ref()
+                .and_then(|rows| rows.iter().find(|row| row.primary == q.primary))
+            {
+                Some(row) => crate::host::Choice {
+                    label: q.to_string(),
+                    ..crate::host::Choice::of_row(row)
+                },
+                None => crate::host::Choice {
+                    label: q.to_string(),
+                    detail: {
+                        let primary = senate_core::Address::senator(&q.primary).in_text();
+                        if rows.is_some() {
+                            format!("{primary} · not hosted here")
+                        } else {
+                            format!("details unavailable · {primary}")
+                        }
+                    },
+                    primary: q.primary.clone(),
+                    dim: false,
+                },
+            }
         })
         .collect();
     let prompt = format!("{name} is an alias on several committees: which one?");
@@ -3906,9 +3915,23 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
                                 .session_id
                                 .context("the role has no local hosted session")?,
                         },
-                        None => ipc::AttachTarget::Senator {
-                            senator: pick_alias(name.parse()?)?,
-                        },
+                        None => {
+                            let senator = pick_alias(name.parse()?).map_err(|error| {
+                                if matches!(
+                                    error.downcast_ref::<ipc::ClientError>(),
+                                    Some(ipc::ClientError::Timeout)
+                                ) {
+                                    let hint = cli_locale().pick(
+                                        "请重试，或用 `senate attach --session <会话 ID>` 直接打开已知会话。",
+                                        "Retry, or use `senate attach --session <session-id>` if you know the session ID.",
+                                    );
+                                    anyhow::anyhow!("{}\n  {hint}", describe_error(&error))
+                                } else {
+                                    error
+                                }
+                            })?;
+                            ipc::AttachTarget::Senator { senator }
+                        }
                     };
                     (target, Some(name))
                 }
