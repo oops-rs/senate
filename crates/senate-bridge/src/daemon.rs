@@ -800,6 +800,8 @@ fn debug_scope_fixture(home: &Path, fixture_bootstrap: bool) -> bool {
     let unsigned = true;
     cfg!(debug_assertions)
         && unsigned
+        // A test of the caller checks themselves turns the fixture off.
+        && std::env::var_os(crate::testenv::STRICT_IDENTITY_ENV).is_none()
         && (fixture_bootstrap || std::env::var_os(crate::testenv::CONFINE_ENV).is_some())
         && home.canonicalize().ok().is_some_and(|home| {
             std::env::temp_dir()
@@ -955,6 +957,16 @@ async fn start_bridge(
     front.observe = observe;
     front.remote = remote.as_ref().map(|(service, _)| service.clone());
     let front = Arc::new(front);
+    match front.mark_legacy_sessions() {
+        Ok(0) => {}
+        Ok(count) => tracing::warn!(
+            count,
+            "sessions started before process bindings keep working advisorily until restarted"
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "could not record sessions from before process bindings")
+        }
+    }
 
     let listener =
         UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
@@ -6904,6 +6916,13 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         (line.as_str(), permitted, permitted, false, false)
                     }
                 };
+                // A request without any proof: from a client that predates
+                // them (a 0.12.3 MCP server in a session still running), or
+                // an unsigned one. Its Unix peer only serves a legacy session.
+                #[cfg(target_os = "macos")]
+                let unproven = peer.filter(|_| session_peer.is_none());
+                #[cfg(not(target_os = "macos"))]
+                let unproven: Option<u32> = None;
                 #[cfg(target_os = "linux")]
                 let (line, person_peer, session_peer) = {
                     let known = if crate::linux_scope::available() {
@@ -6947,10 +6966,22 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                             let paths = Paths::new(&runtime.home);
                             let owner = crate::host::host_owner(&paths, host_id);
                             let bound = runtime.store.session_host(session_id).ok().flatten();
+                            // A host from before process bindings (a legacy
+                            // session's) recorded no owner and sends no proof.
+                            let legacy = || {
+                                runtime
+                                    .store
+                                    .session(session_id)
+                                    .ok()
+                                    .flatten()
+                                    .is_some_and(|session| {
+                                        unproven.is_some() && shared.is_legacy(&session)
+                                    })
+                            };
                             let verified = bound.as_ref() == Some(host_id)
-                                && owner.is_some_and(|owner| {
+                                && (owner.is_some_and(|owner| {
                                     Some(owner.pid) == session_peer && owner.live()
-                                });
+                                }) || legacy());
                             return (!verified).then(|| {
                                 IpcError::bad_request(
                                     "The caller is not the session's terminal host",
@@ -6961,7 +6992,11 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                             && let Some(selector) = front::selector_mut(request)
                                 .filter(|selector| **selector != SessionSelector::default())
                         {
-                            return match shared.verify_selector_owner(session_peer, selector) {
+                            return match shared.verify_selector_owner(
+                                session_peer,
+                                unproven,
+                                selector,
+                            ) {
                                 Ok(session_id) => {
                                     *selector = SessionSelector {
                                         session_id: Some(session_id),
@@ -6977,7 +7012,9 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                                 session_id: Some(id.to_owned()),
                                 claude_pid: None,
                             };
-                            shared.verify_selector_owner(session_peer, &selector).err()
+                            shared
+                                .verify_selector_owner(session_peer, unproven, &selector)
+                                .err()
                         })
                     })
                 };
@@ -7121,11 +7158,25 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                             Request::SessionHook(report) => (report, true),
                             _ => unreachable!(),
                         };
+                        // A legacy session's hooks are taken as before the
+                        // bindings: its process is not bound until restart.
+                        let legacy = shared
+                            .primary()
+                            .store
+                            .session(&report.session_id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|session| shared.is_legacy(&session));
+                        let hook_peer = if legacy {
+                            session_peer.or(unproven)
+                        } else {
+                            session_peer
+                        };
                         let checked = shared
-                            .bind_hook_process_claims(session_peer, &mut report)
+                            .bind_hook_process_claims(hook_peer, &mut report)
                             .await
                             .and_then(|()| {
-                                if fixture {
+                                if fixture || legacy {
                                     Ok(())
                                 } else {
                                     shared.record_hook_owner(session_peer, &report, native)

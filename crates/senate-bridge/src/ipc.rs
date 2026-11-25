@@ -2966,46 +2966,71 @@ pub enum ClientError {
     Remote(IpcError),
 }
 
+/// Which caller proof a request carries on macOS, and whether the daemon
+/// serves it at all without one (only `sessions`, which then leaves out the
+/// person's view).
+#[cfg(target_os = "macos")]
+pub(crate) fn proof_kind(request: &Request) -> Option<(crate::mac_scope::ProofKind, bool)> {
+    use crate::mac_scope::ProofKind;
+    if crate::daemon::approval_guard::request_effect(request).requires_operator()
+        || crate::daemon::approval_guard::person_only(request).is_some()
+        || crate::daemon::approval_guard::operator_only(request)
+        || matches!(
+            request,
+            Request::RemoteControl { .. }
+                | Request::SessionDrop { .. }
+                | Request::ActivityWatch { .. }
+                | Request::TimelineWatch { .. }
+                | Request::DeskDecide { .. }
+                | Request::Sessions
+                | Request::Watch { .. }
+        )
+    {
+        Some((ProofKind::Operator, !matches!(request, Request::Sessions)))
+    } else if matches!(
+        request,
+        Request::Hook(_) | Request::SessionHook(_) | Request::HostedSessionEnd { .. }
+    ) || matches!(request, Request::SetCard { session, .. } if session != &SessionSelector::default())
+        || crate::daemon::approval_guard::session_selector(request).is_some()
+        || crate::daemon::approval_guard::session_id_claim(request).is_some()
+    {
+        // Sent without a proof when none is had: a session that predates
+        // the per-request proofs is still served, advisorily.
+        Some((ProofKind::Session, false))
+    } else if crate::app_confirmation::required(request) {
+        Some((ProofKind::Operator, true))
+    } else {
+        None
+    }
+}
+
 /// Encode a request, with a one-time macOS scope proof for person operations.
+/// A request the daemon only serves with a proof of its caller is not sent
+/// without one: the error says at which stage the proof failed.
 pub async fn request_line(socket: &Path, request: &Request) -> Result<Vec<u8>, ClientError> {
     let body = serde_json::to_vec(request).map_err(|e| ClientError::Protocol(e.to_string()))?;
     let mut frame = Vec::new();
     #[cfg(target_os = "macos")]
-    {
-        use crate::mac_scope::ProofKind;
-        let kind = if crate::daemon::approval_guard::request_effect(request).requires_operator()
-            || crate::daemon::approval_guard::person_only(request).is_some()
-            || crate::daemon::approval_guard::operator_only(request)
-            || matches!(
-                request,
-                Request::RemoteControl { .. }
-                    | Request::SessionDrop { .. }
-                    | Request::ActivityWatch { .. }
-                    | Request::TimelineWatch { .. }
-                    | Request::DeskDecide { .. }
-                    | Request::Sessions
-                    | Request::Watch { .. }
-            ) {
-            Some(ProofKind::Operator)
-        } else if matches!(
-            request,
-            Request::Hook(_) | Request::SessionHook(_) | Request::HostedSessionEnd { .. }
-        ) || matches!(request, Request::SetCard { session, .. } if session != &SessionSelector::default())
-            || crate::daemon::approval_guard::session_selector(request).is_some()
-            || crate::daemon::approval_guard::session_id_claim(request).is_some()
-        {
-            Some(ProofKind::Session)
-        } else if crate::app_confirmation::required(request) {
-            Some(ProofKind::Operator)
-        } else {
-            None
-        };
-        if let Some(kind) = kind
-            && let Some(ticket) = crate::mac_scope::prove(socket, &body, kind).await
-        {
-            frame.extend_from_slice(b"SCOPE1 ");
-            frame.extend_from_slice(ticket.as_bytes());
-            frame.push(b' ');
+    if let Some((kind, required)) = proof_kind(request) {
+        use crate::app_confirmation::macos::CallFailure;
+        use crate::mac_scope::ProofFailure;
+        match crate::mac_scope::prove(socket, &body, kind).await {
+            Ok(ticket) => {
+                frame.extend_from_slice(b"SCOPE1 ");
+                frame.extend_from_slice(ticket.as_bytes());
+                frame.push(b' ');
+            }
+            // An unsigned build has no proofs to give; its daemon decides.
+            Err((ProofFailure::Call(CallFailure::NoTeam), _)) => {}
+            Err((failure, service)) => {
+                tracing::debug!(?failure, ?kind, "sending without a caller proof");
+                if required {
+                    return Err(ClientError::Remote(IpcError::new(
+                        codes::NOT_A_PERSON,
+                        failure.sentence(&service),
+                    )));
+                }
+            }
         }
     }
     #[cfg(not(target_os = "macos"))]

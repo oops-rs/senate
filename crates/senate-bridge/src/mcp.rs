@@ -3302,6 +3302,184 @@ fn brief_resource(committee: &CommitteeId) -> Resource {
 mod tests {
     use super::*;
 
+    /// A chair's and the Speaker's office's tools act under the verified
+    /// session's role, not as the person: through the real MCP tool and
+    /// IPC client, each request reaches the daemon socket needing only a
+    /// session proof (which a hosted agent has), and the daemon judges it by
+    /// session authority, not by an operator proof an agent never has.
+    #[tokio::test]
+    async fn role_tools_need_a_session_proof_not_the_persons() {
+        use crate::daemon::approval_guard::{RequestEffect, operator_only, person_only};
+        use serde_json::json;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = dir.path().join("bridge.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (sent, mut seen) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let sent = sent.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut lines = tokio::io::BufReader::new(read).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        // A signed build attaches `SCOPE1 <ticket> ` first.
+                        let body = line
+                            .strip_prefix("SCOPE1 ")
+                            .and_then(|rest| rest.split_once(' ').map(|(_, body)| body))
+                            .unwrap_or(&line)
+                            .to_owned();
+                        let _ = sent.send(body);
+                        let reply = ipc::Reply::err(ipc::IpcError::bad_request("recorded"));
+                        let mut out = serde_json::to_vec(&reply).unwrap();
+                        out.push(b'\n');
+                        let _ = write.write_all(&out).await;
+                    }
+                });
+            }
+        });
+        let selector = SessionSelector {
+            session_id: Some("chair-session".into()),
+            claude_pid: None,
+        };
+        let mcp = SenateMcp::new(socket, selector.clone());
+        fn p<T: DeserializeOwned>(value: serde_json::Value) -> Parameters<T> {
+            Parameters(serde_json::from_value(value).unwrap())
+        }
+        let cwd = dir.path().display().to_string();
+        let _ = mcp
+            .spawn(p(
+                json!({"action":"spawn","runtime":"claude","committee":"senate","cwd":cwd}),
+            ))
+            .await;
+        let _ = mcp
+            .spawn(p(json!({"action":"spawn","runtime":"claude","committee":"senate","cwd":cwd,"chair":true})))
+            .await;
+        let _ = mcp
+            .spawn(p(json!({"action":"restore","senator":"docs"})))
+            .await;
+        let _ = mcp
+            .spawn(p(json!({"action":"stop","senator":"docs"})))
+            .await;
+        let _ = mcp
+            .open_committee(p(json!({"committee":"newco","cwd":cwd,"runtime":"claude"})))
+            .await;
+        let _ = mcp
+            .speaker_forward(p(json!({"committee":"senate","seq":7})))
+            .await;
+        let _ = mcp
+            .speaker_refuse(p(json!({"committee":"senate","seq":7,"reason":"no"})))
+            .await;
+        let _ = mcp
+            .speaker_alias(p(
+                json!({"committee":"senate","senator":"x","alias":"docs"}),
+            ))
+            .await;
+        let _ = mcp
+            .speaker_unseat(p(json!({"committee":"senate","senator":"x"})))
+            .await;
+        let _ = mcp
+            .speaker_chair(p(json!({"committee":"senate","senator":"x"})))
+            .await;
+        let _ = mcp
+            .speaker_route(p(json!({"committee":"senate","seq":7,"to":"x"})))
+            .await;
+        let _ = mcp.chair_docket().await;
+        let _ = mcp.chair_route(p(json!({"seq":7,"to":"x"}))).await;
+        let _ = mcp.secretary_work(p(json!({"action":"list"}))).await;
+
+        let mut ops = Vec::new();
+        while let Ok(line) = seen.try_recv() {
+            let request: Request = serde_json::from_str(&line).unwrap();
+            let op = serde_json::from_str::<serde_json::Value>(&line).unwrap()["op"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert_eq!(
+                crate::daemon::approval_guard::request_effect(&request),
+                RequestEffect::SessionOrRead,
+                "{op} must be judged by the session's role"
+            );
+            assert_eq!(person_only(&request), None, "{op}");
+            assert!(!operator_only(&request), "{op}");
+            assert!(!crate::app_confirmation::required(&request), "{op}");
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                ipc::proof_kind(&request),
+                Some((crate::mac_scope::ProofKind::Session, false)),
+                "{op}"
+            );
+            ops.push(op);
+        }
+        for op in [
+            "spawn",
+            "restore",
+            "stop",
+            "desk_open_committee",
+            "forward",
+            "refuse",
+            "speaker_alias",
+            "speaker_unseat",
+            "set_chair",
+            "route",
+            "chair_docket",
+            "chair_route",
+            "secretary_work",
+        ] {
+            assert!(ops.iter().any(|seen| seen == op), "{op} not sent: {ops:?}");
+        }
+        assert_eq!(ops.iter().filter(|op| *op == "spawn").count(), 2);
+
+        // The same acts without a session are the person's, and appointing
+        // a desk secretary changes roles: both still need the person.
+        let person_spawn = Request::Spawn {
+            attempt_id: None,
+            session: SessionSelector::default(),
+            runtime: Some(crate::ipc::HostedRuntime::Claude),
+            profile: None,
+            committee: "senate".parse().unwrap(),
+            alias: None,
+            cwd: dir.path().into(),
+            chair: false,
+            secretary: false,
+            prompt: None,
+            model: crate::ipc::HostedModel::default(),
+        };
+        assert!(crate::daemon::approval_guard::request_effect(&person_spawn).requires_operator());
+        let Request::Spawn { .. } = &person_spawn else {
+            unreachable!()
+        };
+        let mut secretary = person_spawn.clone();
+        if let Request::Spawn {
+            session,
+            secretary: s,
+            ..
+        } = &mut secretary
+        {
+            *session = selector.clone();
+            *s = true;
+        }
+        assert_eq!(
+            crate::daemon::approval_guard::request_effect(&secretary),
+            RequestEffect::Presence
+        );
+        for person in [
+            Request::Stop {
+                session: SessionSelector::default(),
+                senator: "docs".parse().unwrap(),
+                force: false,
+            },
+            Request::SetChair {
+                session: SessionSelector::default(),
+                committee: None,
+                senator: "x".parse().unwrap(),
+            },
+        ] {
+            assert!(crate::daemon::approval_guard::request_effect(&person).requires_operator());
+        }
+    }
+
     /// A catch-up page from alice and from bob, as alice's agent claude
     /// reads it.
     fn catch_up_page(user: Option<&str>) -> CatchUpReply {

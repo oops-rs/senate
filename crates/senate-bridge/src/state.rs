@@ -107,6 +107,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     agent_source     TEXT NOT NULL,
     host_id          TEXT
 );
+CREATE TABLE IF NOT EXISTS legacy_sessions (
+    session_id TEXT PRIMARY KEY,
+    anchor     TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS native_process_claims (
     session_id TEXT PRIMARY KEY,
     owner TEXT,
@@ -1283,6 +1287,32 @@ impl Store {
     }
 
     // ---- sessions --------------------------------------------------------
+
+    /// Record a session that was running before this daemon could bind
+    /// sessions to processes, with what ties it to that run (`anchor`).
+    /// An existing record is kept.
+    pub(crate) fn mark_legacy_session(
+        &self,
+        session: &str,
+        anchor: &str,
+    ) -> Result<(), StoreError> {
+        self.conn().execute(
+            "INSERT OR IGNORE INTO legacy_sessions (session_id, anchor) VALUES (?1, ?2)",
+            params![session, anchor],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn legacy_anchor(&self, session: &str) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT anchor FROM legacy_sessions WHERE session_id = ?1",
+                [session],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
 
     pub(crate) fn verified_native_owner(
         &self,

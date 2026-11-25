@@ -25,9 +25,15 @@ use std::process::Command;
 /// The directory a test's processes are confined to.
 pub const CONFINE_ENV: &str = "SENATE_CONFINE_TO";
 
+/// Set in a test process: a debug daemon it starts applies the caller
+/// identity checks to clients in other processes, as a release daemon
+/// does, instead of the disposable-fixture shortcut.
+pub const STRICT_IDENTITY_ENV: &str = "SENATE_TEST_STRICT_IDENTITY";
+
 /// What a spawned binary must never inherit from the process running the
 /// tests.
-pub const INHERITED: [&str; 15] = [
+pub const INHERITED: [&str; 16] = [
+    STRICT_IDENTITY_ENV,
     "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_SESSION_ID",
