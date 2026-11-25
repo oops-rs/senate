@@ -631,7 +631,8 @@ async fn ask_answer_and_catch_up_end_to_end() {
             "secretary_work",
             "status",
             "take",
-            "terminal"
+            "terminal",
+            "thread"
         ]
     );
     let tool = |name: &str| {
@@ -646,6 +647,7 @@ async fn ask_answer_and_catch_up_end_to_end() {
     for (name, params) in [
         ("ask", &["to", "body", "refs"][..]),
         ("search", &["query", "limit", "committee"]),
+        ("thread", &["seq", "only", "committee"]),
         ("post", &["body", "committee"]),
         ("propose_decision", &["body", "committee"]),
     ] {
@@ -1153,6 +1155,18 @@ async fn search_post_and_propose_decision_end_to_end() {
     mcp.call("search", json!({"query": "x", "committee": "other"}))
         .await;
     assert_eq!(h.server.searches().last().unwrap().0, "other");
+
+    // What search cut is read whole with `thread`.
+    let (err, text) = mcp.call("thread", json!({"seq": 2})).await;
+    assert!(!err, "{text}");
+    assert!(
+        text.starts_with("[senate] Thread 2 on refund-v2: 1 event(s), oldest first."),
+        "{text}"
+    );
+    assert!(text.contains("· seq 2 · from [senator::copilot] · note · "));
+    assert!(text.contains(&"长".repeat(400)), "{text}");
+    let (err, text) = mcp.call("thread", json!({"seq": 99})).await;
+    assert!(err, "{text}");
 
     let (err, text) = mcp
         .call("post", json!({"body": "网关已切到新的幂等中间件"}))
