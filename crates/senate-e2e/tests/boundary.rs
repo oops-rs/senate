@@ -136,9 +136,22 @@ async fn hosted_approval_stays_on_the_docket_until_its_senator_archives_it() {
     ] {
         assert_eq!(api.append(&invalid).await.unwrap_err().status(), Some(403));
     }
-    api.append(&archive(waiting.clone(), &root.id))
-        .await
-        .unwrap();
+    // The status that closes a notice is an archive and nothing more: one
+    // that says why inside the status is refused. (A bridge that did so
+    // for every prompt that went away unanswered never closed those.)
+    let mut with_reason = StatusPayload::new(StatusState::Archived);
+    with_reason.reason = Some("The terminal prompt went away unanswered.".into());
+    let refused = NewEvent::new(committee(), Kind::Status, waiting.clone(), "")
+        .in_thread(root.seq)
+        .with_meta(meta::STATUS, with_reason.value())
+        .with_meta(meta::HOSTED_APPROVAL, json!(root.id));
+    assert_eq!(api.append(&refused).await.unwrap_err().status(), Some(403));
+    // Why it closed goes beside the status, as the bridge writes it: the
+    // cause under its own key and the words in the body.
+    let mut closing =
+        archive(waiting.clone(), &root.id).with_meta(meta::APPROVAL_CLOSED, json!("turn_ended"));
+    closing.body = "Its turn ended with no answer.".into();
+    api.append(&closing).await.unwrap();
     assert!(
         !hub.chair_docket(&committee())
             .await

@@ -2111,6 +2111,10 @@ async fn session_approve_dismisses_a_claude_prompt_when_the_host_finds_no_dialog
         "{}",
         archive.body
     );
+    assert_eq!(
+        archive.meta.get(senate_core::meta::APPROVAL_CLOSED),
+        Some(&json!("prompt_gone"))
+    );
     assert!(answer_notes(&h).is_empty());
     terminal.stop();
     h.stop().await;
@@ -2199,6 +2203,10 @@ async fn session_approve_chooses_the_option_of_a_hosted_claude_dialog() {
         assert_eq!(
             archived(&h, notice.seq).unwrap().meta[senate_core::meta::APPROVAL_WAIT],
             json!({"decision":decision, "actor":Address::senior(&h.config.person).in_text()})
+        );
+        assert_eq!(
+            archived(&h, notice.seq).unwrap().meta[senate_core::meta::APPROVAL_CLOSED],
+            json!("answered")
         );
         typed.push_str(key);
         eventually(
@@ -2357,11 +2365,23 @@ async fn a_late_claude_notice_closes_when_the_turn_ends_not_on_another_tools_res
     // The turn ends: no dialog can be waiting.
     stop_hook().await;
     wait_archived(&h, named.seq).await;
+    // The closing status says why: this is the prompt nobody could have
+    // answered, told apart in the log from one a person settled.
+    let closed = archived(&h, named.seq).unwrap();
     assert!(
-        archived(&h, named.seq)
-            .unwrap()
-            .body
-            .contains("went away unanswered")
+        closed.body.contains("turn ended with no answer"),
+        "{}",
+        closed.body
+    );
+    assert_eq!(
+        closed.meta.get(senate_core::meta::APPROVAL_CLOSED),
+        Some(&json!("turn_ended"))
+    );
+    // The status itself stays a bare archive, which is all the server
+    // takes for a notice.
+    assert_eq!(
+        StatusPayload::of(&closed),
+        Some(StatusPayload::new(StatusState::Archived))
     );
     if let Some(prompt) = waiting().await {
         let db = rusqlite::Connection::open_with_flags(

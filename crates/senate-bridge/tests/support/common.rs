@@ -749,6 +749,40 @@ async fn append(
     if rejected {
         return api_error(StatusCode::FORBIDDEN, "forbidden", "injected log refusal");
     }
+    // As the real server does: the status that closes a hosted approval
+    // notice is a bare archive, and one carrying anything more (a reason,
+    // say) is refused. A bridge once sent such a status and never noticed.
+    if ev.kind == Kind::Status
+        && let Some(root) = ev.thread
+    {
+        let notice = st
+            .inner
+            .lock()
+            .unwrap()
+            .events
+            .get(&committee)
+            .is_some_and(|log| {
+                log.iter().any(|e| {
+                    e.seq == root
+                        && e.meta.get(senate_core::meta::HOSTED_APPROVAL)
+                            == Some(&Value::Bool(true))
+                })
+            });
+        let bare = ev
+            .meta
+            .get(senate_core::meta::STATUS)
+            .and_then(|v| serde_json::from_value::<senate_core::StatusPayload>(v.clone()).ok())
+            == Some(senate_core::StatusPayload::new(
+                senate_core::StatusState::Archived,
+            ));
+        if notice && !bare {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "only the originating senator or the Speaker's office may archive this hosted approval notice",
+            );
+        }
+    }
     let from = if ev.from == Address::Speaker {
         let inner = st.inner.lock().unwrap();
         ev.meta

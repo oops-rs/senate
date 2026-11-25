@@ -464,6 +464,13 @@ pub mod meta {
     pub const HOSTED_APPROVAL: &str = "hosted_approval";
     /// The local relay thread and bounded prompt label associated with a hosted approval.
     pub const APPROVAL_WAIT: &str = "approval_wait";
+    /// On the status that archives a hosted approval notice: why the wait
+    /// ended, one word (`answered`, `typed`, `tool_ran`, `resolved`,
+    /// `turn_ended`, `prompt_gone`, `session_ended`,
+    /// `conversation_changed`). The status itself stays a bare archive,
+    /// which is all the server takes for a notice; the words are the
+    /// event's body.
+    pub const APPROVAL_CLOSED: &str = "approval_closed";
     /// A child forwarded a question for this person on its originating thread.
     pub const RELAY_ASKED_PERSON: &str = "relay_asked_person";
     /// On a person's note that they answered a hosted session's permission
