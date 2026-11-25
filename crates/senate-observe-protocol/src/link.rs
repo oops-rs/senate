@@ -7,7 +7,8 @@ use std::str::FromStr;
 use crate::Seq;
 
 const PREFIX: &str = "senate://open/v1/";
-// V1 freezes the address keywords and path limit from senate-core.
+// V1 reserves address keywords in aliases and named Senate paths.
+// Committee positions are literal names selected by the surrounding route.
 const KEYWORDS: [&str; 5] = ["senator", "speaker", "chair", "committee", "guest"];
 const MAX_SENATE_DEPTH: usize = 16;
 
