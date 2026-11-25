@@ -241,6 +241,9 @@ pub(crate) struct TerminalIdentity {
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 pub(crate) fn terminal_identity(pid: u32) -> Option<TerminalIdentity> {
+    if terminal_foreground(pid) != Some(true) {
+        return None;
+    }
     let device = |pid| {
         unsafe { mac_info::<libc::proc_bsdinfo>(pid, libc::PROC_PIDTBSDINFO) }
             .ok()
@@ -258,6 +261,17 @@ pub(crate) fn terminal_identity(pid: u32) -> Option<TerminalIdentity> {
         device: device_number,
         leader,
     })
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub(crate) fn terminal_foreground(pid: u32) -> Option<bool> {
+    let process = unsafe { mac_info::<libc::proc_bsdinfo>(pid, libc::PROC_PIDTBSDINFO) }.ok()?;
+    let foreground = i32::try_from(process.e_tpgid)
+        .ok()
+        .filter(|pgid| *pgid > 0)?;
+    let group = unsafe { libc::getpgid(i32::try_from(pid).ok()?) };
+    (group > 0).then_some(group == foreground)
 }
 
 #[cfg(target_os = "macos")]

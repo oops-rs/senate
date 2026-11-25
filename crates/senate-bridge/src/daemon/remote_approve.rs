@@ -74,7 +74,17 @@ impl Shared {
                     .ok_or_else(|| self.nothing_pending(&host, &session))?;
                 (
                     PendingPrompt::Codex(approval.id),
-                    crate::host_approval::tool_label(&approval.summary),
+                    crate::host_approval::tool_label(&format!(
+                        "{:?}: {}",
+                        approval.kind,
+                        approval
+                            .command
+                            .as_deref()
+                            .unwrap_or(&approval.summary)
+                            .lines()
+                            .next()
+                            .unwrap_or_default()
+                    )),
                 )
             }
             Runtime::Claude => {

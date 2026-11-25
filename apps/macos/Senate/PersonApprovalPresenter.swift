@@ -6,8 +6,22 @@ import SenateCore
 enum PersonApprovalPresenter {
     static func watch(store: CoreStore) async {
         var shown = Set<String>()
+        var lastNotice: String?
         while !Task.isCancelled {
             if let home = store.senateHome, NSApp.modalWindow == nil {
+                let policy = await Task.detached(priority: .utility) {
+                    personSecurityStatus(home: home)
+                }.value
+                if let notice = policy.notice, notice != lastNotice {
+                    lastNotice = notice
+                    let alert = NSAlert()
+                    alert.alertStyle = .warning
+                    alert.messageText = notice
+                    alert.informativeText = "A sensitive request will require macOS authentication before Senate accepts the change."
+                    alert.runModal()
+                } else if policy.notice == nil {
+                    lastNotice = nil
+                }
                 let prompts = await Task.detached(priority: .utility) {
                     personApprovalPrompts(home: home).map {
                         (id: $0.id, display: $0.display, reason: $0.reason, age: $0.ageSeconds)

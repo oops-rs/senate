@@ -64,6 +64,7 @@ impl Link {
     /// One request on a fresh connection.
     pub async fn call<T: DeserializeOwned>(&self, request: &Request) -> Result<T, ClientError> {
         let timeout = match request {
+            Request::Approve { .. } | Request::ApproveSession { .. } => Duration::from_secs(65),
             Request::Answer { .. }
             | Request::Take { .. }
             | Request::Task { .. }

@@ -815,6 +815,9 @@ async fn start_bridge(
     paths
         .ensure_home()
         .with_context(|| format!("creating {}", paths.home().display()))?;
+    if let Some(notice) = crate::app_confirmation::security_status(&paths).1 {
+        tracing::error!("{notice}");
+    }
 
     let socket = paths.socket();
     if std::fs::symlink_metadata(&socket).is_ok() {
@@ -4067,12 +4070,12 @@ impl Shared {
         });
         Ok(StatusReply {
             descriptors: Some(crate::fd::snapshot()),
-            person_guard_advisory: approval_guard::advisory_notice(self.locale).or_else(|| {
+            person_guard_advisory: crate::app_confirmation::security_status(&Paths::new(&self.home)).1.or_else(|| approval_guard::advisory_notice(self.locale).or_else(|| {
                 shared_codex.then(|| self.locale.pick(
                     "共享 Codex app-server 的托管会话仅受提示性守卫保护。",
                     "Hosted Codex sessions on the shared app-server have advisory process protection.",
                 ))
-            }).map(str::to_owned),
+            }).map(str::to_owned)),
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             person: self.config.person.clone(),

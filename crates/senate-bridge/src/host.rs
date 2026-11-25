@@ -424,7 +424,7 @@ impl Admission {
         u32::try_from(credentials.pid()?).ok()
     }
 
-    fn is_daemon(&self, stream: &UnixStream) -> bool {
+    async fn is_daemon(&self, stream: &UnixStream) -> bool {
         let Some(pid) = Self::peer(stream) else {
             return false;
         };
@@ -432,7 +432,7 @@ impl Admission {
             return pid == self.daemon.pid;
         }
         #[cfg(target_os = "macos")]
-        return crate::app_confirmation::macos::trusted_helper(self.paths.home(), pid);
+        return replacement_daemon(&self.paths, pid).await;
         #[cfg(not(target_os = "macos"))]
         false
     }
@@ -494,6 +494,19 @@ impl Admission {
         tickets.swap_remove(index);
         true
     }
+}
+
+#[cfg(target_os = "macos")]
+async fn replacement_daemon(paths: &Paths, pid: u32) -> bool {
+    if !crate::app_confirmation::macos::trusted_helper(paths.home(), pid) {
+        return false;
+    }
+    tokio::time::timeout(
+        Duration::from_millis(300),
+        UnixStream::connect(paths.socket()),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok_and(|stream| Admission::peer(&stream) == Some(pid)))
 }
 
 fn viewer_address(socket: &Path) -> anyhow::Result<(Paths, EventId)> {
@@ -706,7 +719,7 @@ pub async fn run(
     )
     .context("open the daemon publication pipe")?;
     let dir = directory(paths, id);
-    let _backend_lease = match session.codex_lease {
+    let mut backend_lease = match session.codex_lease {
         Some(path) => {
             let lease = UnixStream::connect(path)
                 .await
@@ -759,6 +772,12 @@ pub async fn run(
         .and_then(|pid| i32::try_from(pid).ok())
         .and_then(Pid::from_raw)
         .context("the coding TUI has no process ID")?;
+    if let Some(lease) = &mut backend_lease {
+        lease
+            .write_u32(pid.as_raw_pid() as u32)
+            .await
+            .context("register the dedicated Codex TUI")?;
+    }
     if let Ok(owner) = crate::kernel_process::inspect(pid.as_raw_pid() as u32)
         .and_then(|process| crate::kernel_process::BoundProcess::capture(process.identity))
     {
@@ -1678,7 +1697,7 @@ mod tests {
         let listener = UnixListener::bind(&socket)?;
         let (mut sender, (mut receiver, _)) =
             tokio::try_join!(UnixStream::connect(&socket), listener.accept(),)?;
-        assert!(!admission.is_daemon(&receiver));
+        assert!(!admission.is_daemon(&receiver).await);
         assert!(!admission.viewer(&mut receiver, false).await);
 
         let nonce = [37; 32];

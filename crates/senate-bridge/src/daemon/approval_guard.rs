@@ -393,6 +393,8 @@ impl Front {
         use crate::app_confirmation::{EnqueueError, LIFETIME};
         use tokio::io::AsyncBufReadExt;
 
+        let home = &self.primary().home;
+        let pin_change = crate::app_confirmation::macos::pending_change(home);
         let session_action = session_selector(&request).is_some()
             || matches!(&request, Request::SetCard { session, .. } if session != &SessionSelector::default());
         let requester_pid = if session_action {
@@ -406,7 +408,12 @@ impl Front {
             }
             peer.operator
         };
-        if peer.signed_app && !session_action {
+        let requester_instance = requester_pid
+            .and_then(|pid| kernel_process::inspect(pid).ok())
+            .and_then(|process| kernel_process::BoundProcess::capture(process.identity).ok());
+        let require_touch = answers_a_prompt(&request)
+            && crate::app_confirmation::macos::approvals_require_touch(home);
+        if peer.signed_app && !session_action && pin_change.is_none() && !require_touch {
             if let Request::OpenViewer { host, writable } = &request {
                 return self.broker_viewer(host, *writable, peer.operator).await;
             }
@@ -444,6 +451,7 @@ impl Front {
             .as_ref()
             .and_then(|_| requester_pid.and_then(kernel_process::terminal_identity));
         if let (Some(host), Some(terminal)) = (&view, &terminal)
+            && pin_change.is_none()
             && self.app_confirmations.terminal_ok(terminal)
         {
             return self.broker_viewer(host, true, requester_pid).await;
@@ -476,7 +484,12 @@ impl Front {
                 let terminal = kernel_process::terminal(pid)
                     .map(|name| format!(", {}", name.escape_default()))
                     .unwrap_or_default();
-                format!("{program} (PID {pid}{terminal})")
+                let job = if kernel_process::terminal_foreground(pid) == Some(false) {
+                    ", background job"
+                } else {
+                    ""
+                };
+                format!("{program} (PID {pid}{terminal}{job})")
             },
         );
         let mut reason = crate::app_confirmation::request_reason(&request, &requester);
@@ -567,16 +580,22 @@ impl Front {
                 Err(error) => return Reply::err(error),
             }
         }
+        if let Some(notice) = crate::app_confirmation::macos::change_notice(home) {
+            reason = format!("{notice}\n{reason}");
+        }
         let authorization = async {
+            if pin_change.is_some() {
+                return Ok(self
+                    .app_confirmations
+                    .authenticate_helper(home, request, &reason)
+                    .await);
+            }
             match self.app_confirmations.enqueue(request.clone(), &reason) {
                 Ok(mut ticket) => Ok((&mut ticket.reply).await.ok().flatten()),
-                Err(EnqueueError::AppUnavailable) => {
-                    let home = &self.primary().home;
-                    Ok(self
-                        .app_confirmations
-                        .authenticate_helper(home, request, &reason)
-                        .await)
-                }
+                Err(EnqueueError::AppUnavailable) => Ok(self
+                    .app_confirmations
+                    .authenticate_helper(home, request, &reason)
+                    .await),
                 Err(EnqueueError::Busy) => {
                     Err(refusal("The Senate app has too many pending confirmations"))
                 }
@@ -598,6 +617,21 @@ impl Front {
         let Some(approved) = approved else {
             return Reply::err(refusal(APP_CONFIRMATION));
         };
+        if !requester_instance.is_some_and(|process| process.live()) {
+            return Reply::err(refusal(
+                "The requesting process changed while waiting for authentication",
+            ));
+        }
+        if crate::app_confirmation::macos::pending_change(home) != pin_change {
+            return Reply::err(refusal(
+                "The installed trust records changed while waiting for authentication",
+            ));
+        }
+        if let Some(change) = &pin_change
+            && let Err(error) = crate::app_confirmation::macos::accept_change(home, change)
+        {
+            return Reply::err(IpcError::bad_request(error.to_string()));
+        }
         if let Some(host) = view {
             if let Some(terminal) = terminal
                 && requester_pid

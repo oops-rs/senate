@@ -1514,3 +1514,24 @@ pub fn resolve_person_approval(home: String, id: String, approved: bool) -> bool
     id.parse()
         .is_ok_and(|id| senate_bridge::app_confirmation::respond(&Paths::new(home), id, approved))
 }
+
+#[derive(uniffi::Record)]
+pub struct PersonSecurityStatus {
+    pub approval_touch_required: bool,
+    pub notice: Option<String>,
+}
+
+#[uniffi::export]
+pub fn person_security_status(home: String) -> PersonSecurityStatus {
+    let (approval_touch_required, notice) =
+        senate_bridge::app_confirmation::security_status(&Paths::new(home));
+    PersonSecurityStatus {
+        approval_touch_required,
+        notice,
+    }
+}
+
+#[uniffi::export]
+pub fn set_person_approval_touch(home: String, required: bool) -> bool {
+    senate_bridge::app_confirmation::set_approval_touch(&Paths::new(home), required)
+}

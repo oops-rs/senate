@@ -146,7 +146,7 @@ pub(super) async fn next_stop(
 ) -> UnixStream {
     loop {
         let (mut stream, _) = accept(listener).await;
-        if !admission.is_daemon(&stream) {
+        if !admission.is_daemon(&stream).await {
             tracing::warn!(%host, "refused a terminal control request from an unverified daemon peer");
             continue;
         }

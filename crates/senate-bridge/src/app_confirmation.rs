@@ -273,6 +273,7 @@ mod queue {
 #[cfg(target_os = "macos")]
 pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> String {
     use crate::ipc::Request;
+    use senate_observe::AdminRequest;
     let action = match request {
         Request::ApproveSession { senator, decision } => {
             format!("{decision:?} permission prompt for {senator}")
@@ -281,13 +282,50 @@ pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> 
         Request::AuthorizeNativeAuthority { session_id, .. } => {
             format!("Authorize native seat {session_id}")
         }
-        Request::ObserveAdmin { command } => {
-            let action = serde_json::to_value(command).ok();
-            let verb = action
-                .as_ref()
-                .and_then(|value| value["action"].as_str())
-                .unwrap_or("change");
-            format!("{verb} Observe access")
+        Request::ObserveAdmin {
+            command: AdminRequest::Create { grant },
+        } => {
+            let committees = if grant.all_committees {
+                "all committees".into()
+            } else {
+                grant
+                    .committees
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            format!(
+                "Create Observe {:?} access named {:?} for {committees}",
+                grant.scope, grant.name
+            )
+        }
+        Request::ObserveAdmin {
+            command: AdminRequest::Revoke { id },
+        } => format!("revoke Observe access for grant {id}"),
+        Request::ObserveAdmin {
+            command: AdminRequest::Publish { committee, seq, .. },
+        } => format!("Publish the preview of {committee} #{seq} to eligible observers"),
+        Request::ObserveAdmin {
+            command: AdminRequest::Withdraw { committee, seq },
+        } => format!("Withdraw the preview of {committee} #{seq}"),
+        Request::SessionForget { session_id } => {
+            format!("Forget stored session history for {session_id}")
+        }
+        Request::Stop { senator, .. } => format!("Stop {senator}'s hosted terminal"),
+        Request::Restore { senator, .. } => format!("Restart {senator}'s hosted terminal"),
+        Request::Pause { senator, .. } => format!("Pause {senator}'s hosted terminal"),
+        Request::Resume { senator } => format!("Resume {senator}'s hosted terminal"),
+        Request::Replace { senator, .. } => format!("Replace {senator}'s hosted session"),
+        Request::ArchiveCommittee {
+            committee,
+            archived,
+            ..
+        } => {
+            let action = if *archived { "Archive" } else { "Unarchive" };
+            format!("{action} committee {committee}")
         }
         other => serde_json::to_value(other)
             .ok()
@@ -319,6 +357,7 @@ struct AppMessage {
 enum AppCommand {
     Poll,
     Respond { id: EventId, approved: bool },
+    ApprovalTouch { required: bool },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -368,6 +407,26 @@ pub fn respond(paths: &Paths, id: EventId, approved: bool) -> bool {
         call(paths, AppCommand::Respond { id, approved }),
         Some(AppReply::Recorded { recorded: true })
     )
+}
+
+pub fn set_approval_touch(paths: &Paths, required: bool) -> bool {
+    matches!(
+        call(paths, AppCommand::ApprovalTouch { required }),
+        Some(AppReply::Recorded { recorded: true })
+    )
+}
+
+pub fn security_status(paths: &Paths) -> (bool, Option<String>) {
+    #[cfg(target_os = "macos")]
+    return (
+        macos::approvals_require_touch(paths.home()),
+        macos::change_notice(paths.home()),
+    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = paths;
+        (false, None)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -458,14 +517,129 @@ pub(crate) mod macos {
 
     const PIN_NAME: &str = "presence-code.json";
 
-    #[derive(Serialize, Deserialize)]
-    struct InstalledCode {
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    pub(crate) struct InstalledCode {
         app: Option<(PathBuf, [u8; 20])>,
         daemon: [u8; 20],
+        #[serde(default)]
+        approval_touch_id: bool,
     }
 
     fn installed(home: &Path) -> Option<InstalledCode> {
         serde_json::from_slice(&std::fs::read(home.join(PIN_NAME)).ok()?).ok()
+    }
+
+    fn accepted(home: &Path) -> Option<InstalledCode> {
+        let database = Paths::new(home).state_db();
+        let connection = rusqlite::Connection::open_with_flags(
+            database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .ok()?;
+        connection.busy_timeout(Duration::from_millis(100)).ok()?;
+        let data: Vec<u8> = connection
+            .query_row(
+                "SELECT record FROM presence_identity WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .ok()?;
+        serde_json::from_slice(&data).ok()
+    }
+
+    fn trusted_code(home: &Path) -> Option<InstalledCode> {
+        accepted(home)
+    }
+
+    fn record_accepted(home: &Path, code: &InstalledCode) -> anyhow::Result<()> {
+        let database = Paths::new(home).state_db();
+        let connection = rusqlite::Connection::open(database)?;
+        connection.busy_timeout(Duration::from_secs(2))?;
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS presence_identity(
+                id INTEGER PRIMARY KEY CHECK(id = 1), record BLOB NOT NULL
+            )",
+        )?;
+        connection.execute(
+            "INSERT INTO presence_identity (id, record) VALUES (1, ?)
+             ON CONFLICT(id) DO UPDATE SET record = excluded.record",
+            [serde_json::to_vec(code)?],
+        )?;
+        Ok(())
+    }
+
+    fn write_install(home: &Path, code: &InstalledCode) -> anyhow::Result<()> {
+        use std::io::Write as _;
+        let mut file = tempfile::NamedTempFile::new_in(home)?;
+        serde_json::to_writer(&mut file, code)?;
+        file.flush()?;
+        file.as_file().sync_all()?;
+        file.persist(home.join(PIN_NAME))?;
+        record_accepted(home, code)
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct PinChange {
+        candidate: Option<InstalledCode>,
+        prior: Option<InstalledCode>,
+    }
+
+    pub(crate) fn pending_change(home: &Path) -> Option<PinChange> {
+        let candidate = installed(home);
+        let prior = accepted(home);
+        (candidate != prior || (candidate.is_none() && home.join(PIN_NAME).exists()))
+            .then_some(PinChange { candidate, prior })
+    }
+
+    pub(crate) fn change_notice(home: &Path) -> Option<String> {
+        pending_change(home)?;
+        let observed = std::fs::metadata(home.join(PIN_NAME))
+            .and_then(|metadata| metadata.modified())
+            .map_or_else(
+                |_| chrono::Utc::now(),
+                chrono::DateTime::<chrono::Utc>::from,
+            );
+        Some(format!(
+            "The trusted app or approval policy changed on {}. Confirm that you installed it.",
+            observed.format("%Y-%m-%d")
+        ))
+    }
+
+    pub(crate) fn accept_change(home: &Path, change: &PinChange) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        anyhow::ensure!(
+            pending_change(home).as_ref() == Some(change),
+            "Trust changed while waiting for authentication"
+        );
+        let code = change
+            .candidate
+            .as_ref()
+            .or(change.prior.as_ref())
+            .context("The installed code pin is missing. Reinstall the service.")?;
+        let daemon_rule =
+            requirement("dev.senate.daemon").context("missing daemon signing requirement")?;
+        anyhow::ensure!(
+            guest_hash(None, std::process::id(), &daemon_rule) == Some(code.daemon),
+            "The daemon does not match the new pin. Reinstall the service."
+        );
+        if let Some((path, hash)) = &code.app {
+            let app_rule =
+                requirement("dev.senate.app").context("missing app signing requirement")?;
+            anyhow::ensure!(
+                hash_path(path, &app_rule) == Some(*hash),
+                "The app does not match the new code pin"
+            );
+        }
+        if change.candidate.is_none() {
+            write_install(home, code)
+        } else {
+            record_accepted(home, code)
+        }
+    }
+
+    pub(crate) fn approvals_require_touch(home: &Path) -> bool {
+        pending_change(home).is_some()
+            || trusted_code(home).is_some_and(|code| code.approval_touch_id)
     }
 
     fn hash_path(path: &Path, requirement: &std::ffi::CStr) -> Option<[u8; 20]> {
@@ -488,7 +662,7 @@ pub(crate) mod macos {
     }
 
     pub(crate) fn trusted_app(home: &Path, audit: &[u32; 8]) -> bool {
-        let Some((_, expected)) = installed(home).and_then(|pins| pins.app) else {
+        let Some((_, expected)) = trusted_code(home).and_then(|pins| pins.app) else {
             return false;
         };
         requirement("dev.senate.app").is_some_and(|requirement| {
@@ -511,7 +685,10 @@ pub(crate) mod macos {
 
         const ID: &str = "person_presence.app";
         const FIX: &str = "Run senate setup service install --yes --app /path/to/Senate.app";
-        let Some((path, expected)) = installed(home).and_then(|pins| pins.app) else {
+        if let Some(notice) = change_notice(home) {
+            return Check::fail(ID, notice, Some(FIX));
+        }
+        let Some((path, expected)) = trusted_code(home).and_then(|pins| pins.app) else {
             return Check::warn(ID, "No Senate app code is pinned", Some(FIX));
         };
         let Some(requirement) = requirement("dev.senate.app") else {
@@ -562,7 +739,7 @@ pub(crate) mod macos {
 
     pub(crate) fn app_copies_doctor(home: &Path) -> Option<crate::doctor::Check> {
         use std::os::unix::ffi::OsStringExt as _;
-        let (pinned, expected) = installed(home)?.app?;
+        let (pinned, expected) = trusted_code(home)?.app?;
         let rule = requirement("dev.senate.app")?;
         let result = std::process::Command::new("/usr/bin/mdfind")
             .args(["-0", "kMDItemCFBundleIdentifier == 'dev.senate.app'"])
@@ -595,7 +772,7 @@ pub(crate) mod macos {
     }
 
     pub(crate) fn trusted_helper(home: &Path, pid: u32) -> bool {
-        let Some(pins) = installed(home) else {
+        let Some(pins) = trusted_code(home) else {
             return false;
         };
         requirement("dev.senate.daemon")
@@ -620,7 +797,19 @@ pub(crate) mod macos {
         else {
             return false;
         };
-        if !child.id().is_some_and(|pid| trusted_helper(home, pid)) {
+        if !child.id().is_some_and(|pid| {
+            if accepted(home).is_some() {
+                return trusted_helper(home, pid);
+            }
+            let Some(rule) = requirement("dev.senate.daemon") else {
+                return false;
+            };
+            let Some(candidate) = installed(home) else {
+                return false;
+            };
+            guest_hash(None, std::process::id(), &rule) == Some(candidate.daemon)
+                && guest_hash(None, pid, &rule) == Some(candidate.daemon)
+        }) {
             return false;
         }
         let Some(mut input) = child.stdin.take() else {
@@ -664,7 +853,6 @@ pub(crate) mod macos {
         daemon: &Path,
     ) -> anyhow::Result<()> {
         use anyhow::Context as _;
-        use std::io::Write as _;
 
         if team().is_none() {
             anyhow::ensure!(app.is_none(), "This build has no configured signing team");
@@ -686,12 +874,15 @@ pub(crate) mod macos {
                 Ok((path, hash))
             })
             .transpose()?;
-        let mut file = tempfile::NamedTempFile::new_in(home)?;
-        serde_json::to_writer(&mut file, &InstalledCode { app, daemon })?;
-        file.flush()?;
-        file.as_file().sync_all()?;
-        file.persist(home.join(PIN_NAME))?;
-        Ok(())
+        let approval_touch_id = accepted(home).is_some_and(|code| code.approval_touch_id);
+        write_install(
+            home,
+            &InstalledCode {
+                app,
+                daemon,
+                approval_touch_id,
+            },
+        )
     }
 
     pub(crate) fn listen(paths: &Paths, queue: Arc<Queue>) -> Option<Listener> {
@@ -745,12 +936,26 @@ pub(crate) mod macos {
                 AppCommand::Respond { id, approved } => AppReply::Recorded {
                     recorded: context.queue.respond(&id, approved),
                 },
+                AppCommand::ApprovalTouch { required } => AppReply::Recorded {
+                    recorded: update_approval_touch(&context.home, required).is_ok(),
+                },
             }
         };
         if let Ok(data) = serde_json::to_vec(&response) {
             // xpc_dictionary_set_data copies these bytes into the reply.
             unsafe { senate_xpc_send_reply(reply, data.as_ptr(), data.len()) };
         }
+    }
+
+    fn update_approval_touch(home: &Path, required: bool) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        anyhow::ensure!(
+            pending_change(home).is_none(),
+            "The installed pin or approval policy changed"
+        );
+        let mut code = accepted(home).context("No approved app policy")?;
+        code.approval_touch_id = required;
+        write_install(home, &code)
     }
 
     pub(crate) fn call<T: serde::de::DeserializeOwned>(
@@ -761,7 +966,7 @@ pub(crate) mod macos {
     ) -> Option<T> {
         let name = CString::new(service).ok()?;
         let mut requirement = requirement("dev.senate.daemon")?;
-        if let Some(pin) = installed(home) {
+        if let Some(pin) = trusted_code(home) {
             requirement = CString::new(format!(
                 "{} and cdhash H\"{}\"",
                 requirement.to_str().ok()?,
@@ -802,6 +1007,25 @@ pub(crate) mod macos {
         let rule =
             CString::new(format!("{base} and cdhash H\"{}\"", hex::encode([0; 20]))).unwrap();
         assert_eq!(hash_path(app, &rule), None);
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn a_missing_or_reset_preference_does_not_silently_clear_touch_policy() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let approved = InstalledCode {
+            app: None,
+            daemon: [37; 20],
+            approval_touch_id: true,
+        };
+        write_install(dir.path(), &approved)?;
+        assert!(pending_change(dir.path()).is_none());
+        assert!(approvals_require_touch(dir.path()));
+        std::fs::remove_file(dir.path().join(PIN_NAME))?;
+        assert!(pending_change(dir.path()).is_some());
+        assert!(approvals_require_touch(dir.path()));
+        assert_eq!(accepted(dir.path()), Some(approved));
+        Ok(())
     }
 }
 

@@ -1,5 +1,6 @@
 import AppKit
 import ServiceManagement
+import LocalAuthentication
 import SwiftUI
 import SenateCore
 
@@ -14,6 +15,9 @@ struct SettingsView: View {
     @AppStorage(Notifier.Kind.prompt.defaultsKey) private var notifyPrompts = true
     @AppStorage(CoreStore.homeKey) private var home = ""
     @State private var draft = ""
+    @State private var requireApprovalTouch = false
+    @State private var updatingSecurity = false
+    @State private var securityNotice: String?
 
     var body: some View {
         Form {
@@ -52,6 +56,16 @@ struct SettingsView: View {
                 }
             } header: {
                 Text(verbatim: L("settings.notifications"))
+            }
+            Section("Security") {
+                Toggle("Require Touch ID for approvals in Senate", isOn: Binding(
+                    get: { requireApprovalTouch },
+                    set: { value in Task { await updateApprovalTouch(value) } }
+                ))
+                .disabled(store.senateHome == nil || updatingSecurity)
+                if let securityNotice {
+                    Text(verbatim: securityNotice).font(.callout).foregroundStyle(.secondary)
+                }
             }
             Section {
                 LabeledContent(L("settings.home_in_use")) {
@@ -92,9 +106,40 @@ struct SettingsView: View {
         .frame(width: 520)
         .fixedSize(horizontal: false, vertical: true)
         .task { notificationsAllowed = await store.notificationsAuthorized() }
+        .task(id: store.senateHome) {
+            if let home = store.senateHome {
+                let security = await Task.detached { personSecurityStatus(home: home) }.value
+                requireApprovalTouch = security.approvalTouchRequired
+                securityNotice = security.notice
+            }
+        }
         .onAppear {
             login.refresh()
             draft = home
+        }
+    }
+
+    @MainActor
+    private func updateApprovalTouch(_ required: Bool) async {
+        guard let home = store.senateHome, !updatingSecurity else { return }
+        updatingSecurity = true
+        defer { updatingSecurity = false }
+        if !required {
+            let context = LAContext()
+            context.touchIDAuthenticationAllowableReuseDuration = 0
+            guard (try? await context.evaluatePolicy(
+                .deviceOwnerAuthentication,
+                localizedReason: "Turn off Touch ID for approvals in Senate"
+            )) == true else { return }
+        }
+        let changed = await Task.detached {
+            setPersonApprovalTouch(home: home, required: required)
+        }.value
+        if changed {
+            requireApprovalTouch = required
+            securityNotice = nil
+        } else {
+            securityNotice = "Senate could not verify the installed app or approval policy."
         }
     }
 

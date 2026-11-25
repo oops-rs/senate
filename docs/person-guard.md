@@ -114,8 +114,11 @@ control of an existing host. Recovery after an unsigned or Linux daemon
 restart requires a fresh host at present.
 
 These viewer checks cover the terminal host's control, input and screen
-sockets. The dedicated Codex backend socket has a separate protocol and
-still needs receiver-side authentication.
+sockets. For dedicated Codex sessions, the supervisor owns the Unix RPC
+socket and checks the daemon and TUI process instances. The app-server
+listens on authenticated loopback WebSocket. Its bearer stays in the
+supervisor, and the app-server receives only the bearer digest. Dedicated
+mode requires a Codex build with authenticated WebSocket support.
 
 The CLI waits while the pinned app shows the request and requester derived
 from kernel process data. LocalAuthentication uses a fresh context with the
@@ -155,9 +158,25 @@ work with the configured team. Developer ID and notarization are a future
 release option. This branch does not establish usability of any particular
 private signing key by a hosted agent. Doctor reports a missing, changed, or
 inactive app pin. Unsigned development appliances have no trusted presence
-path. The installed files and pin are part of the trusted-files assumption.
-Pin replacement protection and a tamper-resistant opt-in for app approval
-authentication are pending.
+path.
+
+## Writable trust records
+
+The app pin and approval preference live in the Senate home. The installer
+also records the accepted values in the daemon's SQLite state. A mismatch is
+reported at startup, in status, in doctor, and in the app. The next sensitive
+request asks for device-owner authentication before accepting a matching
+team-signed app change. If the pin file has disappeared, confirmation can
+restore the last accepted values. The current daemon must match the pin
+before accepting a change. The Settings option to require Touch ID for
+approvals is off by default. Turning it off through the app requires fresh
+device-owner authentication.
+
+A same-user process able to rewrite both records can make them agree.
+This check detects divergence, including a preference reset in just one
+record. It provides no independent protection against coordinated changes to
+both records. A root-owned record would provide a stronger boundary. Senate
+keeps both records in the user home to allow automatic installs and updates.
 
 XNU's Unix peer token resolves the socket's last PID when queried. Per-message
 Mach attestation checks the process generation and app identity.
