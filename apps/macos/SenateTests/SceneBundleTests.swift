@@ -211,7 +211,7 @@ import Testing
     // MARK: Archives
 
     func refusal(_ zip: ZipBuilder) -> SceneBundle.Problem? {
-        do { _ = try SceneArchive.entries(zip.build()); return nil } catch { return error }
+        do { try SceneArchive.check(zip.build()); return nil } catch { return error }
     }
 
     @Test func archivesAreCheckedBeforeUnpacking() {
@@ -241,7 +241,12 @@ import Testing
         encrypted.add("a.js", "x", flags: 1)
         #expect(refusal(encrypted) != nil)
 
-        #expect((try? SceneArchive.entries(Data("not a zip".utf8))) == nil)
+        var deflated = ZipBuilder()
+        deflated.add("a.js", "x", method: 8)
+        #expect(refusal(deflated) == .archive(L("scenes.problem.archive_compressed")))
+
+        #expect(refusal(ZipBuilder()) == nil)
+        #expect((try? SceneArchive.check(Data("not a zip".utf8))) == nil)
     }
 
     @MainActor

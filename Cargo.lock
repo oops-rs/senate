@@ -2631,6 +2631,7 @@ dependencies = [
  "senate-markdown",
  "senate-observe",
  "senate-observe-protocol",
+ "senate-scene",
  "serde",
  "serde_json",
  "tempfile",
@@ -2675,6 +2676,7 @@ dependencies = [
  "senate-observe-client",
  "senate-observe-protocol",
  "senate-remote-admin",
+ "senate-scene",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2824,6 +2826,19 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "tempfile",
+]
+
+[[package]]
+name = "senate-scene"
+version = "0.12.3"
+dependencies = [
+ "hex",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

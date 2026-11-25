@@ -19,6 +19,8 @@ mod cli_legacy;
 mod cli_observe;
 #[path = "cli_open.rs"]
 mod cli_open;
+#[path = "cli_scene.rs"]
+mod cli_scene;
 #[path = "cli_secretary.rs"]
 mod cli_secretary;
 #[path = "cli_remote.rs"]
@@ -180,6 +182,15 @@ enum Cmd {
   senate open 'senate://open/v1/desk'   A full link, as Observe gives it
   senate open --print thread/senate/42  Print the canonical link")]
     Open(cli_open::Open),
+    /// Check or package a scene bundle for the Senate app.
+    ///
+    /// Applies exactly the rules the app applies when a person adds a
+    /// scene: the manifest, the files, the archive.
+    #[command(after_help = "Examples:
+  senate scene inspect dist/              Check a build folder
+  senate scene inspect town.senatescene   Check an archive
+  senate scene pack dist/ -o town.senatescene")]
+    Scene(cli_scene::Scene),
     /// Show your recorded local Senate activity by day.
     Stats {
         /// Number of local calendar days ending today (1d to 366d).
@@ -3657,6 +3668,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         Cmd::Observe(args) => cli_observe::run(args),
         Cmd::Card(args) => cli_observe::run_card(args),
         Cmd::Open(args) => cli_open::run(args),
+        Cmd::Scene(args) => cli_scene::run(args),
         Cmd::Setup { command } => run_setup(command, output),
         Cmd::Join {
             committee,

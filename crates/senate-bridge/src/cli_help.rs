@@ -25,6 +25,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "observe",
             "card",
             "open",
+            "scene",
         ],
     ),
     (

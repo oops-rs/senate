@@ -8,7 +8,8 @@ treated as untrusted code from somewhere else.
 ## Installing
 
 Open **Scenes** in the sidebar, choose **Add Scene…**, and pick a bundle
-folder or a `.senatescene` file (a zip of that folder). Before anything is
+folder or a `.senatescene` file (that folder's files in an uncompressed zip,
+as `senate scene pack` writes it). Before anything is
 copied, the app checks the bundle completely and shows the person the scene's
 name, version, size and fingerprint, what it observes, whether it asks for
 this Senate's links, and which cards it reads and writes. Nothing in the
@@ -40,12 +41,27 @@ folder path, so storage and the grant survive app restarts.
 
 | Rule | Limit |
 |---|---|
-| Manifest | `manifest.json` at the root, up to 16 KiB, strict JSON with no duplicate keys, exactly the contract's fields with their types and bounds ([`SceneManifest.swift`](../apps/macos/Senate/Scenes/SceneManifest.swift)), `observe.major` 1, `min_host_version` not above 1 |
+| Manifest | `manifest.json` at the root, up to 16 KiB, strict JSON with no duplicate keys, exactly the contract's fields with their types and bounds ([`manifest.rs`](../crates/senate-scene/src/manifest.rs)), `observe.major` 1, `min_host_version` not above 1 |
 | Names | Every path segment matches `[A-Za-z0-9_][A-Za-z0-9._-]*` (ASCII, no dot files, no `.`/`..`), at most 16 deep. `.DS_Store` and a root `__MACOSX` are skipped |
 | Files | Regular files only. No symbolic links, no hard links (link count 1), no devices, FIFOs or sockets |
 | Types | `html js mjs css json ndjson txt md png jpg jpeg gif webp woff2`, plus `LICENSE NOTICE COPYING AUTHORS`. No SVG, WebAssembly or media |
 | Sizes | 8 MiB per file, 64 MiB and 2,000 files in total |
-| Archives | The central directory is read before unpacking. Links, absolute or escaping names, encryption, zip64, disallowed types and declared sizes over the limits are refused. Then `ditto` unpacks into an empty staging folder of the app's own, and the result is checked like a folder |
+| Archives | Entries are stored, not compressed, so an archive can't unpack into more than its own size. The central directory is read before anything is unpacked. Links, absolute or escaping names, encryption, zip64, compression, disallowed types and sizes over the limits are refused. Each file is then taken from its local header, which must match the directory and its CRC-32, into an empty staging folder of the app's own. The result is checked like a folder |
+
+One implementation of these rules, in [`crates/senate-scene`](../crates/senate-scene),
+serves both the app and the `senate` CLI. Scene authors check a build with
+the same rules the app applies, and package it reproducibly:
+
+```sh
+senate scene inspect dist/                    # what the app would show, or why it refuses
+senate scene inspect town-1.2.0.senatescene   # the same for an archive
+senate scene pack dist/ -o town-1.2.0.senatescene
+```
+
+`pack` checks the folder, then writes exactly its files, sorted, stored,
+with fixed times and modes. The same bundle always produces the same bytes,
+and the archive's fingerprint is the bundle's. Zips made by other tools are
+usually compressed, so the app refuses them.
 
 ## What an installed scene can do
 
