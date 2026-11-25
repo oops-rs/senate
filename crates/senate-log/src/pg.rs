@@ -43,7 +43,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
 use senate_core::api::Heartbeat;
 use senate_core::hub::search_terms;
-use senate_core::{Appended, CommitteeId, Event, MirrorRef, NewEvent, SenatorName, Seq};
+use senate_core::{Appended, CommitteeId, Event, EventId, MirrorRef, NewEvent, SenatorName, Seq};
 use sqlx::migrate::Migrator;
 use sqlx::postgres::{PgExecutor, PgPool, PgPoolOptions, PgRow};
 use sqlx::{AssertSqlSafe, Row};
@@ -554,6 +554,14 @@ impl LogStore for PgStore {
             .fetch_optional(&self.pool)
             .await?;
         row.as_ref().map(decode_event).transpose()
+    }
+
+    async fn get_by_id(
+        &self,
+        committee: &CommitteeId,
+        id: &EventId,
+    ) -> Result<Option<Event>, LogError> {
+        stored_by_id(&self.pool, committee, &id.to_string()).await
     }
 
     async fn head(&self, committee: &CommitteeId) -> Result<Seq, LogError> {

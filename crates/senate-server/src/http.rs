@@ -40,6 +40,7 @@ pub(crate) use error::ApiFailure;
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) machine: bool,
+    pub(crate) bound: std::net::SocketAddr,
     pub(crate) workers: Option<std::sync::Arc<worker::Book>>,
     pub hub: Arc<ServerHub>,
     pub auth: Arc<dyn Authenticate>,
@@ -57,9 +58,7 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route(senate_core::worker::ADMIN_PATH, post(worker::admin))
-        .route(senate_core::worker::IDENTITY_PATH, get(worker::identity))
-        .route(senate_core::worker::QUESTIONS_PATH, post(worker::question))
-        .route(senate_core::worker::REPLIES_PATH, get(worker::replies))
+        .merge(worker::routes(state.bound))
         .route("/v1/me", get(me))
         .route("/v1/aliases", get(list_aliases))
         .route("/v1/committee-aliases", get(committee_aliases))

@@ -34,10 +34,9 @@ access policy.
 
 ## HTTP contract
 
-All three routes take `Authorization: Bearer <worker-token>`. Use the numeric
-loopback URL from the machine. JSON shapes omit server-internal storage
-fields. Record and check the `X-Senate-Epoch` response header when resuming
-saved polling state.
+All three routes take `Authorization: Bearer <worker-token>` and require
+the machine's exact numeric loopback authority. Record and check the
+`X-Senate-Epoch` response header when resuming saved polling state.
 
 | Method and path | Request | Response |
 | --- | --- | --- |
@@ -48,11 +47,12 @@ saved polling state.
 IDs are ULID strings. Sequences and cursors are unsigned integers. A non-null
 `office` contains `speaker`, `kind`, `desk`, and optional `built_in`. Each
 reply is a Senate event envelope with `id`, `seq`, `kind`, `thread`, `from`,
-and `body` among its fields.
+and `body` among its fields. The worker projection removes internal
+metadata, references and source fields. It preserves `meta.provisional`.
 
 Key saved tasks by Senate, epoch and the worker ID from identity. Choose a
 separate ID once per question. Repeating the same request returns the same
-receipt. A conflicting reuse returns 409.
+receipt. A conflicting reuse in the same committee returns 409.
 
 If the caller names a committee, submit `committee`. For a question with
 no committee, send `"desk_intake": true` and omit `committee`. Senate puts
@@ -74,14 +74,20 @@ in the destination committee. Other workers' roots are unavailable.
 
 Senate assigns a distinct guest worker as the author, `Question` as the
 kind, and the Speaker as the sole recipient. Caller text is an untrusted
-label, sanitized and limited to 96 characters. The question shown in the
+label, sanitized and limited to 96 characters. Printable Unicode
+look-alikes can still occur. The question shown in the
 desk and thread is prefixed with “Asked through <worker> on behalf of
-<caller>” when supplied. The label carries no human authority. Observe
+<caller>” when supplied. Senate normalizes Unicode line breaks and replaces
+terminal and Unicode format controls. The label carries no human authority. Observe
 continues to exclude guest envelopes.
 
 Missing, revoked, or invalid worker credentials return 401. A request
 outside the grant's direct or intake scope returns 403. A missing or other
-worker's thread returns 404. Invalid fields, empty questions and oversized questions
+worker's thread returns 404. Each grant can have 16 unanswered, unarchived
+roots open at once. Additional submissions return 409 until one is
+answered or archived. Each grant can attempt 20 new submissions per minute.
+Further attempts return 429. Existing IDs can still replay their receipts
+at either limit. Invalid fields, empty questions and oversized questions
 return a client error. Clients cannot choose author, kind, recipient,
 thread, or metadata. Worker credentials cannot use ordinary event append,
 archive, role, seat, alias, secretary, approval, or grant routes.

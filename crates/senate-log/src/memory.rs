@@ -134,6 +134,19 @@ impl LogStore for MemoryStore {
             .cloned())
     }
 
+    async fn get_by_id(
+        &self,
+        committee: &CommitteeId,
+        id: &EventId,
+    ) -> Result<Option<Event>, LogError> {
+        let inner = self.lock();
+        Ok(inner
+            .committees
+            .get(committee)
+            .and_then(|log| log.by_id.get(id).and_then(|seq| log.get(*seq)))
+            .cloned())
+    }
+
     async fn head(&self, committee: &CommitteeId) -> Result<Seq, LogError> {
         let inner = self.lock();
         Ok(inner

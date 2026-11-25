@@ -15,7 +15,7 @@ pub(super) fn can_start(roster: &Roster, event: &NewEvent) -> bool {
     event.thread.is_none()
         && matches!(event.kind, Kind::Question | Kind::Note)
         && event.on_behalf_of.is_none()
-        && event.meta.len() == 1
+        && discussion_meta_only(event, meta::INTENDED)
         && event.meta.contains_key(meta::INTENDED)
         && event.from.as_senator().is_some_and(|s| roster.is_agent(s))
 }
@@ -126,15 +126,24 @@ pub(super) async fn reply_peer(
 }
 
 fn reply_read_mark(event: &NewEvent) -> Option<Seq> {
-    match event.meta.len() {
-        0 => Some(Seq::ZERO),
-        1 => {
+    if !discussion_meta_only(event, meta::SEEN) {
+        return None;
+    }
+    match event.meta.get(meta::SEEN) {
+        None => Some(Seq::ZERO),
+        Some(seen) => {
             // Both SQL backends store sequence numbers as signed 64-bit integers.
-            let seen = event.meta.get(meta::SEEN)?.as_i64()?;
+            let seen = seen.as_i64()?;
             u64::try_from(seen).ok().map(Seq)
         }
-        _ => None,
     }
+}
+
+fn discussion_meta_only(event: &NewEvent, key: &str) -> bool {
+    // The HTTP append guard restricts these keys to the verified local bridge.
+    event.meta.keys().all(|candidate| {
+        candidate == key || crate::rules::BRIDGE_KEYS.contains(&candidate.as_str())
+    })
 }
 
 pub(super) async fn reply(

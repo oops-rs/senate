@@ -380,8 +380,23 @@ pub fn render_news_with(
             clock.stamp(event.ts)
         ),
     };
+    let text = if event.from.as_guest().is_some()
+        || event
+            .on_behalf_of
+            .as_ref()
+            .is_some_and(|by| by.as_guest().is_some())
+    {
+        std::borrow::Cow::Owned(senate_core::worker::display_body(text))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    };
     let laid_out = lay_out.map(|lay_out| lay_out(text.trim()));
-    let lines: Vec<&str> = laid_out.as_deref().unwrap_or(text).trim().lines().collect();
+    let lines: Vec<&str> = laid_out
+        .as_deref()
+        .unwrap_or(&text)
+        .trim()
+        .lines()
+        .collect();
     if lines.is_empty() {
         out.push_str(&format!(
             "\n  {}",

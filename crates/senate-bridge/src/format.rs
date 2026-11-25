@@ -68,7 +68,7 @@ fn is_break(c: char) -> bool {
 pub fn one_line(s: &str) -> String {
     s.chars()
         .map(|c| {
-            if c.is_control() || is_break(c) {
+            if senate_core::worker::is_display_control(c) || is_break(c) {
                 ' '
             } else {
                 c
@@ -89,7 +89,13 @@ pub fn fence(body: &str) -> String {
         out.push_str(FENCE);
         let line: String = line
             .chars()
-            .map(|c| if c.is_control() && c != '\t' { ' ' } else { c })
+            .map(|c| {
+                if senate_core::worker::is_display_control(c) && c != '\t' {
+                    ' '
+                } else {
+                    c
+                }
+            })
             .collect();
         let line = line.trim_end();
         if line.is_empty() {

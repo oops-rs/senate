@@ -133,7 +133,7 @@ impl AgyHookInput {
 }
 
 /// What the hook reads from its environment.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct HookEnv {
     pub socket: Option<PathBuf>,
     pub token: Option<String>,
@@ -141,6 +141,15 @@ pub struct HookEnv {
     pub session_id: Option<String>,
     /// `SENATE_AGENT`: the agent name this session pins.
     pub agent: Option<String>,
+}
+
+impl std::fmt::Debug for HookEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HookEnv")
+            .field("session_id", &self.session_id)
+            .field("claude_pid", &self.claude_pid)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Codex hook input looks like Claude Code's; what tells them apart is the
@@ -400,9 +409,10 @@ pub async fn prepare(
     // A Codex hook runs in the app-server, whose environment may carry a
     // Claude Code session's variables (a daemon started from inside one):
     // none of them describe this session.
+    let empty_env = HookEnv::default();
     let env = match runtime {
-        Runtime::Claude => env.clone(),
-        Runtime::Codex | Runtime::Agy | Runtime::Acp => HookEnv::default(),
+        Runtime::Claude => env,
+        Runtime::Codex | Runtime::Agy | Runtime::Acp => &empty_env,
     };
     let session_id = input.session_id.or_else(|| env.session_id.clone())?;
     // The Senate home is where the daemon's socket is.

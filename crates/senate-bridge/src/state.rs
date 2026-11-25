@@ -307,7 +307,7 @@ impl QueueItem {
 }
 
 /// What a hook tells the registry about a session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SessionUpsert {
     pub session_id: String,
     pub cwd: PathBuf,
@@ -324,6 +324,17 @@ pub struct SessionUpsert {
     /// The agent the session speaks as, chosen at every hook.
     pub agent: SenatorName,
     pub agent_source: AgentSource,
+}
+
+impl std::fmt::Debug for SessionUpsert {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionUpsert")
+            .field("session_id", &self.session_id)
+            .field("runtime", &self.runtime)
+            .field("agent", &self.agent)
+            .field("cwd", &self.cwd)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

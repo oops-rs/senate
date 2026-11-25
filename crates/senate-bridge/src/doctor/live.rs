@@ -511,6 +511,19 @@ fn session_checks(sessions: &SessionsReply, l: Locale) -> Vec<Check> {
             format!("{running} hosted sessions running, {stopped} stopped"),
         ),
     )];
+    if sessions
+        .rows
+        .iter()
+        .any(|row| row.is_running() && row.runtime == crate::session::Runtime::Claude)
+    {
+        checks.push(Check::info(
+            "sessions.claude_inbox_trust",
+            l.pick(
+                "取得 Claude 收件箱凭据的同用户进程可以向该会话提交任意用户消息，包括主席和秘书会话。",
+                "A same-user process with a Claude inbox credential can submit arbitrary user messages to that session, including chair and secretary sessions.",
+            ),
+        ));
+    }
     let outdated = sessions
         .rows
         .iter()

@@ -140,7 +140,7 @@ pub async fn push(dir: &Path) -> Result<String, String> {
         return Err("there is no `origin` remote to push to".into());
     }
     let refspec = format!("HEAD:{branch}");
-    let mut args = vec!["push"];
+    let mut args = vec!["-c", "core.hooksPath=/dev/null", "push"];
     if git(
         dir,
         &["config", "--get", &format!("branch.{branch}.merge")],

@@ -328,7 +328,7 @@ pub struct RebindThread {
 }
 
 /// What a SessionStart / UserPromptSubmit hook saw.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookReport {
     pub event: HookEvent,
     pub session_id: String,
@@ -372,6 +372,17 @@ pub struct HookReport {
     /// once it starts, so its first hook tells the host which one it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<EventId>,
+}
+
+impl std::fmt::Debug for HookReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HookReport")
+            .field("event", &self.event)
+            .field("session_id", &self.session_id)
+            .field("runtime", &self.runtime)
+            .field("cwd", &self.cwd)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(
@@ -2674,6 +2685,8 @@ pub struct BoundReply {
     pub session_id: String,
     #[serde(default)]
     pub committee: Option<CommitteeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
 }
 
 /// One committee stream's state.
@@ -2960,7 +2973,8 @@ pub async fn request_line(socket: &Path, request: &Request) -> Result<Vec<u8>, C
     #[cfg(target_os = "macos")]
     {
         use crate::mac_scope::ProofKind;
-        let kind = if crate::daemon::approval_guard::person_only(request).is_some()
+        let kind = if crate::daemon::approval_guard::request_effect(request).requires_operator()
+            || crate::daemon::approval_guard::person_only(request).is_some()
             || crate::daemon::approval_guard::operator_only(request)
             || matches!(
                 request,

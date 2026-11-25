@@ -447,6 +447,7 @@ pub(super) async fn attach(
         return host::view::watch_remote_one(tile, client).await;
     }
     super::require_attach_terminal()?;
+    eprintln!("Authenticate writable attach on the hosting Mac.");
     host::attach_stream(client.stream(tile.key, true).await?, &tile.title, None).await
 }
 

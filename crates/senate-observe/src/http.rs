@@ -174,7 +174,7 @@ fn preflight(
     }
 }
 
-fn valid_authority(request: &Request, bound: SocketAddr) -> bool {
+pub fn valid_authority(request: &Request, bound: SocketAddr) -> bool {
     let Ok(host) = single(request.headers(), &header::HOST) else {
         return false;
     };

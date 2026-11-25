@@ -2707,6 +2707,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "ulid",
+ "unicode-general-category",
 ]
 
 [[package]]

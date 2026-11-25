@@ -345,6 +345,22 @@ pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> 
         Request::SessionForget { session_id } => {
             format!("Forget stored session history for {session_id}")
         }
+        Request::Secretaries {
+            action,
+            for_,
+            secretary,
+            ..
+        } => {
+            let principal = for_
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "the selected principal".into());
+            let secretary = secretary
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "the secretary".into());
+            format!("{action:?} {secretary} as a secretary for {principal}")
+        }
         Request::Stop { senator, .. } => format!("Stop {senator}'s hosted terminal"),
         Request::Restore { senator, .. } => format!("Restart {senator}'s hosted terminal"),
         Request::Pause { senator, .. } => format!("Pause {senator}'s hosted terminal"),
@@ -1073,57 +1089,10 @@ pub(crate) mod macos {
 
 /// Whether a bridge request may wait on local authorization.
 pub fn required(request: &crate::ipc::Request) -> bool {
-    use crate::ipc::{Request, SessionSelector};
-    use crate::remote::Control;
-    use senate_observe::AdminRequest;
+    use crate::daemon::approval_guard::{RequestEffect, request_effect};
+    use crate::ipc::Request;
 
-    match request {
-        Request::Approve { .. }
-        | Request::DeskWorker { .. }
-        | Request::ApproveSession { .. }
-        | Request::DeskDecide { .. }
-        | Request::Forward { .. }
-        | Request::Refuse { .. }
-        | Request::DeskOpenCommittee { .. }
-        | Request::AuthorizeNativeAuthority { .. }
-        | Request::SessionForget { .. }
-        | Request::RebindHost { .. }
-        | Request::SetChair { .. }
-        | Request::SetSecretarySession { .. }
-        | Request::SetAlias { .. }
-        | Request::RemoveAlias { .. }
-        | Request::SetCommitteeSeat { .. }
-        | Request::SpeakerAlias { .. }
-        | Request::SpeakerUnseat { .. }
-        | Request::EnsureSecretary
-        | Request::ArchiveCommittee { .. }
-        | Request::SetCard { .. }
-        | Request::Pause { .. }
-        | Request::Resume { .. }
-        | Request::Replace { .. }
-        | Request::PruneHosts
-        | Request::RestartHost { .. }
-        | Request::Attach { .. }
-        | Request::Desk { set: Some(_) } => true,
-        Request::OpenViewer { writable, .. } => *writable,
-        Request::Stop { session, .. } | Request::Restore { session, .. } => {
-            session == &SessionSelector::default()
-        }
-        Request::Spawn {
-            chair, secretary, ..
-        } => *chair || *secretary,
-        Request::ObserveAdmin { command } => matches!(
-            command,
-            AdminRequest::Create { .. }
-                | AdminRequest::Revoke { .. }
-                | AdminRequest::Publish { .. }
-                | AdminRequest::Withdraw { .. }
-        ),
-        Request::RemoteControl { command } => {
-            !matches!(command, Control::Devices | Control::Candidate)
-        }
-        _ => false,
-    }
+    request_effect(request) == RequestEffect::Presence || matches!(request, Request::SetCard { .. })
 }
 
 /// The unsigned, disposable integration fixtures exercise the existing

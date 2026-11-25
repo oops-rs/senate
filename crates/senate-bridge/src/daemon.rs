@@ -4154,7 +4154,7 @@ impl Shared {
 
     /// Native hooks bring their session ID. Older local bridge clients report
     /// a fixed senator selected by their harness, file or environment.
-    async fn on_hook(&self, report: HookReport, native: bool) -> Result<HookReply, IpcError> {
+    async fn on_hook(&self, mut report: HookReport, native: bool) -> Result<HookReply, IpcError> {
         let began = Instant::now();
         if report.runtime.native_id(&report.session_id).is_none()
             || (matches!(report.runtime, Runtime::Agy | Runtime::Acp) && !native)
@@ -4200,7 +4200,7 @@ impl Shared {
             branch: report.branch.clone(),
             inferred_committee: inferred,
             socket: report.socket.clone(),
-            token: report.token.clone(),
+            token: report.token.take(),
             claude_pid: report.claude_pid,
             transcript_path: report.transcript_path.clone(),
             ancestor_pids: if report.claude_pid.is_none() {
@@ -4973,14 +4973,6 @@ impl Shared {
                 root.display()
             ))
         })?;
-        let (push_output, push_error) = if push {
-            match checkpoint::push(&root).await {
-                Ok(out) => (Some(out), None),
-                Err(e) => (None, Some(e)),
-            }
-        } else {
-            (None, None)
-        };
         let trigger = if push {
             CheckpointTrigger::Handoff
         } else {
@@ -5016,8 +5008,8 @@ impl Shared {
             written: written.into_iter().map(str::to_string).collect(),
             files: present,
             truncated,
-            push_output,
-            push_error,
+            push_output: None,
+            push_error: push.then(|| "Run the handoff through the session's MCP checkpoint tool to push from its process scope".into()),
         })
     }
 
@@ -5218,6 +5210,9 @@ impl Shared {
     /// Append, turning the server's `ambiguous_recipient` into an error that
     /// carries the candidates and tells the asker how to choose.
     async fn post(&self, event: NewEvent) -> Result<Posted, IpcError> {
+        approval_guard::check_person_author(
+            event.from == self.person() || self.people().is_person_address(&event.from),
+        )?;
         let event = if self.api.uses_local_transport() {
             approval_guard::annotate_origin(event)
         } else {
@@ -5583,22 +5578,25 @@ impl Shared {
             let me = Address::senator(&s.agent);
             !root.to.contains(&me) && (root.from == me || root.on_behalf_of.as_ref() == Some(&me))
         });
-        if let Some(session) = session
+        let owner = session
             .as_ref()
             .filter(|_| !acting.as_person && !asker_only)
-        {
-            status.session = Some(session.session_id.clone());
-            let owner = TaskOwner {
-                agent: session.agent.clone(),
-                session: session.session_id.clone(),
-            };
+            .map(|session| {
+                status.session = Some(session.session_id.clone());
+                TaskOwner {
+                    agent: session.agent.clone(),
+                    session: session.session_id.clone(),
+                }
+            });
+        let from = self.speaker_for(session.as_ref(), &committee, &acting)?;
+        let event = Self::status_event(committee.clone(), from, root.seq, &status, id);
+        let posted = self.post(event).await?;
+        if let Some(owner) = owner {
             self.store
                 .set_owner(&committee, root.seq, &owner)
                 .map_err(internal)?;
         }
-        let from = self.speaker_for(session.as_ref(), &committee, &acting)?;
-        let event = Self::status_event(committee, from, root.seq, &status, id);
-        self.post(event).await
+        Ok(posted)
     }
 
     /// The session's agent hands a thread on: to `to`, a person, or with
@@ -5954,6 +5952,7 @@ impl Shared {
         body: String,
         id: Option<EventId>,
     ) -> Result<Posted, IpcError> {
+        approval_guard::check_person_author(true)?;
         let Some(above) = &self.uplink else {
             return Err(IpcError::internal("no Senate above"));
         };
@@ -6619,6 +6618,7 @@ impl Shared {
         Ok(BoundReply {
             committee: session.committee().cloned(),
             session_id: session.session_id,
+            cwd: Some(session.cwd),
         })
     }
 }
@@ -6650,6 +6650,7 @@ impl Front {
         &self,
         session: &str,
         attach: bool,
+        device_name: &str,
     ) -> anyhow::Result<UnixStream> {
         let shared = self.primary();
         // The input is a native session ID. Resolve the host exclusively
@@ -6665,6 +6666,47 @@ impl Front {
         );
         let paths = Paths::new(&shared.home);
         ensure!(crate::host::running(&paths, &id)?, "host is stopped");
+        if attach && !self.scope_fixture {
+            #[cfg(target_os = "macos")]
+            {
+                ensure!(
+                    crate::app_confirmation::macos::pending_change(&shared.home).is_none(),
+                    "Confirm the updated Senate trust record on the hosting Mac first"
+                );
+                let reason = format!(
+                    "Allow writable terminal access to {session} from paired device {device_name}"
+                );
+                let approved = self
+                    .app_confirmations
+                    .authenticate_helper(
+                        &shared.home,
+                        Request::OpenViewer {
+                            host: id.clone(),
+                            writable: true,
+                        },
+                        &crate::format::one_line(&reason),
+                    )
+                    .await;
+                ensure!(
+                    approved.is_some(),
+                    "Authenticate writable attach on the hosting Mac"
+                );
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = device_name;
+                anyhow::bail!(
+                    "Writable remote attach requires local authentication on the hosting Mac"
+                );
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = device_name;
+        ensure!(
+            shared.store.session_host(session)?.as_ref() == Some(&id)
+                && crate::host::running(&paths, &id)?,
+            "session changed while waiting for terminal access"
+        );
         let tty = crate::host::socket(&paths, &id);
         let path = if attach {
             tty
@@ -6876,8 +6918,9 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                                 )
                             });
                         }
-                        if let Some(selector) = front::selector_mut(request)
-                            .filter(|selector| **selector != SessionSelector::default())
+                        if !approval_guard::request_effect(request).requires_operator()
+                            && let Some(selector) = front::selector_mut(request)
+                                .filter(|selector| **selector != SessionSelector::default())
                         {
                             return match shared.verify_selector_owner(session_peer, selector) {
                                 Ok(session_id) => {
@@ -7141,10 +7184,13 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     ),
                     #[cfg(any(target_os = "macos", target_os = "linux"))]
                     Ok(request) if !shared.scope_fixture && protected_operator_class(&request) => (
-                        Box::pin(shared.guarded_dispatch(
-                            person_peer,
-                            "Run this command from your own terminal or the Senate app",
-                            request,
+                        Box::pin(approval_guard::VERIFIED_ORIGIN.scope(
+                            origin,
+                            shared.guarded_dispatch(
+                                person_peer,
+                                "Run this command from your own terminal or the Senate app",
+                                request,
+                            ),
                         ))
                         .await,
                         false,
@@ -7153,19 +7199,29 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         if !fixture && approval_guard::session_selector(&request).is_some() =>
                     {
                         (
-                            Box::pin(approval_guard::VERIFIED_ORIGIN.scope(
-                                if matches!(request, Request::Take { .. }) {
-                                    "agent-on-behalf"
-                                } else {
-                                    "session"
-                                },
-                                shared.dispatch(request),
-                            ))
+                            Box::pin(
+                                approval_guard::VERIFIED_ORIGIN
+                                    .scope("session", shared.dispatch(request)),
+                            )
                             .await,
                             false,
                         )
                     }
-                    Ok(request) => (shared.dispatch(request).await, false),
+                    Ok(request) => {
+                        let fallback_origin = if !fixture {
+                            "unverified"
+                        } else if approval_guard::session_selector(&request).is_some() {
+                            "session"
+                        } else {
+                            origin
+                        };
+                        (
+                            approval_guard::VERIFIED_ORIGIN
+                                .scope(fallback_origin, shared.dispatch(request))
+                                .await,
+                            false,
+                        )
+                    }
                     Err(e) => (
                         Reply::err(IpcError::bad_request(format!("unreadable request: {e}"))),
                         false,

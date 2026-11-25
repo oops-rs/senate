@@ -99,7 +99,12 @@ remote-machine administration and pairing, card writes, and operator-only
 host stop, restore, pause, resume and replacement require a local decision.
 History deletion and opening a writable terminal viewer also require local
 authorization. Routine CLI speech uses the operator proof without a presence
-prompt. Requests naming a session use its verified runtime instance.
+prompt. A verified session selector grants the authority of that session.
+An explicit person byline, memory correction or deletion, and thread takeover
+require operator proof even when a session is named. The daemon checks the
+final author before posting. Adding or removing a secretary, changing roles
+or seats, and stopping or restoring a hosted terminal require presence.
+Creating an ordinary hosted seat requires operator proof.
 
 New terminal hosts admit daemon control commands by process instance and
 check one-use viewer tickets with a five-second lifetime. The ticket binds
@@ -112,11 +117,17 @@ TTY share the scope, including automation in an already authorized pane.
 Detaching from tmux can leave the pane, its kernel TTY, and its authorization
 alive. An authorized interactive viewer can still type directly into a
 terminal prompt.
+Writable attach from a paired device requires fresh local authentication
+on the hosting Mac. The host binds it to the requested hosted terminal and
+names the paired device. A watch still uses the device's read-only scope.
+
 Existing pre-ticket hosts keep their old sockets until they restart. The
 installer, session list, app, status and doctor identify that condition.
 Versions that never recorded their version are displayed as unrecorded.
 Attach can still open a legacy terminal to save work and prints a warning
-before connecting.
+before connecting. The warning uses user-writable protocol markers. Their
+presence alone cannot establish that a legacy host enforces the new
+socket protocol.
 
 Signed macOS requires the installed daemon pin for a replacement serving
 the same home's bridge socket. Unsigned and unprovisioned Linux or WSL
@@ -197,13 +208,14 @@ The public loopback router has no person bearer for the production machine.
 Upgrade revokes the old `senates/top/token` credential and removes the file.
 An old copy gets 401 directing its client to the local Senate CLI or app.
 Doctor warns if the file is still present. Standalone servers and separately
-configured parent connections keep their configured credentials.
+configured parent connections keep their configured credentials. The
+uplink token in `senate.toml` is the machine person's full bearer at the
+parent. A same-user reader can exercise that person's parent authority.
+The scoped worker API covers desk intake. Uplink registration, forwarding
+and replies would need a separate child-specific credential before that
+full bearer could be retired.
 
 No machine Senate seat has a general-purpose server bearer saved on disk.
-Native Claude inbox credentials can be recorded with the session in
-`state.db`. They authenticate delivery into that runtime's inbox, so a
-same-user reader can potentially inject input there. They cannot authorize
-server event writes or substitute for another runtime's verified IPC identity.
 External desk intake uses [separate scoped worker credentials](worker-credentials.md).
 
 An agent that can drive a user's running tmux or screen pane can act with
@@ -217,6 +229,24 @@ access to terminal automation and check which terminal tools have it.
 Committee logs, including thread, memory, search and brief data on disk,
 are protected by the filesystem like transcripts. IPC verification restricts
 the daemon endpoints and does not provide a separate filesystem boundary.
+
+## Claude inbox delivery
+
+Any process running as the same user that obtains a Claude inbox credential
+can submit arbitrary user-role text to that Claude session, including
+sessions used as chairs or as the secretary. To the receiving agent that
+text has the same authority as a person-typed prompt. It can impersonate
+any sender in the prompt body. Claude exposes the credential in its
+process environment. Senate keeps the delivery copy in its mode-0600
+`state.db`, and omits the secret from debug output. File mode 0600
+restricts other users and still allows the same user to read the file.
+
+The person chose to keep immediate inbox delivery. The stronger design
+would refuse Claude cross-session inbound messages, wake idle hosted
+sessions through their protected PTY, and deliver content only through
+verified hooks or MCP. An idle native session would wait for its next
+hook or explicit catch-up. Doctor reports this residual while a hosted
+Claude session is running.
 
 ## Writable trust records
 
@@ -238,6 +268,31 @@ keeps both records in the user home to allow automatic installs and updates.
 
 XNU's Unix peer token resolves the socket's last PID when queried. Per-message
 Mach attestation checks the process generation and app identity.
+
+A process with write access to the Senate home can impersonate any seat,
+rewrite native ownership, forge a person's decisions in the log, and
+change the Speaker's desk. It can also forge app-consented Observe grants
+by rewriting the grants and installation key together. The log has no
+event hash chain. SQLite can detect structural damage, while a valid row
+rewrite can remain undetected. A chain stored beside the log could be
+recomputed by the same writer. Detecting that class of tampering would
+require an independently protected key or external checkpoints.
+
+## Privileged session operations
+
+Routing, covering and holding work remain delegated to verified sessions
+that hold the applicable desk, chair or secretary role. The daemon
+checks that role at dispatch and checks the source item and destination
+where the operation uses them. Scope enforcement belongs in these
+handlers, including which committees and another seat's threads a role
+can act on. Operator authorization guards changing the roles themselves
+and starting, stopping or restoring hosted seats. Prompts can explain
+those responsibilities but confer no authority.
+
+A checkpoint handoff executes Git in the requesting MCP process, under
+the session's scope and with Git hooks disabled. The bridge records the
+checkpoint and checks the commit against the tracked branch. A direct
+checkpoint request never launches a Git push in the daemon.
 
 ## Session claims
 

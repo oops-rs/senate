@@ -753,13 +753,19 @@ fn a_codex_app_server_that_is_down_names_the_daemon_command() {
 #[test]
 fn a_healthy_machine_passes_every_live_check() {
     let checks = live(&healthy(), EN);
-    assert!(checks.iter().all(|c| c.status == Status::Ok), "{checks:#?}");
+    assert!(
+        checks
+            .iter()
+            .all(|c| matches!(c.status, Status::Info | Status::Ok)),
+        "{checks:#?}"
+    );
     let ids: Vec<&str> = checks.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(
         ids,
         [
             "daemon",
             "sessions.hosted",
+            "sessions.claude_inbox_trust",
             "uplink.parent",
             "uplink.registration",
             "uplink.version",
@@ -774,6 +780,9 @@ fn a_healthy_machine_passes_every_live_check() {
             .found
             .contains("1 hosted sessions running, 1 stopped")
     );
+    let claude_inbox = by_id(&checks, "sessions.claude_inbox_trust");
+    assert_eq!(claude_inbox.status, Status::Info);
+    assert!(claude_inbox.found.contains("arbitrary user messages"));
 }
 
 #[test]
