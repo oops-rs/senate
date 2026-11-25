@@ -85,6 +85,10 @@ pub enum Notice {
 pub struct Effects {
     pub refresh: Vec<Refresh>,
     pub notices: Vec<Notice>,
+    /// The line itself changed the model. Most do not: `sessions`, `inbox`,
+    /// `roles` and `lagged` only say what to read again, and the model
+    /// changes when that read comes back.
+    pub touched: bool,
 }
 
 /// Why the daemon cannot be reached. Kept as data and written in the app's
@@ -261,6 +265,7 @@ impl Model {
                     }
                 });
                 self.status = Some(*status);
+                fx.touched = true;
                 let targets: BTreeSet<_> = self.targets().into_iter().collect();
                 self.inboxes.retain(|k, _| targets.contains(k));
                 if !self.presiding() {
@@ -288,9 +293,11 @@ impl Model {
                     fx.notices.push(Notice::ApprovalArrived(approval.clone()));
                 }
                 self.approvals.insert(approval.id.clone(), approval);
+                fx.touched = true;
             }
             WatchEvent::ApprovalResolved { id, .. } => {
                 self.approvals.remove(&id);
+                fx.touched = true;
             }
             // Who works the desk changed: the docket may be another one.
             // What this machine's agents are comes with the next status.

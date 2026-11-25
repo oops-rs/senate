@@ -399,7 +399,9 @@ async fn a_state_the_listener_already_has_is_not_pushed_again() {
     loop {
         let version = names();
         daemon.emit(WatchEvent::Sessions);
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        // The line asks for a read of the sessions, made up to 300 ms
+        // later; the state comes when that read is back.
+        tokio::time::sleep(Duration::from_millis(700)).await;
         if names() == version {
             break;
         }
