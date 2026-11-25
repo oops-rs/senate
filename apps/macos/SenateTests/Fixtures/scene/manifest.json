@@ -1,0 +1,8 @@
+{
+  "name": "Fixture",
+  "version": "1.0.0",
+  "entry": "index.html",
+  "observe": { "major": 1, "required": ["state_patch"], "optional": ["app_links"] },
+  "cards": { "reads": [], "writes": ["fixture.badge/v1"] },
+  "min_host_version": 1
+}

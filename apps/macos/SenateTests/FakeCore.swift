@@ -198,9 +198,20 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     }
     var secretary = SecretaryView(committee: "office", alias: "secretary", senator: nil, state: .notRecorded, action: nil)
     func defaultSecretary() async throws -> SecretaryView { secretary }
-    func observeGrant(name: String) async throws -> ObserveGrant {
-        try record("observe grant \(name)")
-        return ObserveGrant(url: "http://127.0.0.1:1", token: "obs1_fake", id: "fake", expiresAt: "2099-01-01T00:00:00Z")
+    /// Grants issued so far (each gets the next id: `fake`, `fake-2`, …).
+    var observeIssued = 0
+    func observeGrant(name: String, topology: Bool) async throws -> ObserveGrant {
+        try record("observe grant \(name)\(topology ? " topology" : "")")
+        observeIssued += 1
+        let id = observeIssued == 1 ? "fake" : "fake-\(observeIssued)"
+        observeGrantList.append(ObserveGrantInfo(id: id, name: name, expiresAt: "2099-01-01T00:00:00Z"))
+        return ObserveGrant(url: "http://127.0.0.1:1", token: "obs1_\(id)", id: id, expiresAt: "2099-01-01T00:00:00Z")
+    }
+    /// Profile cards written, as sent.
+    var cards: [String] = []
+    func setProfileCard(document: String) async throws {
+        try record("card \(document)")
+        cards.append(document)
     }
 
     func ensureSecretary() async throws -> SecretaryView {

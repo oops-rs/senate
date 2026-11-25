@@ -1,4 +1,4 @@
-//! Typed committee activity records shared by the sidebar and Town.
+//! Typed committee activity records shared by the sidebar and the committee pages.
 use std::collections::HashMap;
 use std::time::SystemTime;
 

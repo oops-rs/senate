@@ -139,8 +139,6 @@ test("shipped demo recordings do not advertise or retain app links", async () =>
   for (const filename of [
     "crates/senate-observe/src/demo.ndjson",
     "town/recordings/demo.ndjson", "town/recordings/demo-large.ndjson",
-    "apps/macos/Senate/Web/town/recordings/demo.ndjson",
-    "apps/macos/Senate/Web/town/recordings/demo-large.ndjson",
   ]) {
     const data = await readFile(new URL(`../../../${filename}`, import.meta.url), "utf8");
     assert.ok(!data.includes("senate://"), filename);

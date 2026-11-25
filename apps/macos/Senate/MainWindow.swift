@@ -55,8 +55,10 @@ struct MainWindow: View {
             return section.title
         case .secretary:
             return L("secretary.title")
-        case .town:
-            return L("town.title")
+        case let .scene(id):
+            return store.scenes.scene(id)?.manifest.name ?? L("scenes.title")
+        case .scenes:
+            return L("scenes.title")
         case let .threads(committee):
             return committee
         case let .past(id):
@@ -99,7 +101,13 @@ struct MainWindow: View {
                 }
             case let .committee(name): CommitteePage(store: store, name: name)
             case .secretary: SecretaryPage(store: store)
-            case .town: TownPage(store: store)
+            case let .scene(id):
+                if let scene = store.scenes.scene(id) {
+                    ScenePage(store: store, scene: scene).id(scene.id)
+                } else {
+                    EmptyState(text: L("scenes.gone"))
+                }
+            case .scenes: ScenesView(store: store)
             case let .threads(committee): CommitteeThreadsPage(store: store, committee: committee)
             case .section(.history): HistoryView(store: store)
             case let .past(id): PastSessionPage(store: store, sessionId: id)
@@ -231,8 +239,18 @@ private struct Sidebar: View {
                     }
                     .tag(CoreStore.Place.section(section))
                 }
-                FixedRow(title: L("town.title")) { FixedSymbol(name: "house") }
-                    .tag(CoreStore.Place.town)
+                // Each installed scene; with none, one quiet row to the Scenes place.
+                ForEach(store.scenes.scenes) { scene in
+                    FixedRow(title: scene.manifest.name) { FixedSymbol(name: "square.stack.3d.up") }
+                        .tag(CoreStore.Place.scene(scene.id))
+                        .contextMenu {
+                            Button(L("scenes.manage")) { store.select(.scenes) }
+                        }
+                }
+                if store.scenes.scenes.isEmpty {
+                    FixedRow(title: L("scenes.title")) { FixedSymbol(name: "square.stack.3d.up") }
+                        .tag(CoreStore.Place.scenes)
+                }
             }
             // Offline, nothing is known: say nothing rather than "no sessions".
             if store.state.online {

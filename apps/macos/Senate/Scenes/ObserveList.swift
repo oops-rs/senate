@@ -1,12 +1,13 @@
 import Foundation
 
-/// The town as a list (for VoiceOver, and for anyone who prefers it), read
-/// from the same Observe data the scene gets: the snapshot kept current by
-/// `state.patch` frames, and what happened since the page opened from the
-/// domain events. Metadata only, as the scene: no message text.
+/// A scene's Senate as a plain list (for VoiceOver, and for anyone who
+/// prefers it), read from the same Observe data the scene gets: the
+/// snapshot kept current by `state.patch` frames, and what happened since
+/// the page opened from the domain events. Metadata only: no message text.
+/// It depends on nothing a scene draws, so every scene has it.
 @MainActor
 @Observable
-final class TownList {
+final class ObserveList {
     struct Senator: Identifiable, Hashable {
         let id: String
         let name: String
@@ -118,19 +119,19 @@ final class TownList {
         let text: String?
         switch kind {
         case "message.posted":
-            let from = senator(d["from"]) ?? L("town.list.someone")
+            let from = senator(d["from"]) ?? L("scene.list.someone")
             let to = (d["to"] as? [Any])?.compactMap(senator).first ?? committee ?? ""
-            text = L("town.list.wrote", from, to)
+            text = L("scene.list.wrote", from, to)
         case "senator.state_changed":
-            text = name(of: d["senator_id"] as? String).map { L("town.now", $0, Self.label(d["state"] as? String)) }
+            text = name(of: d["senator_id"] as? String).map { L("scene.list.now", $0, Self.label(d["state"] as? String)) }
         case "senator.joined":
-            text = name(of: d["senator_id"] as? String).map { L("town.arrived", $0) }
+            text = name(of: d["senator_id"] as? String).map { L("scene.list.arrived", $0) }
         case "senator.left":
-            text = name(of: d["senator_id"] as? String).map { L("town.left", $0) }
+            text = name(of: d["senator_id"] as? String).map { L("scene.list.left", $0) }
         case "approval.asked":
-            text = name(of: d["senator_id"] as? String).map { L("town.list.asks", $0) }
+            text = name(of: d["senator_id"] as? String).map { L("scene.list.asks", $0) }
         case "thread.state_changed" where d["state"] as? String == "archived":
-            text = L("town.list.settled", committee ?? "")
+            text = L("scene.list.settled", committee ?? "")
         default:
             text = nil
         }
@@ -142,11 +143,11 @@ final class TownList {
 
     static func label(_ state: String?) -> String {
         switch state {
-        case "working": L("town.mood.working")
-        case "idle": L("town.mood.idle")
-        case "waiting_on_person": L("town.mood.waiting")
-        case "paused": L("town.mood.paused")
-        case "stopped", "away": L("town.mood.stopped")
+        case "working": L("scene.state.working")
+        case "idle": L("scene.state.idle")
+        case "waiting_on_person": L("scene.state.waiting")
+        case "paused": L("scene.state.paused")
+        case "stopped", "away": L("scene.state.stopped")
         default: state ?? ""
         }
     }

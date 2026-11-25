@@ -596,12 +596,17 @@ impl AppCore {
         Ok(s.into())
     }
 
-    /// A new observer grant for a scene the person turns on in this app (the
-    /// Town): metadata only, every committee now and later, and this Senate's
-    /// direct links (topology), for 30 days. The person-only path the
-    /// `senate observe token create` command uses; the daemon checks the
-    /// caller. The bearer comes back once: keep it in the Keychain.
-    pub async fn observe_grant(&self, name: String) -> Result<ObserveGrant, CoreError> {
+    /// A new observer grant for a scene the person allows in this app:
+    /// metadata only, every committee now and later, this Senate's direct
+    /// links (topology) only when the scene asks for them, for 30 days. The
+    /// person-only path the `senate observe token create` command uses; the
+    /// daemon checks the caller. The bearer comes back once: keep it in the
+    /// Keychain.
+    pub async fn observe_grant(
+        &self,
+        name: String,
+        topology: bool,
+    ) -> Result<ObserveGrant, CoreError> {
         let request = Request::ObserveAdmin {
             command: senate_observe::AdminRequest::Create {
                 grant: senate_observe::CreateGrant {
@@ -611,7 +616,7 @@ impl AppCore {
                     scope: senate_observe::Scope::Metadata,
                     lines: None,
                     origins: Vec::new(),
-                    topology: true,
+                    topology,
                     expires_in_days: Some(30),
                 },
             },
@@ -659,6 +664,22 @@ impl AppCore {
                 expires_at: g.expires_at.to_rfc3339(),
             })
             .collect())
+    }
+
+    /// Replace the person's own profile card (`document` is a JSON object,
+    /// or `null` to clear it), as the person: the app has already asked
+    /// them. The daemon checks the caller and the card's limits.
+    pub async fn set_profile_card(&self, document: String) -> Result<(), CoreError> {
+        let request = Request::SetCard {
+            session: SessionSelector::default(),
+            target: senate_bridge::ipc::CardTarget::Own,
+            document,
+        };
+        self.on_runtime(
+            move |driver| async move { driver.read::<serde_json::Value>(&request).await },
+        )
+        .await?;
+        Ok(())
     }
 
     /// Revoke an observer grant (its bearer stops working at once).
