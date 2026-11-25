@@ -101,6 +101,15 @@ uniffi = "=0.32.2"
 # Tests.
 tempfile = "3"
 
+# The benchmark fixture's build (scripts/perf): optimised as a release is,
+# with debug assertions on, since an unsigned daemon takes a person's
+# requests only as a debug fixture confined to a temp home, and with line
+# tables so a profiler names source lines.
+[profile.perf]
+inherits = "release"
+debug-assertions = true
+debug = "line-tables-only"
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 
