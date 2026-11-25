@@ -499,7 +499,7 @@ enum SpawnParams {
         attempt_id: Option<String>,
         /// `claude`, `codex` or `agy`. Required without a profile.
         runtime: Option<HostedRuntime>,
-        /// A name returned by launch_profiles. Supplies the model and effort.
+        /// A name returned by launch_profiles. Supplies the model, effort and speed.
         profile: Option<String>,
         /// An existing committee.
         committee: String,
@@ -2489,7 +2489,7 @@ impl SenateMcp {
 
     #[tool(
         name = "launch_profiles",
-        description = "List this machine's named launch profiles with their runtime, model, effort and notes on when to use each one. Pass the chosen name as profile to spawn."
+        description = "List this machine's named launch profiles with their runtime, model, effort, speed (Codex's service tier) and notes on when to use each one. Pass the chosen name as profile to spawn."
     )]
     async fn launch_profiles(&self) -> Result<String, String> {
         let profiles: std::collections::BTreeMap<String, crate::config::LaunchProfile> = self

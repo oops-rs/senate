@@ -30,6 +30,7 @@ pub struct FakeThread {
 struct ModelSettings {
     model: Option<String>,
     effort: Option<String>,
+    service_tier: Option<String>,
 }
 
 /// A subscribed connection: its number and its outgoing frames.
@@ -471,6 +472,9 @@ fn answer(st: &mut CodexState, method: &str, params: &Value) -> Result<Value, St
                         .to_owned(),
                 );
             }
+            if let Some(value) = params["serviceTier"].as_str() {
+                settings.service_tier = Some(value.to_owned());
+            }
             Ok(json!({}))
         }
         "thread/read" => {
@@ -504,6 +508,7 @@ fn answer(st: &mut CodexState, method: &str, params: &Value) -> Result<Value, St
                 "thread": {"id": thread_id, "status": status, "turns": []},
                 "model": settings.model,
                 "reasoningEffort": settings.effort,
+                "serviceTier": settings.service_tier,
             }))
         }
         "thread/turns/list" => {

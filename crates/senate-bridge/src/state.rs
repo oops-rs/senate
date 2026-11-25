@@ -129,7 +129,8 @@ CREATE TABLE IF NOT EXISTS hosted_models (
     session_id TEXT PRIMARY KEY,
     model      TEXT,
     effort     TEXT,
-    verification_warning TEXT
+    verification_warning TEXT,
+    speed      TEXT
 );
 CREATE TABLE IF NOT EXISTS history_names (
     session_id TEXT PRIMARY KEY,
@@ -802,8 +803,8 @@ fn retire_hosted(
     )?;
     // The same TUI runs on: so does its model.
     tx.execute(
-                    "INSERT OR REPLACE INTO hosted_models (session_id, model, effort, verification_warning)
-                     SELECT ?2, model, effort, verification_warning FROM hosted_models WHERE session_id = ?1",
+                    "INSERT OR REPLACE INTO hosted_models (session_id, model, effort, speed, verification_warning)
+                     SELECT ?2, model, effort, speed, verification_warning FROM hosted_models WHERE session_id = ?1",
                     params![first.session_id, next],
                 )?;
     tx.execute(
@@ -883,6 +884,12 @@ impl Store {
                 "ALTER TABLE hosted_models ADD COLUMN verification_warning TEXT",
                 [],
             )?;
+        }
+        let hosted_model_speed = conn
+            .prepare("SELECT 1 FROM pragma_table_info('hosted_models') WHERE name = 'speed'")?
+            .exists([])?;
+        if !hosted_model_speed {
+            conn.execute("ALTER TABLE hosted_models ADD COLUMN speed TEXT", [])?;
         }
         // A database from before cursors were dated: they were seen now.
         let dated = conn
@@ -1562,7 +1569,7 @@ impl Store {
         Ok(out)
     }
 
-    /// The model and effort a hosted session was last started with.
+    /// The model, effort and speed a hosted session was last started with.
     pub(crate) fn hosted_model(
         &self,
         session_id: &str,
@@ -1570,13 +1577,14 @@ impl Store {
         Ok(self
             .conn()
             .query_row(
-                "SELECT model, effort, verification_warning FROM hosted_models WHERE session_id = ?1",
+                "SELECT model, effort, speed, verification_warning FROM hosted_models WHERE session_id = ?1",
                 [session_id],
                 |row| {
                     Ok(crate::ipc::HostedModel {
                         model: row.get(0)?,
                         effort: row.get(1)?,
-                        verification_warning: row.get(2)?,
+                        speed: row.get(2)?,
+                        verification_warning: row.get(3)?,
                     })
                 },
             )
@@ -1993,9 +2001,9 @@ impl Store {
                 }
                 if let Some(model) = binding.model {
                     tx.execute(
-                        "INSERT OR REPLACE INTO hosted_models (session_id, model, effort, verification_warning)
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params![s.session_id, model.model, model.effort, model.verification_warning],
+                        "INSERT OR REPLACE INTO hosted_models (session_id, model, effort, speed, verification_warning)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![s.session_id, model.model, model.effort, model.speed, model.verification_warning],
                     )?;
                 }
                 if matches!(s.runtime, Runtime::Claude | Runtime::Agy) {
@@ -3520,7 +3528,7 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(
             store.hosted_model("existing").unwrap(),
-            crate::ipc::HostedModel::new(Some("gpt-6.2-sol".into()), Some("xhigh".into()))
+            crate::ipc::HostedModel::new(Some("gpt-6.2-sol".into()), Some("xhigh".into()), None)
         );
     }
 
@@ -3823,7 +3831,11 @@ mod tests {
                 &host,
                 &committee,
                 Some((Seq(17), Seq::ZERO)),
-                &crate::ipc::HostedModel::new(Some("opus".into()), Some("high".into())),
+                &crate::ipc::HostedModel::new(
+                    Some("opus".into()),
+                    Some("high".into()),
+                    Some("fast".into()),
+                ),
                 false,
             )
             .unwrap();
@@ -3847,7 +3859,10 @@ mod tests {
         assert_eq!(store.session_host("old").unwrap(), None);
         assert_eq!(store.hosted_native_retired("old").unwrap(), Some(true));
         // The same TUI runs on after /clear: so does its model.
-        assert_eq!(store.hosted_model("new").unwrap().label(), "opus/high");
+        assert_eq!(
+            store.hosted_model("new").unwrap().label(),
+            "opus/high (fast)"
+        );
         assert_eq!(replacement.agent, first.agent);
         assert_eq!(store.current_sessions().unwrap().len(), 1);
         assert_eq!(
@@ -3885,7 +3900,7 @@ mod tests {
                 &host,
                 &committee,
                 None,
-                &crate::ipc::HostedModel::new(Some("opus".into()), None),
+                &crate::ipc::HostedModel::new(Some("opus".into()), None, None),
                 false,
             )
             .unwrap();

@@ -588,6 +588,41 @@ pub(crate) mod tests {
         );
     }
 
+    /// A Codex speed shows with the model; a speed Codex did not take is
+    /// the model warning's `!`, said only with --verbose.
+    #[test]
+    fn a_speed_shows_in_the_model_and_its_mismatch_is_a_model_warning() {
+        let mut quick = row("codex-quick", Some("quick"), HostState::Running);
+        quick.model = crate::ipc::HostedModel::new(
+            Some("gpt-6.2-sol".into()),
+            Some("high".into()),
+            Some("ultrafast".into()),
+        );
+        quick.model.verification_warning =
+            Some("Codex: requested speed ultrafast, app-server reports no explicit speed".into());
+        let reply = SessionsReply {
+            rows: vec![quick],
+            local_rows: Vec::new(),
+            orphans: Vec::new(),
+        };
+        let text = render(&reply, Utc::now(), Locale::En);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1 + 1 + 1, "{text}");
+        assert!(
+            lines[1].contains("gpt-6.2-sol/high (ultrafast)  running !"),
+            "{text}"
+        );
+        assert_eq!(lines[2], "! 1 with a model warning; details with --verbose");
+        assert!(!text.contains("requested speed"), "{text}");
+        let verbose = render_with_ids(&reply, Utc::now(), Locale::En, true);
+        assert!(
+            verbose.contains(
+                ": Codex: requested speed ultrafast, app-server reports no explicit speed"
+            ),
+            "{verbose}"
+        );
+    }
+
     #[test]
     fn the_listing_names_each_session_and_its_state() {
         let now = Utc::now();
@@ -595,7 +630,8 @@ pub(crate) mod tests {
         running.started_at = Some(now - chrono::Duration::minutes(90));
         running.attached = true;
         running.typed_secs_ago = Some(120);
-        running.model = crate::ipc::HostedModel::new(Some("opus".into()), Some("high".into()));
+        running.model =
+            crate::ipc::HostedModel::new(Some("opus".into()), Some("high".into()), None);
         let stopped = row("codex-2", None, HostState::Stopped);
         let orphan = EventId::new();
         let reply = SessionsReply {

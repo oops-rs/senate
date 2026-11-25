@@ -773,22 +773,39 @@ runtime = "codex"
 model = "gpt-6.2-astra"
 effort = "high"
 note = "Use for independent diff review."
+
+[profiles.quick]
+runtime = "codex"
+model = "gpt-6.2-sol"
+speed = "ultrafast"
+note = "Use for short, latency-sensitive checks."
 ```
 
 Run `senate profiles` to see the configured names, settings, and notes. Its
-output is one tab-separated line per profile; with none it prints `No launch
-profiles configured.` and, on stderr, an example to copy and the file to put
-it in.
+output is one tab-separated line per profile (name, runtime, model, effort,
+speed, note); with none it prints `No launch profiles configured.` and, on
+stderr, an example to copy and the file to put it in.
 `senate setup doctor` reports profile configuration errors by name. Restart
 the machine daemon after editing a profile so new launches pick up the change.
 
 ```bash
 senate spawn --profile review --committee refund-v2
 senate spawn codex --profile review --alias second-review --effort xhigh
+senate spawn codex --speed fast
 ```
 
-`model` and `effort` are optional and use the runtime's defaults when omitted.
-The CLI's explicit `--model` and `--effort` override profile values. A runtime
+`model`, `effort` and `speed` are optional and use the runtime's defaults when
+omitted. `speed` is Codex's service tier (`service_tier` in
+`~/.codex/config.toml`, `/fast` in its TUI): `fast`, `ultrafast`, `flex`, or
+`default` for standard speed even when Codex's own config picks a faster one.
+Senate passes it to the session's app-server thread (`fast` as Codex's wire id
+`priority`, the rest as written) and leaves the value to Codex, which decides
+whether the model and account offer it. When the app-server reports another
+tier after launch, `spawn` and `senate session list` say so. Only Codex takes a
+speed; a Claude or agy profile that sets one is refused when the config is
+read. The CLI's explicit `--model`, `--effort` and `--speed` override profile values,
+and `senate session restore` and `senate session replace` keep the recorded
+ones unless given new ones. A runtime
 given alongside a profile must match it. Model aliases resolve through the
 runtime's usual lookup at launch. If you omit `--alias`, Senate uses the profile
 name and applies the usual roster alias rules.

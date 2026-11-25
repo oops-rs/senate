@@ -1364,7 +1364,7 @@ async fn a_chosen_model_and_effort_reach_the_tui_and_are_kept_for_restore() {
     use senate_bridge::ipc::StopReply;
 
     let choice = |model: Option<&str>, effort: Option<&str>| {
-        HostedModel::new(model.map(str::to_owned), effort.map(str::to_owned))
+        HostedModel::new(model.map(str::to_owned), effort.map(str::to_owned), None)
     };
     let mut fixture = HostedClaude::launch_with(false, 1, choice(Some("opus"), Some("high"))).await;
     let args = hosted_fixture_argv(&fixture.terminal, &fixture.project, TIMEOUT).await;
@@ -1385,34 +1385,40 @@ async fn a_chosen_model_and_effort_reach_the_tui_and_are_kept_for_restore() {
     };
     assert_eq!(listed(&fixture.h).await, "opus/high");
 
-    // An effort Claude Code does not take is refused before anything
-    // starts, even with no slot left, naming the ones it does take.
-    let refused = ipc::request::<SpawnReply>(
-        &fixture.h.socket(),
-        &Request::Spawn {
-            attempt_id: None,
-            session: Default::default(),
-            runtime: Some(HostedRuntime::Claude),
-            profile: None,
-            committee: committee(),
-            alias: None,
-            cwd: fixture.project.clone(),
-            chair: false,
-            secretary: false,
-            prompt: None,
-            model: choice(None, Some("minimal")),
-        },
-        TIMEOUT,
-        TIMEOUT,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        refused.to_string().contains(
-            "claude does not take the effort \"minimal\"; use one of: low, medium, high, xhigh, max"
+    // An effort Claude Code does not take, or a speed (Codex's alone), is
+    // refused before anything starts, even with no slot left.
+    for (model, expected) in [
+        (
+            choice(None, Some("minimal")),
+            "claude does not take the effort \"minimal\"; use one of: low, medium, high, xhigh, max",
         ),
-        "{refused}"
-    );
+        (
+            HostedModel::new(None, None, Some("fast".into())),
+            "claude does not take a speed (\"fast\"); only codex does",
+        ),
+    ] {
+        let refused = ipc::request::<SpawnReply>(
+            &fixture.h.socket(),
+            &Request::Spawn {
+                attempt_id: None,
+                session: Default::default(),
+                runtime: Some(HostedRuntime::Claude),
+                profile: None,
+                committee: committee(),
+                alias: None,
+                cwd: fixture.project.clone(),
+                chair: false,
+                secretary: false,
+                prompt: None,
+                model,
+            },
+            TIMEOUT,
+            TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.to_string().contains(expected), "{refused}");
+    }
     assert_eq!(fixture.h.store().all_sessions().unwrap().len(), 1);
 
     let mut restore = async |model: HostedModel| {
@@ -4448,7 +4454,7 @@ async fn a_hosted_agy_names_its_conversation_through_its_first_hook_and_resumes_
             chair: false,
             secretary: false,
             prompt: None,
-            model: HostedModel::new(None, Some("minimal".into())),
+            model: HostedModel::new(None, Some("minimal".into()), None),
         },
         TIMEOUT,
         TIMEOUT,
@@ -4475,7 +4481,7 @@ async fn a_hosted_agy_names_its_conversation_through_its_first_hook_and_resumes_
             chair: false,
             secretary: false,
             prompt: None,
-            model: HostedModel::new(Some("flash".into()), Some("high".into())),
+            model: HostedModel::new(Some("flash".into()), Some("high".into()), None),
         },
     )
     .await;

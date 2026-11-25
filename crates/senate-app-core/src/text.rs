@@ -282,15 +282,14 @@ pub fn prompts_line(locale: Locale, prompts: usize) -> String {
     }
 }
 
-/// A hosted session's model, when it is not the runtime's default:
-/// `opus · high`.
-pub fn model_label(model: Option<&str>, effort: Option<&str>) -> Option<String> {
-    match (model, effort) {
-        (None, None) => None,
-        (Some(m), None) => Some(m.to_string()),
-        (None, Some(e)) => Some(e.to_string()),
-        (Some(m), Some(e)) => Some(format!("{m} · {e}")),
-    }
+/// A hosted session's model, effort and speed, those that are not the
+/// runtime's default: `opus · high`, `gpt-6.2-sol · high · ultrafast`.
+pub fn model_label(model: &senate_bridge::ipc::HostedModel) -> Option<String> {
+    let parts: Vec<&str> = [&model.model, &model.effort, &model.speed]
+        .into_iter()
+        .filter_map(Option::as_deref)
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 pub fn no_session(locale: Locale, id: &str) -> String {
@@ -321,6 +320,27 @@ pub fn docket_word(locale: Locale) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_label_shows_only_what_was_chosen() {
+        let label = |model: Option<&str>, effort: Option<&str>, speed: Option<&str>| {
+            model_label(&senate_bridge::ipc::HostedModel::new(
+                model.map(str::to_owned),
+                effort.map(str::to_owned),
+                speed.map(str::to_owned),
+            ))
+        };
+        assert_eq!(label(None, None, None), None);
+        assert_eq!(
+            label(Some("opus"), Some("high"), None).as_deref(),
+            Some("opus · high")
+        );
+        assert_eq!(
+            label(Some("gpt-6.2-sol"), Some("high"), Some("ultrafast")).as_deref(),
+            Some("gpt-6.2-sol · high · ultrafast")
+        );
+        assert_eq!(label(None, None, Some("fast")).as_deref(), Some("fast"));
+    }
 
     #[test]
     fn counts_read_in_both_languages() {

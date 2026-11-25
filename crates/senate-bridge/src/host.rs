@@ -1075,7 +1075,7 @@ impl HostedRuntime {
 impl HostedModel {
     /// A choice as given: a blank value is no choice, leaving the
     /// runtime's default.
-    pub fn new(model: Option<String>, effort: Option<String>) -> Self {
+    pub fn new(model: Option<String>, effort: Option<String>, speed: Option<String>) -> Self {
         let given = |value: Option<String>| {
             value
                 .map(|value| value.trim().to_owned())
@@ -1084,18 +1084,23 @@ impl HostedModel {
         Self {
             model: given(model),
             effort: given(effort),
+            speed: given(speed),
             verification_warning: None,
         }
     }
 
     /// Refuse an effort `runtime` does not document, naming the ones it
-    /// does. A model name is the runtime's to judge.
+    /// does, and a speed for any runtime but Codex. A model name, and
+    /// which speeds Codex offers, are the runtime's to judge.
     pub fn check(&self, runtime: HostedRuntime) -> Result<(), String> {
-        match &self.effort {
-            Some(effort) if !runtime.efforts().contains(&effort.as_str()) => Err(format!(
-                "{} does not take the effort {effort:?}; use one of: {}",
-                crate::session::Runtime::from(runtime).as_str(),
+        let name = crate::session::Runtime::from(runtime).as_str();
+        match (&self.effort, &self.speed) {
+            (Some(effort), _) if !runtime.efforts().contains(&effort.as_str()) => Err(format!(
+                "{name} does not take the effort {effort:?}; use one of: {}",
                 runtime.efforts().join(", ")
+            )),
+            (_, Some(speed)) if runtime != HostedRuntime::Codex => Err(format!(
+                "{name} does not take a speed ({speed:?}); only codex does"
             )),
             _ => Ok(()),
         }
@@ -1107,22 +1112,27 @@ impl HostedModel {
         Self {
             model: other.model.clone().or_else(|| self.model.clone()),
             effort: other.effort.clone().or_else(|| self.effort.clone()),
+            speed: other.speed.clone().or_else(|| self.speed.clone()),
             verification_warning: None,
         }
     }
 
     pub fn is_default(&self) -> bool {
-        self.model.is_none() && self.effort.is_none()
+        self.model.is_none() && self.effort.is_none() && self.speed.is_none()
     }
 
     /// How a listing shows it: `default` for the runtime's own model, the
-    /// effort after a slash (`opus/high`, `default/high`).
+    /// effort after a slash and the speed in parentheses (`opus/high`,
+    /// `default/high`, `gpt-6.2-sol/high (ultrafast)`).
     pub fn label(&self) -> String {
-        let model = self.model.as_deref().unwrap_or("default");
-        match &self.effort {
-            Some(effort) => format!("{model}/{effort}"),
-            None => model.to_owned(),
+        let mut label = self.model.as_deref().unwrap_or("default").to_owned();
+        if let Some(effort) = &self.effort {
+            label = format!("{label}/{effort}");
         }
+        if let Some(speed) = &self.speed {
+            label = format!("{label} ({speed})");
+        }
+        label
     }
 
     /// Claude and agy take their settings on the command line. Hosted
@@ -1930,7 +1940,7 @@ mod tests {
     use super::*;
 
     fn choice(model: Option<&str>, effort: Option<&str>) -> HostedModel {
-        HostedModel::new(model.map(str::to_owned), effort.map(str::to_owned))
+        HostedModel::new(model.map(str::to_owned), effort.map(str::to_owned), None)
     }
 
     #[tokio::test]
@@ -1977,6 +1987,42 @@ mod tests {
             assert!(none.runtime_args(HostedRuntime::Claude).is_empty());
             assert!(none.runtime_args(HostedRuntime::Codex).is_empty());
         }
+    }
+
+    #[test]
+    fn a_speed_is_codexs_alone_and_passes_through_unjudged() {
+        let speed = |value: &str| HostedModel::new(None, None, Some(value.to_owned()));
+        // Codex judges its own tiers, including ones Senate never heard of.
+        for value in ["fast", "ultrafast", "flex", "default", "warp"] {
+            speed(value).check(HostedRuntime::Codex).unwrap();
+            assert!(!speed(value).is_default());
+        }
+        for runtime in [HostedRuntime::Claude, HostedRuntime::Agy] {
+            let error = speed("fast").check(runtime).unwrap_err();
+            assert!(
+                error.ends_with("does not take a speed (\"fast\"); only codex does"),
+                "{error}"
+            );
+            // Claude and agy get nothing on the command line for it.
+            assert!(speed("fast").runtime_args(runtime).is_empty());
+        }
+        assert!(HostedModel::new(None, None, Some(" ".into())).is_default());
+        // A restore keeps the recorded speed unless it names another.
+        let recorded =
+            HostedModel::new(Some("sol".into()), Some("high".into()), Some("fast".into()));
+        assert_eq!(
+            recorded
+                .overridden_by(&choice(None, Some("low")))
+                .speed
+                .as_deref(),
+            Some("fast")
+        );
+        assert_eq!(
+            recorded.overridden_by(&speed("ultrafast")).speed.as_deref(),
+            Some("ultrafast")
+        );
+        assert_eq!(recorded.label(), "sol/high (fast)");
+        assert_eq!(speed("ultrafast").label(), "default (ultrafast)");
     }
 
     #[test]

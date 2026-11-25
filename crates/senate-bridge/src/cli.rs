@@ -621,6 +621,7 @@ stdin.")]
                                          Send it a first request once seated
   senate spawn claude --model opus --effort high
                                          Not the runtime's default model
+  senate spawn codex --speed ultrafast   Codex's service tier for this senator
   senate spawn agy --prompt 'Triage the failing tests'
                                          An Antigravity CLI senator
   senate attach reviewer                 Open its terminal (Ctrl-] detaches)")]
@@ -734,7 +735,7 @@ stdin.")]
     },
 }
 
-/// The runtime's own model and effort for a hosted session. Omitted
+/// The runtime's own model, effort and speed for a hosted session. Omitted
 /// choices leave the runtime's settings in control.
 #[derive(Args)]
 struct ModelArgs {
@@ -745,11 +746,15 @@ struct ModelArgs {
     /// Claude Code and agy also accept max.
     #[arg(long, add = ArgValueCandidates::new(completion::efforts))]
     effort: Option<String>,
+    /// Codex only: its service tier, e.g. fast, ultrafast, flex, or default
+    /// for standard speed. Codex judges the value.
+    #[arg(long, add = ArgValueCandidates::new(completion::speeds))]
+    speed: Option<String>,
 }
 
 impl From<ModelArgs> for crate::ipc::HostedModel {
     fn from(args: ModelArgs) -> Self {
-        Self::new(args.model, args.effort)
+        Self::new(args.model, args.effort, args.speed)
     }
 }
 
@@ -4101,10 +4106,11 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             }
             for (name, profile) in config.profiles {
                 println!(
-                    "{name}\t{}\t{}\t{}\t{}",
+                    "{name}\t{}\t{}\t{}\t{}\t{}",
                     crate::session::Runtime::from(profile.runtime).as_str(),
                     profile.model.model.as_deref().unwrap_or("default"),
                     profile.model.effort.as_deref().unwrap_or("default"),
+                    profile.model.speed.as_deref().unwrap_or("default"),
                     profile.note
                 );
             }
@@ -4246,7 +4252,9 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             prompt_quiet_ms,
         } => {
             let paths = Paths::from_env()?;
-            let model = crate::ipc::HostedModel::new(model, effort);
+            // Codex's speed goes to its app-server from the daemon; the
+            // terminal host passes only command-line settings.
+            let model = crate::ipc::HostedModel::new(model, effort, None);
             let prompt_quiet = prompt_quiet_ms
                 .map_or(crate::host::prompt::QUIET, std::time::Duration::from_millis);
             runtime(false)?.block_on(crate::host::run(

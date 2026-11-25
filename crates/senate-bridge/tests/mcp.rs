@@ -238,6 +238,10 @@ runtime = "agy"
 model = "flash"
 effort = "high"
 note = "Use for test triage."
+[profiles.quick]
+runtime = "codex"
+speed = "ultrafast"
+note = "Use for quick checks."
 "#
         ),
     )
@@ -283,6 +287,7 @@ note = "Use for test triage."
     assert!(schema["properties"].get("profile").is_some(), "{schema}");
     assert!(schema["properties"].get("model").is_none(), "{schema}");
     assert!(schema["properties"].get("effort").is_none(), "{schema}");
+    assert!(schema["properties"].get("speed").is_none(), "{schema}");
     assert!(
         tools["tools"]
             .as_array()
@@ -294,7 +299,10 @@ note = "Use for test triage."
     assert!(!error, "{profiles}");
     assert_eq!(
         serde_json::from_str::<Value>(&profiles).unwrap(),
-        json!({"triage":{"runtime":"agy","model":"flash","effort":"high","note":"Use for test triage."}})
+        json!({
+            "quick":{"runtime":"codex","speed":"ultrafast","note":"Use for quick checks."},
+            "triage":{"runtime":"agy","model":"flash","effort":"high","note":"Use for test triage."}
+        })
     );
 
     let mut args = json!({

@@ -453,8 +453,23 @@ impl AppServer {
         if let Some(effort) = &choice.effort {
             params["effort"] = json!(effort);
         }
+        if let Some(tier) = Self::service_tier(choice) {
+            params["serviceTier"] = json!(tier);
+        }
         self.request("thread/settings/update", id, params).await?;
         Ok(())
+    }
+
+    /// The `serviceTier` a speed asks the app-server for. Codex's own
+    /// `service_tier = "fast"` reaches the wire as `priority`, the id its
+    /// model catalog lists for Fast (the app-server still maps a `fast` it
+    /// receives, as a legacy value). Any other speed (`ultrafast`, `flex`,
+    /// `default`) is sent as given, for Codex to judge.
+    fn service_tier(choice: &crate::ipc::HostedModel) -> Option<&str> {
+        choice.speed.as_deref().map(|speed| match speed {
+            "fast" => "priority",
+            other => other,
+        })
     }
 
     /// A resume without overrides reports effective server settings. It also
@@ -473,12 +488,13 @@ impl AppServer {
         choice: &crate::ipc::HostedModel,
     ) -> Option<String> {
         let messages: Vec<_> = [
-            ("model", "model", &choice.model),
-            ("reasoningEffort", "effort", &choice.effort),
+            ("model", "model", choice.model.as_deref()),
+            ("reasoningEffort", "effort", choice.effort.as_deref()),
+            ("serviceTier", "speed", Self::service_tier(choice)),
         ]
         .into_iter()
         .filter_map(|(key, label, requested)| {
-            let expected = requested.as_deref()?;
+            let expected = requested?;
             match effective.get(key) {
                 Some(Value::String(actual)) if actual == expected => None,
                 Some(Value::String(actual)) => Some(format!(
