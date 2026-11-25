@@ -942,6 +942,7 @@ mod tests {
             threads: roots.iter().map(|r| thread(*r, agent)).collect(),
             settled: 0,
             seen: Vec::new(),
+            at_desk: Vec::new(),
         }
     }
 

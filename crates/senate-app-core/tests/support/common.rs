@@ -736,6 +736,7 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 threads,
                 settled: 0,
                 seen: Vec::new(),
+                at_desk: Vec::new(),
             })
         }
         Request::Answer {

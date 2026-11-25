@@ -6468,6 +6468,7 @@ impl Shared {
             threads: Vec::new(),
             settled: 0,
             seen,
+            at_desk: Vec::new(),
         };
         let mut threads: Vec<_> = page
             .threads
@@ -6493,7 +6494,48 @@ impl Shared {
         }
         reply.threads = threads;
         reply.settled = settled;
+        if !for_person {
+            reply.at_desk = self.desk_parked(&reply.committee, &reply.agents).await;
+        }
         Ok(reply)
+    }
+
+    /// What `agents` sent to a seat on another committee that still lies
+    /// on the Speaker's desk ([`ipc::DeskParked`]), oldest first: the
+    /// desk's own list, so an item is gone from here once it is forwarded,
+    /// answered or sent back. Best effort: an inbox does not fail, or
+    /// wait long, for want of it.
+    async fn desk_parked(
+        &self,
+        committee: &CommitteeId,
+        agents: &[SenatorName],
+    ) -> Vec<ipc::DeskParked> {
+        let Ok(Ok(page)) =
+            tokio::time::timeout(RECIPIENT_NOTE_TIMEOUT, self.api.docket(committee)).await
+        else {
+            return Vec::new();
+        };
+        let mut parked: Vec<ipc::DeskParked> = page
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let intended = item.intended?;
+                let event = item.event;
+                let sender = event.on_behalf_of.as_ref().unwrap_or(&event.from);
+                agents
+                    .iter()
+                    .any(|agent| sender == &Address::senator(agent))
+                    .then(|| ipc::DeskParked {
+                        seq: event.seq,
+                        kind: event.kind.clone(),
+                        intended,
+                        since: event.ts,
+                        title: format::truncate_chars(&format::one_line(&event.body), 80).0,
+                    })
+            })
+            .collect();
+        parked.sort_by_key(|item| item.seq);
+        parked
     }
 
     async fn on_catch_up(

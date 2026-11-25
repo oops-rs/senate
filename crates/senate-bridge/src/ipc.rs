@@ -2533,6 +2533,27 @@ pub struct InboxReply {
     /// [`ThreadSummary::waits_on_person`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seen: Vec<ThreadSeen>,
+    /// What `agents` sent to a seat on another committee that still lies
+    /// on the Speaker's desk, oldest first. An agent's inbox only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub at_desk: Vec<DeskParked>,
+}
+
+/// A message an agent sent to a seat on another committee, put to the
+/// Speaker's desk by the boundary rule and still there: not forwarded,
+/// answered or sent back. The sender's inbox shows it with how long it has
+/// lain, so it is not taken for lost and sent again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeskParked {
+    /// Its seq on the sender's committee: the thread the answer comes in.
+    pub seq: Seq,
+    pub kind: Kind,
+    /// The seat it is meant for.
+    pub intended: senate_core::Locator,
+    /// When it was put to the desk.
+    pub since: DateTime<Utc>,
+    /// Its first line.
+    pub title: String,
 }
 
 impl InboxReply {

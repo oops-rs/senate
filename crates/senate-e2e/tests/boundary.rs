@@ -1430,6 +1430,31 @@ async fn another_committees_chair_receives_discussion_but_requests_wait_on_the_d
             .iter()
             .any(|e| e.body == "Please edit the client configuration.")
     );
+    // The author's inbox shows it lying on the desk, so it is not taken
+    // for lost and sent again; the discussion that went directly is not
+    // there.
+    let inbox: senate_bridge::ipc::InboxReply = desk
+        .ipc(Request::Inbox {
+            session: Laptop::session("author"),
+            committee: None,
+            agent: None,
+            all: false,
+        })
+        .await;
+    assert_eq!(inbox.at_desk.len(), 1, "{:?}", inbox.at_desk);
+    let parked = &inbox.at_desk[0];
+    assert_eq!(parked.seq, request.posted.seq);
+    assert_eq!(parked.intended.committee(), Some(&target));
+    assert_eq!(parked.title, "Please edit the client configuration.");
+    let theirs: senate_bridge::ipc::InboxReply = desk
+        .ipc(Request::Inbox {
+            session: Laptop::session("maintainer"),
+            committee: None,
+            agent: None,
+            all: false,
+        })
+        .await;
+    assert!(theirs.at_desk.is_empty(), "{:?}", theirs.at_desk);
     for (id, expected) in [("author", source.clone()), ("maintainer", target.clone())] {
         let bound: BoundReply = desk
             .ipc(Request::Bound {

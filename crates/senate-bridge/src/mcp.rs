@@ -713,7 +713,9 @@ on you (this agent; your person's other agents have their own) or on your user: 
 requests addressed to you, and threads escalated to your user, with their state (processing, \
 active, suspended = waiting on a person), title, and who asked. A thread whose last word is an \
 answer and that nobody has said more in is settled: it is left out and counted in a closing line; \
-pass `all: true` to list those too. Use it for `/senate inbox`.";
+pass `all: true` to list those too. After them it lists what you sent to a seat on another \
+committee that still lies on the Speaker's desk, with how long it has lain there: it is not \
+lost, and is not to be sent again. Use it for `/senate inbox`.";
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -1119,6 +1121,62 @@ pub fn render_inbox(reply: &InboxReply, locale: Locale, how: ShowAll) -> String 
         out.push_str(&line);
     }
     out
+}
+
+/// What the agent sent across committees that still lies on the Speaker's
+/// desk, after its inbox: each with how long it has lain there, and that
+/// sending it again does not help. Empty with none.
+pub fn render_desk_parked(
+    parked: &[ipc::DeskParked],
+    now: chrono::DateTime<chrono::Utc>,
+    locale: Locale,
+) -> String {
+    if parked.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(locale.pick(
+        "\n\n你发往其他委员会、还在 Speaker 办公桌上的（尚未转交、答复或退回）：",
+        "\n\nOn the Speaker's desk, sent by you to another committee and not yet forwarded, \
+         answered or sent back:",
+    ));
+    for item in parked {
+        let to = item.intended.in_text();
+        let waited = waited(now - item.since, locale);
+        let title = format::one_line(&item.title);
+        out.push_str(&match locale {
+            Locale::Zh => format!(
+                "\n- seq {} · {} · 发给 {to} · 已在办公桌上 {waited} · {title}",
+                item.seq, item.kind
+            ),
+            Locale::En => format!(
+                "\n- seq {} · {} · meant for {to} · {waited} on the desk · {title}",
+                item.seq, item.kind
+            ),
+        });
+    }
+    out.push_str(locale.pick(
+        "\n办公桌会把每一条转过去，或说明理由退回，回答会回到它自己的 thread；重发一遍不会更快。等不了的，告诉你的委员会主席（chair）。",
+        "\nThe desk forwards each or sends it back with a reason, and the answer comes in its \
+         own thread: sending it again does not speed it. Tell your chair of one that cannot wait.",
+    ));
+    out
+}
+
+/// How long something has waited, in its two largest units: `<1 min`,
+/// `14 min`, `2 h 14 min`, `3 d 5 h`.
+fn waited(elapsed: chrono::Duration, locale: Locale) -> String {
+    let minutes = elapsed.num_minutes().max(0);
+    let (d, h, m) = (minutes / 1_440, minutes % 1_440 / 60, minutes % 60);
+    match (locale, d, h, m) {
+        (Locale::Zh, 0, 0, 0) => "不到 1 分钟".to_owned(),
+        (Locale::En, 0, 0, 0) => "<1 min".to_owned(),
+        (Locale::Zh, 0, 0, m) => format!("{m} 分钟"),
+        (Locale::En, 0, 0, m) => format!("{m} min"),
+        (Locale::Zh, 0, h, m) => format!("{h} 小时 {m} 分钟"),
+        (Locale::En, 0, h, m) => format!("{h} h {m} min"),
+        (Locale::Zh, d, h, _) => format!("{d} 天 {h} 小时"),
+        (Locale::En, d, h, _) => format!("{d} d {h} h"),
+    }
 }
 
 #[derive(Clone)]
@@ -2388,8 +2446,14 @@ impl SenateMcp {
             .call::<senate_core::alias::KnownAliases>(&Request::Aliases)
             .await
             .ok();
+        let mut text = render_inbox(&reply, self.locale, ShowAll::Param);
+        text.push_str(&render_desk_parked(
+            &reply.at_desk,
+            chrono::Utc::now(),
+            self.locale,
+        ));
         Ok(senate_core::alias::display_event_bylines(
-            &render_inbox(&reply, self.locale, ShowAll::Param),
+            &text,
             aliases.as_ref(),
             &reply.committee,
         ))
@@ -4259,6 +4323,7 @@ mod tests {
             threads: board.threads(None).into_iter().cloned().collect(),
             settled: 0,
             seen: Vec::new(),
+            at_desk: Vec::new(),
         };
         let en = render_inbox(&reply, Locale::En, ShowAll::Flag);
         assert!(
@@ -4350,6 +4415,7 @@ mod tests {
             threads: waiting.clone(),
             settled: 1,
             seen: Vec::new(),
+            at_desk: Vec::new(),
         };
         let en = render_inbox(&base, Locale::En, ShowAll::Flag);
         assert!(en.contains("thread 3") && !en.contains("thread 1"), "{en}");
@@ -4439,6 +4505,7 @@ mod tests {
             threads: board.threads(None).into_iter().cloned().collect(),
             settled: 0,
             seen: Vec::new(),
+            at_desk: Vec::new(),
         };
         let en = render_inbox(&reply, Locale::En, ShowAll::Flag);
         assert!(
@@ -4482,6 +4549,7 @@ mod tests {
                 threads: board.threads(None).into_iter().cloned().collect(),
                 settled: 0,
                 seen: Vec::new(),
+            at_desk: Vec::new(),
             };
             render_inbox(&reply, locale, ShowAll::Flag)
         };
@@ -4550,6 +4618,49 @@ mod tests {
             en(true),
             format!("{} It is mirrored into the team's chat thread.", en(false))
         );
+    }
+
+    /// One ask was sent to the desk three times in 21 minutes (ibot 100,
+    /// 104, 111) and arrived 53 hours later: the sender saw nothing of it
+    /// after the receipt.
+    #[test]
+    fn the_inbox_shows_what_the_agent_has_lying_on_the_desk_and_for_how_long() {
+        use chrono::{Duration, TimeZone};
+        let now = chrono::Utc.with_ymd_and_hms(2026, 11, 25, 12, 0, 0).unwrap();
+        let item = |seq: u64, ago: Duration| ipc::DeskParked {
+            seq: Seq(seq),
+            kind: Kind::Request,
+            intended: "feishu-botd::chair".parse().unwrap(),
+            since: now - ago,
+            title: "fix [unsupported message]".into(),
+        };
+        assert_eq!(render_desk_parked(&[], now, Locale::En), "");
+        let en = render_desk_parked(
+            &[
+                item(100, Duration::minutes(2 * 1_440 + 5 * 60 + 7)),
+                item(111, Duration::minutes(134)),
+                item(112, Duration::seconds(20)),
+            ],
+            now,
+            Locale::En,
+        );
+        assert!(
+            en.starts_with("\n\nOn the Speaker's desk, sent by you to another committee"),
+            "{en}"
+        );
+        assert!(
+            en.contains(
+                "\n- seq 100 · request · meant for [feishu-botd::chair] · 2 d 5 h on the desk · \
+                 fix [unsupported message]"
+            ),
+            "{en}"
+        );
+        assert!(en.contains("seq 111 · request · meant for [feishu-botd::chair] · 2 h 14 min on the desk"));
+        assert!(en.contains("seq 112 · request · meant for [feishu-botd::chair] · <1 min on the desk"));
+        assert!(en.contains("sending it again does not speed it"), "{en}");
+        let zh = render_desk_parked(&[item(111, Duration::minutes(14))], now, Locale::Zh);
+        assert!(zh.contains("已在办公桌上 14 分钟"), "{zh}");
+        assert!(zh.contains("重发一遍不会更快"), "{zh}");
     }
 
     /// 18 messages sat queued for ended sessions for up to 95 hours and no
