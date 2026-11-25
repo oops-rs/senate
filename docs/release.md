@@ -114,8 +114,18 @@ notes (the README's "Remote machines" says why).
 
 ## 7. Installing
 
-Installing the new version on a machine that is in use is its own step with
-its own check, and is not part of releasing. `cargo install senate senated`
-followed by `senate setup service install --yes` replaces the running
-service; `senate setup doctor` says whether the service runs the version
-installed.
+Installing the new version on a machine that is in use is its own step, and
+is not part of releasing. Before it, the person runs the staged check from
+their own terminal, against the signed binaries `scripts/release.sh` left in
+`apps/macos/build/release/`:
+
+```sh
+deploy/stage-check.sh apps/macos/build/release ~/.senate/bin/senate
+```
+
+It starts the signed daemon as a disposable service with its own home beside
+the live one, touches nothing live, and ends with `READY TO INSTALL` or
+`NOT READY` and the failing step. Install only after `READY TO INSTALL`:
+`cargo install senate senated`, then `senate setup service install --yes`,
+which replaces the running service; `senate setup doctor` says whether the
+service runs the version installed.
