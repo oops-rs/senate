@@ -1029,7 +1029,8 @@ pub(crate) mod macos {
     }
 }
 
-pub(crate) fn required(request: &crate::ipc::Request) -> bool {
+/// Whether a bridge request may wait on local authorization.
+pub fn required(request: &crate::ipc::Request) -> bool {
     use crate::ipc::{Request, SessionSelector};
     use crate::remote::Control;
     use senate_observe::AdminRequest;
