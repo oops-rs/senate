@@ -52,6 +52,14 @@ impl ApiClientError {
     /// Only an explicit Senate rejection spends a notice's failure budget.
     /// Generic HTTP responses may have come from an intermediary.
     pub(crate) fn definitive_notice_rejection(&self) -> bool {
+        self.definitive_rejection()
+    }
+
+    /// The Senate itself said no, and asking again will not change that: a
+    /// client error with the Senate's own error code, other than the
+    /// statuses that ask to try again. A generic HTTP response may have
+    /// come from an intermediary, and a failure to connect says nothing.
+    pub(crate) fn definitive_rejection(&self) -> bool {
         matches!(self, Self::Api { status, code, .. }
             if code != "http" && (400..500).contains(status)
                 && !matches!(status, 408 | 421 | 425 | 429))

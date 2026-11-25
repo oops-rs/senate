@@ -157,8 +157,8 @@ use crate::format;
 use crate::ipc::{
     self, ApprovalsReply, ApproveReply, BoundReply, CatchUpReply, CheckpointReply, CommitteeStatus,
     EscalateReply, HookDropReport, HookDropStatus, HookEvent, HookReply, HookReport, InboxReply,
-    IpcError, JoinReply, Pong, Posted, Reply, Request, SayKind, SearchReply, SessionSelector,
-    StatusReply, ThreadReply, ThreadSeen, WatchEvent, codes,
+    IpcError, JoinReply, Pong, Posted, RecipientNote, Reply, Request, SayKind, SearchReply,
+    SessionSelector, StatusReply, ThreadReply, ThreadSeen, WatchEvent, codes,
 };
 use crate::kernel_process;
 use crate::notify::{News, Notifications, NotifyConfig};
@@ -219,6 +219,9 @@ const HOOK_COMMITTEE_TIMEOUT: Duration = Duration::from_secs(1);
 const HOOK_BACKLOG_RESERVE: usize = 2_000;
 /// Bound on one push into a Codex thread: connect, read, start or steer.
 const CODEX_PUSH_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a receipt waits to learn whether its recipients have a session
+/// open ([`Shared::recipient_notes`]); past it, it says nothing of them.
+const RECIPIENT_NOTE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Events a `watch` connection may fall behind by before it is told it
 /// lagged.
 const WATCH_CAPACITY: usize = 256;
@@ -1324,7 +1327,7 @@ fn orientation(
             "[senate] 这个会话已加入 {senate} 的委员会 `{committee}`，身份是 {me}。{role}\n\n\
              {reach_zh}会以 `[senate · …]` 消息在这里找到你。工具：\
              mcp__senate__join（可用 senator 参数为当前会话选择名称），mcp__senate__ask（问队友，也可用 <委员会>::chair 直接咨询同一 Senate 的其他委员会），mcp__senate__answer（在 thread 里回复），\
-             mcp__senate__catch_up（读你错过的），mcp__senate__search（搜索整个日志），\
+             mcp__senate__catch_up（读你错过的），mcp__senate__search（搜索整个日志），mcp__senate__thread（读一个 thread 的全文），\
              mcp__senate__post（给团队留言），mcp__senate__propose_decision（提议一个决定，由人确认），mcp__senate__duty（设置你在委员会的职责），\
              mcp__senate__checkpoint（留交接记录：保持 .senate/PROGRESS.md、DECISIONS.md 和 \
              OPEN.md 是最新的）。你的用户也能在终端里用 `senate ask`、`senate tell`、\
@@ -1338,7 +1341,8 @@ fn orientation(
              `[senate · …]` messages. Tools: mcp__senate__join (pass senator to name this session), \
              mcp__senate__ask (ask a teammate or reach another chair in this Senate with <committee>::chair), \
              mcp__senate__answer (reply in a thread), mcp__senate__catch_up (read what you \
-             missed), mcp__senate__search (search the whole log), mcp__senate__post (leave a note \
+             missed), mcp__senate__search (search the whole log), mcp__senate__thread (read a \
+             thread in full), mcp__senate__post (leave a note \
              for the team), mcp__senate__propose_decision (propose a decision for a person to \
              confirm), mcp__senate__duty (set your duty on the committee), mcp__senate__checkpoint (leave a handover note: keep .senate/PROGRESS.md, \
              DECISIONS.md and OPEN.md current). Your user can also speak to you in their own \
@@ -1348,6 +1352,43 @@ fn orientation(
              thread, so put what you need from them in its reason."
         ),
     }
+}
+
+/// Threads named in [`owed_line`] before it says only how many more.
+const OWED_SHOWN: usize = 12;
+
+/// The line a starting session reads about the threads that wait on it,
+/// oldest first: their seqs, and the tools that show them. `None` with
+/// none.
+fn owed_line(committee: &CommitteeId, roots: &[Seq], locale: Locale) -> Option<String> {
+    if roots.is_empty() {
+        return None;
+    }
+    let n = roots.len();
+    let shown = roots
+        .iter()
+        .take(OWED_SHOWN)
+        .map(|seq| format!("seq {seq}"))
+        .collect::<Vec<_>>()
+        .join(locale.pick("、", ", "));
+    let more = n.saturating_sub(OWED_SHOWN);
+    Some(match (locale, more) {
+        (Locale::Zh, 0) => format!(
+            "[senate] `{committee}` 上有 {n} 个 thread 在等你：{shown}。mcp__senate__inbox 列出它们和各自的状态，mcp__senate__thread 读其中一个的全文。"
+        ),
+        (Locale::Zh, more) => format!(
+            "[senate] `{committee}` 上有 {n} 个 thread 在等你：{shown}，另有 {more} 个。mcp__senate__inbox 列出它们和各自的状态，mcp__senate__thread 读其中一个的全文。"
+        ),
+        (Locale::En, 0) => format!(
+            "[senate] {n} thread(s) on `{committee}` wait on you: {shown}. mcp__senate__inbox \
+             lists them with their state; mcp__senate__thread reads one in full."
+        ),
+        (Locale::En, more) => format!(
+            "[senate] {n} thread(s) on `{committee}` wait on you: {shown}, and {more} more. \
+             mcp__senate__inbox lists them with their state; mcp__senate__thread reads one in \
+             full."
+        ),
+    })
 }
 
 fn orientation_role(agent: &SenatorName, chair: Option<&SenatorName>, locale: Locale) -> String {
@@ -3563,6 +3604,13 @@ impl Shared {
                 let result = self.api.set_committee_seat(&committee, &request).await;
                 if result.is_ok() {
                     self.seed_chair(&committee).await;
+                    // A seat given back: a stream the server refused for
+                    // want of it connects now, not at its slow retry.
+                    for ((_, on), worker) in lock(&self.streams).iter() {
+                        if on == &committee {
+                            worker.retry_now();
+                        }
+                    }
                 }
                 wrap(result.map_err(server_error))
             }
@@ -3579,7 +3627,7 @@ impl Shared {
             Request::RemoteControl { .. } | Request::ObserveAdmin { .. } | Request::SetCard { .. } | Request::OpenViewer { .. } => {
                 Reply::err(IpcError::bad_request("local person socket only"))
             }
-            Request::Profiles => wrap(Ok(&self.config.profiles)),
+            Request::Profiles => wrap(self.launch_profiles()),
             Request::Sessions => wrap(on_heap(|| self.on_sessions(false)).await),
             Request::CommitteeThreads { committee, include_archived, limit, cursor } =>
                 wrap(on_heap(|| self.on_committee_threads(committee, include_archived, limit, cursor)).await),
@@ -4418,12 +4466,13 @@ impl Shared {
             self.committees_changed.notify_one();
         }
 
-        let (brief, chair) = match (context_event, session.committee()) {
+        let (brief, chair, owed) = match (context_event, session.committee()) {
             (HookEvent::SessionStart, Some(committee)) => tokio::join!(
                 self.hook_brief(committee),
                 self.hook_chair(committee, &session.agent),
+                self.hook_owed(committee, &session.agent),
             ),
-            _ => (None, None),
+            _ => (None, None, None),
         };
         let reminder = self
             .secretary_hook_reminder(&session)
@@ -4432,9 +4481,14 @@ impl Shared {
                 let text = secretary_work::reminder_text(self.locale, &reminder);
                 (reminder, text)
             });
+        let owed = owed.map(|text| {
+            let room = text.chars().count() + 2;
+            (text, room)
+        });
         let reserved = reminder
             .as_ref()
-            .map_or(0, |(_, text)| text.chars().count() + 2);
+            .map_or(0, |(_, text)| text.chars().count() + 2)
+            + owed.as_ref().map_or(0, |(_, room)| *room);
         self.refresh_display_aliases().await;
         let (mut context, delivered) = self.hook_context(
             &session,
@@ -4443,6 +4497,12 @@ impl Shared {
             chair.as_ref(),
             reserved,
         )?;
+        if let Some((owed, _)) = owed {
+            context = Some(match context {
+                Some(text) => format!("{text}\n\n{owed}"),
+                None => owed,
+            });
+        }
         if native
             && !changed_host_context
             && (source != AgentSource::Harness || hint.as_str() != report.runtime.as_str())
@@ -4554,6 +4614,28 @@ impl Shared {
                 None
             }
         }
+    }
+
+    /// What a starting session is told of the threads that wait on its
+    /// agent ([`owed_line`]), or `None` with none or when the server does
+    /// not say in time. A session restored after a stop has no memory of
+    /// what it was asked meanwhile, or of what it had left unfinished.
+    async fn hook_owed(&self, committee: &CommitteeId, agent: &SenatorName) -> Option<String> {
+        let threads = tokio::time::timeout(
+            HOOK_COMMITTEE_TIMEOUT,
+            self.api.threads(committee, Some(agent)),
+        )
+        .await
+        .ok()?
+        .ok()?
+        .threads;
+        let mut roots: Vec<Seq> = threads
+            .iter()
+            .filter(|t| t.is_for(agent) && t.waits() == Some(senate_core::WaitsOn::Agents))
+            .map(|t| t.root)
+            .collect();
+        roots.sort();
+        owed_line(committee, &roots, self.locale)
     }
 
     /// Report the starting session's presence before reading the chair.
@@ -5277,6 +5359,8 @@ impl Shared {
             );
         }
         Ok(Posted {
+            intended: senate_core::locator::intended(&r.event),
+            notes: self.recipient_notes(&r.event).await,
             committee: r.event.committee,
             seq: r.event.seq,
             to: r.event.to,
@@ -5284,6 +5368,85 @@ impl Shared {
             duplicate: r.duplicate,
             unseen_escalation: None,
         })
+    }
+
+    /// The agents a message just sent is for that have no session open, so
+    /// its receipt says that it waits ([`RecipientNote`]). Here those are
+    /// the agents it is addressed to and the chair, when it is to `chair`;
+    /// on another committee, the seat a cross-committee discussion is with.
+    /// A person is left out: they read when they read. Best effort: when
+    /// the server does not say in time, the receipt says nothing.
+    async fn recipient_notes(&self, event: &Event) -> Vec<RecipientNote> {
+        if !matches!(
+            event.kind,
+            Kind::Question | Kind::Request | Kind::Answer | Kind::Note
+        ) {
+            return Vec::new();
+        }
+        let mut seats: Vec<(CommitteeId, SenatorName, Locator)> = Vec::new();
+        for address in &event.to {
+            let agent = match address {
+                Address::Chair => self.current_chair(&event.committee).await,
+                other => self.people().as_agent(other).cloned(),
+            };
+            if let Some(agent) = agent {
+                let who = Locator::from(Address::senator(&agent));
+                seats.push((event.committee.clone(), agent, who));
+            }
+        }
+        // A cross-committee discussion's first message names the chair it
+        // was pinned to; a reply in one, the seat it went to. Anything
+        // else meant for a seat elsewhere is on the Speaker's desk, not
+        // waiting on that seat.
+        let peer = event
+            .is_chair_discussion()
+            .then(|| {
+                event
+                    .meta
+                    .get(meta::CHAIR_DISCUSSION)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<Locator>().ok())
+                    .or_else(|| senate_core::locator::intended(event))
+            })
+            .flatten();
+        if let Some(peer) = peer
+            && let (Some(committee), Some(agent)) = (peer.committee(), peer.address().as_senator())
+        {
+            seats.push((committee.clone(), agent.clone(), peer.clone()));
+        }
+        let mut notes = Vec::new();
+        let mut pages: HashMap<CommitteeId, Option<api::PresencePage>> = HashMap::new();
+        for (committee, agent, who) in seats {
+            if !pages.contains_key(&committee) {
+                let page =
+                    tokio::time::timeout(RECIPIENT_NOTE_TIMEOUT, self.api.presence(&committee))
+                        .await
+                        .ok()
+                        .and_then(Result::ok);
+                pages.insert(committee.clone(), page);
+            }
+            let Some(Some(page)) = pages.get(&committee) else {
+                continue;
+            };
+            // Only what the server knows: a seat it has no presence for
+            // is not claimed to be away. Every state but online is one
+            // without a session: taken over (the Speaker may answer for it
+            // within moments of the question) and reassigned too.
+            let Some(presence) = page.agents.iter().find(|p| p.agent == agent) else {
+                continue;
+            };
+            let away = presence.state != senate_core::PresenceState::Online;
+            if away && !notes.iter().any(|n: &RecipientNote| n.who == who) {
+                notes.push(RecipientNote {
+                    who,
+                    away: true,
+                    last_seen: presence.last_seen,
+                    paused: presence.paused,
+                    chair_now: None,
+                });
+            }
+        }
+        notes
     }
 
     async fn on_ask(
@@ -5490,6 +5653,13 @@ impl Shared {
             ));
         }
         let from = self.speaker_for(session.as_ref(), &committee, &acting)?;
+        // A discussion opened here with another committee's chair stays
+        // with whoever chaired it then: which committee that is.
+        let opened_with_chair_of = (root.is_chair_discussion() && root.from == from)
+            .then(|| senate_core::locator::intended(&root))
+            .flatten()
+            .filter(|target| target.address() == &Address::Chair)
+            .and_then(|target| target.committee().cloned());
         let to = if companion || acting.as_person || from != asker {
             vec![asker]
         } else if root.is_chair_discussion() && root.from == from {
@@ -5550,6 +5720,9 @@ impl Shared {
             event = event.with_id(id);
         }
         let mut posted = self.post(event).await?;
+        if let Some(there) = opened_with_chair_of {
+            self.note_chair_changed(&mut posted, &there).await;
+        }
         if companion && let Some(c) = lock(&self.companion).as_mut() {
             c.answered = true;
         }
@@ -5557,6 +5730,38 @@ impl Shared {
             posted.unseen_escalation = self.mark_after_speaking(&posted, &[thread], &seen).await?;
         }
         Ok(posted)
+    }
+
+    /// A reply in a discussion opened with the chair of `there` went to the
+    /// senator who chaired it when it began. When someone else chairs it
+    /// now, the receipt says so ([`RecipientNote::chair_now`]): the reply
+    /// is delivered as before, and the sender knows to ask the chair
+    /// afresh. Best effort, like the rest of the notes.
+    async fn note_chair_changed(&self, posted: &mut Posted, there: &CommitteeId) {
+        let Some(peer) = posted.intended.clone() else {
+            return;
+        };
+        let Some(then) = peer.address().as_senator() else {
+            return;
+        };
+        let chair = tokio::time::timeout(RECIPIENT_NOTE_TIMEOUT, self.api.chair(there))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|info| info.chair);
+        let Some(now) = chair.filter(|now| now != then) else {
+            return;
+        };
+        match posted.notes.iter_mut().find(|note| note.who == peer) {
+            Some(note) => note.chair_now = Some(now),
+            None => posted.notes.push(RecipientNote {
+                who: peer,
+                away: false,
+                last_seen: None,
+                paused: false,
+                chair_now: Some(now),
+            }),
+        }
     }
 
     /// The root of the thread `thread` is in (a message inside a thread
@@ -5992,6 +6197,8 @@ impl Shared {
         }
         let r = above.append(&event).await.map_err(server_error)?;
         Ok(Posted {
+            intended: None,
+            notes: Vec::new(),
             committee: r.event.committee,
             seq: r.event.seq,
             to: r.event.to,
@@ -6212,6 +6419,7 @@ impl Shared {
             threads: Vec::new(),
             settled: 0,
             seen,
+            at_desk: Vec::new(),
         };
         let mut threads: Vec<_> = page
             .threads
@@ -6237,7 +6445,48 @@ impl Shared {
         }
         reply.threads = threads;
         reply.settled = settled;
+        if !for_person {
+            reply.at_desk = self.desk_parked(&reply.committee, &reply.agents).await;
+        }
         Ok(reply)
+    }
+
+    /// What `agents` sent to a seat on another committee that still lies
+    /// on the Speaker's desk ([`ipc::DeskParked`]), oldest first: the
+    /// desk's own list, so an item is gone from here once it is forwarded,
+    /// answered or sent back. Best effort: an inbox does not fail, or
+    /// wait long, for want of it.
+    async fn desk_parked(
+        &self,
+        committee: &CommitteeId,
+        agents: &[SenatorName],
+    ) -> Vec<ipc::DeskParked> {
+        let Ok(Ok(page)) =
+            tokio::time::timeout(RECIPIENT_NOTE_TIMEOUT, self.api.docket(committee)).await
+        else {
+            return Vec::new();
+        };
+        let mut parked: Vec<ipc::DeskParked> = page
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let intended = item.intended?;
+                let event = item.event;
+                let sender = event.on_behalf_of.as_ref().unwrap_or(&event.from);
+                agents
+                    .iter()
+                    .any(|agent| sender == &Address::senator(agent))
+                    .then(|| ipc::DeskParked {
+                        seq: event.seq,
+                        kind: event.kind.clone(),
+                        intended,
+                        since: event.ts,
+                        title: format::truncate_chars(&format::one_line(&event.body), 80).0,
+                    })
+            })
+            .collect();
+        parked.sort_by_key(|item| item.seq);
+        parked
     }
 
     async fn on_catch_up(
@@ -7806,6 +8055,27 @@ mod tests {
             zh.contains("`senate ask`、`senate tell`、`senate reply`"),
             "{zh}"
         );
+    }
+
+    #[test]
+    fn a_starting_session_is_told_which_threads_wait_on_it() {
+        let c = CommitteeId::new("refund-v2").unwrap();
+        assert_eq!(owed_line(&c, &[], Locale::En), None);
+        assert_eq!(
+            owed_line(&c, &[Seq(27), Seq(31)], Locale::En).unwrap(),
+            "[senate] 2 thread(s) on `refund-v2` wait on you: seq 27, seq 31. \
+             mcp__senate__inbox lists them with their state; mcp__senate__thread reads one in \
+             full."
+        );
+        // A long list names the oldest and counts the rest.
+        let many: Vec<Seq> = (1..=20).map(Seq).collect();
+        let en = owed_line(&c, &many, Locale::En).unwrap();
+        assert!(en.contains("20 thread(s)"), "{en}");
+        assert!(en.contains("seq 12, and 8 more."), "{en}");
+        assert!(!en.contains("seq 13"), "{en}");
+        let zh = owed_line(&c, &many, Locale::Zh).unwrap();
+        assert!(zh.contains("有 20 个 thread 在等你"), "{zh}");
+        assert!(zh.contains("seq 12，另有 8 个。"), "{zh}");
     }
 
     #[test]

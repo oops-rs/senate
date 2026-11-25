@@ -208,9 +208,9 @@ impl Shared {
             .map_err(|_| IpcError::new(codes::SERVER, "could not confirm the committee in time"))?
             .map_err(server_error)?;
         if !me.committees.contains(&committee) {
-            return Err(IpcError::bad_request(format!(
-                "unknown committee {committee}"
-            )));
+            return Err(IpcError::bad_request(
+                super::host_policy::unknown_committee(&committee, self.locale),
+            ));
         }
         on_heap(|| {
             self.launch_host(
@@ -792,6 +792,14 @@ impl Shared {
     {
         let session = target.session;
         self.refuse_running_host(&Paths::new(&self.home), &session.session_id)?;
+        if !session.cwd.is_dir() {
+            return Err(IpcError::bad_request(restore_directory_gone(
+                &self.shown_session_name(&session.session_id),
+                &session.cwd,
+                session.branch.as_deref(),
+                self.locale,
+            )));
+        }
         if (session.runtime == Runtime::Claude && claude_reachable(&session).await)
             || (session.runtime == Runtime::Agy
                 && session::agy_conversation_open(&session.session_id) == Some(true))
@@ -1833,9 +1841,61 @@ async fn await_ready(
     Ok((process, ack))
 }
 
+/// Why a session whose directory is gone cannot be restored, and the two
+/// ways on: put the directory back (a removed git worktree, usually) and
+/// restore again, or start a new session elsewhere. A session resumes its
+/// conversation in the directory it ran in.
+fn restore_directory_gone(
+    name: &str,
+    directory: &Path,
+    branch: Option<&str>,
+    locale: Locale,
+) -> String {
+    let dir = directory.display();
+    let branch = branch.unwrap_or("<branch>");
+    match locale {
+        Locale::Zh => format!(
+            "{name} 的项目目录 {dir} 已不存在（多半是被移除的 git worktree），它的会话只能在那里恢复。\
+             先把目录放回去（例如 `git worktree add {dir} {branch}`）再恢复；\
+             或者用 `senate spawn` 在别处启动一个新会话，它不会带着这段对话。"
+        ),
+        Locale::En => format!(
+            "{name}'s project directory {dir} no longer exists (a removed git worktree, most \
+             likely), and its session can only be restored there. Put the directory back (for \
+             example `git worktree add {dir} {branch}`) and restore again; or start a new \
+             session elsewhere with `senate spawn`, which does not carry this conversation."
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{owns_claude_hook, profile_has_transcript};
+    use super::{owns_claude_hook, profile_has_transcript, restore_directory_gone};
+    use senate_core::Locale;
+
+    /// It said only "cannot open project directory …: No such file or
+    /// directory (os error 2)".
+    #[test]
+    fn restoring_into_a_removed_directory_says_what_happened_and_what_to_do() {
+        let gone = std::path::Path::new("/repo/.worktree/app-links");
+        let en = restore_directory_gone("reviewer", gone, Some("feat/app-links"), Locale::En);
+        assert!(
+            en.starts_with(
+                "reviewer's project directory /repo/.worktree/app-links no longer exists"
+            ),
+            "{en}"
+        );
+        assert!(
+            en.contains("`git worktree add /repo/.worktree/app-links feat/app-links`"),
+            "{en}"
+        );
+        assert!(en.contains("`senate spawn`"), "{en}");
+        let unknown = restore_directory_gone("reviewer", gone, None, Locale::Zh);
+        assert!(
+            unknown.contains("`git worktree add /repo/.worktree/app-links <branch>`"),
+            "{unknown}"
+        );
+    }
 
     #[test]
     fn clear_from_the_tui_matches_but_a_nested_claude_does_not() {

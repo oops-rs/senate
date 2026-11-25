@@ -783,6 +783,23 @@ async fn append(
             );
         }
     }
+    // As the real server does: an agent proposes a decision, a person
+    // decides.
+    if ev.kind == Kind::Decision
+        && st
+            .inner
+            .lock()
+            .unwrap()
+            .roster
+            .people()
+            .is_agent_address(&ev.from)
+    {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "agents propose decisions; people decide",
+        );
+    }
     let from = if ev.from == Address::Speaker {
         let inner = st.inner.lock().unwrap();
         ev.meta

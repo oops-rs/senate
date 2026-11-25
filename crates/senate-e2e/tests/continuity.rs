@@ -310,6 +310,14 @@ async fn covered_while_away() {
     let covered = bob
         .ask("s-bob", senator("claude"), "网关幂等键用哪个 header？")
         .await;
+    // Bob's receipt says she has no session open: the question waits.
+    assert_eq!(covered.notes.len(), 1, "{:?}", covered.notes);
+    let note = &covered.notes[0];
+    assert_eq!(note.who.address(), &senator("claude"));
+    assert!(
+        note.away && !note.paused && note.last_seen.is_some(),
+        "{note:?}"
+    );
     let post = world
         .wait_post("the takeover answer", |p| {
             p.markdown.contains("[speaker::claude] 接管")

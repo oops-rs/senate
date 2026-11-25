@@ -1671,6 +1671,63 @@ async fn stop_cli_protects_an_attending_viewer_and_releases_the_slot() {
     fixture.h.stop().await;
 }
 
+/// A chair removes a finished senator's worktree, then restores it for a
+/// follow-up: the refusal says what happened and what to do, not only
+/// that a path cannot be opened.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restoring_into_a_removed_directory_is_refused_with_the_way_on() {
+    use senate_bridge::ipc::StopReply;
+
+    let mut fixture = HostedClaude::launch(false).await;
+    let _: StopReply = call(
+        &fixture.h,
+        &Request::Stop {
+            session: Default::default(),
+            senator: fixture.seat.senator.clone().into(),
+            force: false,
+        },
+    )
+    .await;
+    // The session records the directory by its real path.
+    let project = fixture
+        .project
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
+    std::fs::remove_dir_all(&fixture.project).unwrap();
+    let error = ipc::request::<SpawnReply>(
+        &fixture.h.socket(),
+        &Request::Restore {
+            session: Default::default(),
+            senator: fixture.seat.senator.clone().into(),
+            model: Default::default(),
+        },
+        TIMEOUT,
+        TIMEOUT,
+    )
+    .await
+    .unwrap_err();
+    let ipc::ClientError::Remote(error) = error else {
+        panic!("expected a daemon error, got {error}");
+    };
+    assert!(
+        error
+            .message
+            .contains(&format!("project directory {project} no longer exists")),
+        "{}",
+        error.message
+    );
+    assert!(
+        error
+            .message
+            .contains(&format!("`git worktree add {project} ")),
+        "{}",
+        error.message
+    );
+    fixture.h.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unconfirmed_forced_stop_audits_the_ended_host() {
     use senate_bridge::ipc::StopReply;
@@ -3693,14 +3750,13 @@ async fn spawn_attempt_resumes_with_original_order_after_profile_is_removed() {
     let (mut h, project, _) = fixture_daemon(2).await;
     let missing = project.join("not-yet-created");
     h.stop().await;
-    h.config.profiles.insert(
-        "review".into(),
-        senate_bridge::config::LaunchProfile {
-            runtime: HostedRuntime::Claude,
-            model: Default::default(),
-            note: "Review".into(),
-        },
-    );
+    // The profile is in the file, where the daemon reads it at each launch.
+    let without = std::fs::read_to_string(h.paths.config()).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!("{without}\n[profiles.review]\nruntime = \"claude\"\nnote = \"Review\"\n"),
+    )
+    .unwrap();
     start(&mut h).await;
     let mut request = tracked_spawn(missing.clone(), None);
     let Request::Spawn {
@@ -3723,7 +3779,7 @@ async fn spawn_attempt_resumes_with_original_order_after_profile_is_removed() {
     assert_eq!(error.code, ipc::codes::BAD_REQUEST);
     assert!(h.store().all_sessions().unwrap().is_empty());
     h.stop().await;
-    h.config.profiles.clear();
+    std::fs::write(h.paths.config(), &without).unwrap();
     std::fs::create_dir(missing).unwrap();
     start(&mut h).await;
 
@@ -4093,6 +4149,11 @@ async fn joining_a_new_committee_opens_it_so_a_spawn_works() {
     .expect_err("spawn never creates a committee");
     assert!(
         refused.to_string().contains("unknown committee fresh-work"),
+        "{refused}"
+    );
+    // The refusal says how the committee comes to exist.
+    assert!(
+        refused.to_string().contains("`senate join fresh-work`"),
         "{refused}"
     );
 

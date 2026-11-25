@@ -38,8 +38,9 @@ use crate::daemon::senate_words;
 use crate::format;
 use crate::ipc::{ChairDocketReply, DeskRole, DocketReply, SenateDocket};
 
-/// Characters of an item's body shown on the docket.
-const ITEM_CHARS: usize = 400;
+/// Characters of an item's body shown on the docket: the whole of nearly
+/// every item, since whoever presides acts on what it asks.
+const ITEM_CHARS: usize = 4_000;
 /// Characters of each checkpoint file shown for an away agent.
 const CHECKPOINT_FILE_CHARS: usize = 1_500;
 
@@ -430,7 +431,17 @@ fn render_items(docket: &SenateDocket, chair: bool, locale: Locale, out: &mut St
                 .map(|m| m.to_string())
                 .unwrap_or_else(|| event.from.to_string());
             let (body, cut) = format::truncate_chars(&event.body, ITEM_CHARS);
-            let ellipsis = if cut { "…" } else { "" };
+            let ellipsis = match (cut, locale) {
+                (false, _) => String::new(),
+                (true, Locale::Zh) => format!(
+                    "…（已截断：`{}` 的 thread {} 里有全文）",
+                    page.committee, event.seq
+                ),
+                (true, Locale::En) => format!(
+                    "… (cut: thread {} on `{}` has it in full)",
+                    event.seq, page.committee
+                ),
+            };
             if !chair && senate_core::worker::is_intake(event) {
                 out.push_str(locale.pick(
                     "  Desk worker 收件：可用 speaker_route 的 target_committee 转交到其他委员会。\n",
@@ -463,7 +474,13 @@ fn render_items(docket: &SenateDocket, chair: bool, locale: Locale, out: &mut St
             Locale::Zh => format!("在席（`{}`）：\n", page.committee),
             Locale::En => format!("Seated (`{}`):\n", page.committee),
         });
-        for seat in &page.seats {
+        // A seat nobody can be reached at and nothing waits on says nothing
+        // to pick by: counted, not listed.
+        let quiet = |seat: &&SeatFacts| {
+            !seat.connected && !seat.paused && seat.checkpoint.is_none() && seat.open_threads == 0
+        };
+        let folded = page.seats.iter().filter(quiet).count();
+        for seat in page.seats.iter().filter(|seat| !quiet(seat)) {
             let presence = seat_line(seat, locale);
             let checkpoint = match (&seat.checkpoint, locale) {
                 (Some(c), Locale::Zh) => format!("checkpoint seq {}：{}", c.seq, c.summary),
@@ -481,6 +498,16 @@ fn render_items(docket: &SenateDocket, chair: bool, locale: Locale, out: &mut St
                     "- {} · {presence} · {checkpoint} · {} open threads\n",
                     mention(&seat.agent),
                     seat.open_threads
+                ),
+            });
+        }
+        if folded > 0 {
+            out.push_str(&match locale {
+                Locale::Zh => format!(
+                    "- 另有 {folded} 个席位：没有打开的会话，没有 checkpoint，没有未结 thread（未列出）\n"
+                ),
+                Locale::En => format!(
+                    "- {folded} more with no session open, no checkpoint and no open threads (not listed)\n"
                 ),
             });
         }
@@ -578,6 +605,102 @@ mod tests {
             named.contains("the desk is worked by [senator::claude]"),
             "{named}"
         );
+    }
+
+    /// Two chairs' dockets listed 120 and 190 seats, nearly all with no
+    /// session, checkpoint or thread, and cut the items that mattered.
+    #[test]
+    fn the_docket_counts_seats_that_say_nothing_and_shows_an_item_whole() {
+        use senate_core::docket::CheckpointFacts;
+        use senate_core::{Address, Awaiting, DocketItem, DocketPage, Kind, NewEvent, Seq};
+        let c: senate_core::CommitteeId = "preview-fleet".parse().unwrap();
+        let seat = |name: &str| SeatFacts {
+            paused: false,
+            agent: path(name),
+            connected: false,
+            presence: None,
+            last_seen: None,
+            checkpoint: None,
+            open_threads: 0,
+            duty: None,
+        };
+        let item = |seq: u64, len: usize| DocketItem {
+            event: NewEvent::new(
+                c.clone(),
+                Kind::Request,
+                "senator::codex".parse::<Address>().unwrap(),
+                format!("ASK{}END", "x".repeat(len)),
+            )
+            .to(Address::Chair)
+            .into_event(Seq(seq), chrono::Utc::now()),
+            awaiting: Awaiting::Addressed,
+            intended: None,
+        };
+        let mut seats: Vec<SeatFacts> = (0..40).map(|n| seat(&format!("gone{n}"))).collect();
+        seats.push(SeatFacts {
+            connected: true,
+            ..seat("live")
+        });
+        seats.push(SeatFacts {
+            open_threads: 2,
+            ..seat("owing")
+        });
+        seats.push(SeatFacts {
+            paused: true,
+            ..seat("paused")
+        });
+        seats.push(SeatFacts {
+            checkpoint: Some(CheckpointFacts {
+                seq: Seq(57),
+                ts: chrono::Utc::now(),
+                summary: "handover".into(),
+                branch: "main".into(),
+            }),
+            ..seat("noted")
+        });
+        let reply = ChairDocketReply {
+            chair: path("main"),
+            page: DocketPage {
+                committee: c.clone(),
+                speaker: None,
+                office: None,
+                items: vec![item(71, 1_200), item(73, 5_000)],
+                covered: Default::default(),
+                seats,
+                head: Seq(92),
+            },
+            checkpoints: Vec::new(),
+        };
+        let en = render_chair_docket(&reply, Locale::En);
+        for kept in ["live", "owing", "paused", "noted"] {
+            assert!(
+                en.contains(&format!("- [senator::{kept}] · ")),
+                "{kept}: {en}"
+            );
+        }
+        assert!(!en.contains("gone"), "{en}");
+        assert!(
+            en.contains(
+                "- 40 more with no session open, no checkpoint and no open threads (not listed)\n"
+            ),
+            "{en}"
+        );
+        // An item of ordinary length is whole; a very long one says where
+        // the rest is.
+        assert!(en.contains(&format!("ASK{}END", "x".repeat(1_200))), "{en}");
+        assert!(
+            en.contains("… (cut: thread 73 on `preview-fleet` has it in full)"),
+            "{en}"
+        );
+        assert!(!en.contains("thread 71 on"), "{en}");
+        let zh = render_chair_docket(&reply, Locale::Zh);
+        assert!(zh.contains("另有 40 个席位"), "{zh}");
+        assert!(zh.contains("`preview-fleet` 的 thread 73 里有全文"), "{zh}");
+
+        // Nothing is said of folded seats when there are none.
+        let mut all_live = reply.clone();
+        all_live.page.seats.retain(|seat| seat.connected);
+        assert!(!render_chair_docket(&all_live, Locale::En).contains("not listed"));
     }
 
     #[test]

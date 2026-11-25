@@ -902,6 +902,8 @@ fn a_message_sent_to_another_committee_names_it_in_the_commands_it_suggests() {
         to: Vec::new(),
         thread: None,
         duplicate: false,
+        intended: None,
+        notes: Vec::new(),
         unseen_escalation: None,
     };
     let sent = |elsewhere| Sent {

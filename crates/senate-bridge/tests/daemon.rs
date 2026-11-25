@@ -1378,6 +1378,65 @@ async fn session_start_injects_the_brief_ahead_of_the_backlog() {
     h.stop().await;
 }
 
+/// A restored session was asked something while it was stopped and had to
+/// be pointed at it by hand (commons-demo 27, 31). A session that starts is
+/// told which threads wait on its agent, answered ones left out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_start_names_the_threads_that_wait_on_the_agent() {
+    let mut h = Harness::with_committees(&["refund-v2"]).await;
+    h.start().await;
+    let wd = h.workdir("b", Some("refund-v2"));
+    let out = h
+        .hook(HookKind::SessionStart, "q", &wd, None)
+        .await
+        .unwrap();
+    assert!(!context(&out).contains("wait on you"), "{}", context(&out));
+    h.wait_stream("refund-v2").await;
+    end_session(&h, "q", &wd).await;
+
+    // Asked while no session of it was open; one of the three is answered
+    // and one is for another agent.
+    let open = h
+        .server
+        .append(question(
+            claude("bob"),
+            claude("alice"),
+            "which header carries the key?",
+        ))
+        .seq;
+    let settled = h
+        .server
+        .append(question(claude("bob"), claude("alice"), "is it merged?"))
+        .seq;
+    h.server.append(
+        NewEvent::new(committee(), Kind::Answer, claude("alice"), "yes")
+            .to(claude("bob"))
+            .in_thread(settled),
+    );
+    h.server.append(question(
+        claude("bob"),
+        senator("reviewer"),
+        "for the reviewer",
+    ));
+    let later = h
+        .server
+        .append(question(claude("bob"), claude("alice"), "and the retry?"))
+        .seq;
+    let out = h
+        .hook(HookKind::SessionStart, "r", &wd, None)
+        .await
+        .unwrap();
+    let ctx = context(&out);
+    assert!(
+        ctx.contains(&format!(
+            "[senate] 2 thread(s) on `refund-v2` wait on you: seq {open}, seq {later}. \
+             mcp__senate__inbox lists them"
+        )),
+        "{ctx}"
+    );
+    h.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn brief_chars_bounds_the_injected_brief() {
     let mut h = Harness::new().await;

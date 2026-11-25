@@ -917,8 +917,10 @@ Run `senate profiles` to see the configured names, settings, and notes. Its
 output is one tab-separated line per profile (name, runtime, model, effort,
 speed, note); with none it prints `No launch profiles configured.` and, on
 stderr, an example to copy and the file to put it in.
-`senate setup doctor` reports profile configuration errors by name. Restart
-the machine daemon after editing a profile so new launches pick up the change.
+`senate setup doctor` reports profile configuration errors by name. The
+daemon reads the profiles from the file each time one is listed or used, so
+an added or edited profile applies to the next launch with no restart; a
+profile that does not parse is refused by name at that launch.
 
 ```bash
 senate spawn --profile review --committee refund-v2
@@ -943,7 +945,8 @@ runtime's usual lookup at launch. If you omit `--alias`, Senate uses the profile
 name and applies the usual roster alias rules.
 
 In MCP, call `launch_profiles` to read the available profiles and their notes,
-then pass the chosen name in the `profile` field of `spawn`. The same chair and
+then pass the chosen name in the `profile` field of `spawn`. With none
+configured it says so, and shows the example and the file to put it in. The same chair and
 Speaker's office permissions apply to launches with a profile.
 
 ### Troubleshooting

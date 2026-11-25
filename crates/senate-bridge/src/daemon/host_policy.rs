@@ -22,6 +22,23 @@ pub(super) struct HostAuthority {
     locale: Locale,
 }
 
+/// Why a session cannot be started on `committee`, which nothing has been
+/// written to yet, and how the committee comes to exist: spawn never
+/// creates one, `senate join` by a person does.
+pub(super) fn unknown_committee(committee: &CommitteeId, locale: Locale) -> String {
+    match locale {
+        Locale::Zh => format!(
+            "unknown committee {committee}：还没有人往这个委员会写过东西，spawn 不会创建委员会。\
+             先由人在它的项目目录里运行 `senate join {committee}` 把它开出来，再 spawn。"
+        ),
+        Locale::En => format!(
+            "unknown committee {committee}: nothing has been written to it yet, and spawn does \
+             not create a committee. A person opens it first with `senate join {committee}` in \
+             its project directory; then spawn again."
+        ),
+    }
+}
+
 impl HostAuthority {
     pub(super) fn check_target(
         &self,
@@ -46,8 +63,9 @@ impl HostAuthority {
             )));
         }
         if !self.committees.contains(committee) {
-            return Err(IpcError::bad_request(format!(
-                "unknown committee {committee}"
+            return Err(IpcError::bad_request(unknown_committee(
+                committee,
+                self.locale,
             )));
         }
         Ok(())
@@ -206,6 +224,25 @@ impl Shared {
         })
     }
 
+    /// The launch profiles as the configuration file has them now, so an
+    /// added or edited profile needs no restart and `senate profiles`
+    /// (which reads the file) and the daemon never disagree. Only the
+    /// file's profiles are read, so a mistake elsewhere in it does not
+    /// stand in the way of a launch; profiles that no longer parse are an
+    /// error naming what is wrong, not the old ones. With no file at all (a
+    /// daemon configured in memory) they are the ones it started with.
+    pub(super) fn launch_profiles(
+        &self,
+    ) -> Result<BTreeMap<String, crate::config::LaunchProfile>, IpcError> {
+        match crate::config::BridgeConfig::profiles_at(&Paths::new(&self.home).config()) {
+            Ok(profiles) => Ok(profiles),
+            Err(crate::config::ConfigError::Missing(_)) => Ok(self.config.profiles.clone()),
+            Err(error) => Err(IpcError::bad_request(format!(
+                "cannot read the launch profiles: {error}"
+            ))),
+        }
+    }
+
     fn spawn_settings(
         &self,
         runtime: Option<HostedRuntime>,
@@ -222,7 +259,8 @@ impl Shared {
                 .map(|runtime| (runtime, alias, model))
                 .ok_or_else(|| IpcError::bad_request("specify a runtime or launch profile"));
         };
-        let profile = self.config.profiles.get(&name).ok_or_else(|| {
+        let profiles = self.launch_profiles()?;
+        let profile = profiles.get(&name).ok_or_else(|| {
             IpcError::bad_request(format!(
                 "unknown launch profile {name:?}; see senate profiles"
             ))

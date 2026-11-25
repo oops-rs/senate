@@ -1149,6 +1149,8 @@ impl Shared {
                     .await
                     .map_err(|e| self.refusal(e))?;
                 Posted {
+                    intended: None,
+                    notes: Vec::new(),
                     committee: r.event.committee,
                     seq: r.event.seq,
                     to: r.event.to,

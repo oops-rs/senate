@@ -77,8 +77,8 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router,
 };
 use senate_core::{
-    Address, Brief, CommitteeId, EventId, Kind, Link, Locale, Locator, Mention, Name, Refs, Seq,
-    StatusPayload, StatusState, Step, brief,
+    Address, Brief, CommitteeId, Event, EventId, Kind, Link, Locale, Locator, Mention, Name, Refs,
+    Seq, StatusPayload, StatusState, Step, brief,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -89,7 +89,7 @@ use crate::ipc::{
     self, BoundReply, CatchUpReply, ChairDocketReply, CheckpointReply, ClientError, DocketReply,
     EscalateReply, EscalatedTo, Forwarded, HostedRuntime, InboxReply, JoinReply, Posted,
     PresidesReply, Request, SayKind, SearchReply, SecretariesReply, SecretaryOp, SendReply,
-    SessionSelector, SpawnReply, WatchEvent,
+    SessionSelector, SpawnReply, ThreadReply, WatchEvent,
 };
 use crate::session::Runtime;
 
@@ -254,6 +254,15 @@ spaces); a few distinctive words work best. Results come best match first, each 
 kind, sender and time; bodies are cut to 300 characters except decisions. `limit`: how many \
 (default 10, at most 50). `committee`: defaults to this session's committee.";
 
+const THREAD: &str = "Read a thread on a Senate committee in full: the question or request \
+at its root and everything said in reply, oldest first, bodies uncut. Use it when search, \
+catch_up, a docket or the brief showed a message cut short, or named a seq you have not seen. \
+`seq`: the root, or any message in the thread. `only`: just the message at `seq`. \
+`committee`: defaults to this session's committee; name another to read a thread there (a \
+message forwarded to you says which committee and seq it came from). It only reads: reply in \
+your own committee's thread with answer, or reach another committee with ask. A very long \
+thread comes with its older replies shortened; read one of those with `only`.";
+
 const MEMORY_SEARCH: &str = "Search what a Senate committee knows: short points the Speaker \
 distilled from its discussion (and people corrected), each with the seqs of the messages it came \
 from; a newer point replaces an older one. Look here first when you need to know how something \
@@ -265,9 +274,12 @@ const POST: &str = "Leave a note on a Senate committee for the team: a status up
 about a change others depend on, a finding worth keeping. It is addressed to no one: it is \
 recorded in the shared committee log, where every teammate's agent reads it through catch_up and \
 search, and nobody is interrupted. To get an answer from someone use ask instead; to settle \
-something for the team use propose_decision. `to` (optional) tells someone instead: an \
-address on this committee (`codex`, `senator::alice`, `chair`, `speaker`) or one qualified name \
-(`ledger::codex`, `/acme::ledger::codex`, `ledger::speaker`, `ledger::chair`). A note to another \
+something for the team use propose_decision. `to` (optional) tells someone instead, and the \
+note is pushed into their session: one address on this committee or several, comma-separated \
+(`codex`, `senator::alice, reviewer`, `chair`, `speaker`), or one qualified name \
+(`ledger::codex`, `/acme::ledger::codex`, `ledger::speaker`, `ledger::chair`). To give \
+every member a rule, name them all in one `to`: a note without `to` reaches only those who \
+look. A note to another \
 committee's chair in this Senate reaches that chair directly; other crossings go to the Speaker's desk. `body`: self-contained; readers have none of your \
 context. `committee`: defaults to this session's committee.";
 
@@ -400,14 +412,29 @@ pub struct SearchParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
+pub struct ThreadParams {
+    /// Any seq in the thread: its root, or a message inside it.
+    #[schemars(with = "u64")]
+    pub seq: u64,
+    /// Only the message at `seq`, not the rest of its thread.
+    #[serde(default)]
+    pub only: bool,
+    /// Committee id; defaults to this session's committee.
+    #[serde(default)]
+    pub committee: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 pub struct PostParams {
     /// The text, self-contained.
     pub body: String,
     /// Committee id; defaults to this session's committee.
     #[serde(default)]
     pub committee: Option<String>,
-    /// Tell someone instead of the whole committee: an address here, or
-    /// one qualified name (`ledger::codex`, `ledger::speaker`).
+    /// Tell someone instead of the whole committee: one address here or
+    /// several, comma-separated, or one qualified name (`ledger::codex`,
+    /// `ledger::speaker`).
     #[serde(default)]
     pub to: Option<String>,
 }
@@ -686,7 +713,9 @@ on you (this agent; your person's other agents have their own) or on your user: 
 requests addressed to you, and threads escalated to your user, with their state (processing, \
 active, suspended = waiting on a person), title, and who asked. A thread whose last word is an \
 answer and that nobody has said more in is settled: it is left out and counted in a closing line; \
-pass `all: true` to list those too. Use it for `/senate inbox`.";
+pass `all: true` to list those too. After them it lists what you sent to a seat on another \
+committee that still lies on the Speaker's desk, with how long it has lain there: it is not \
+lost, and is not to be sent again. Use it for `/senate inbox`.";
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
@@ -1094,6 +1123,62 @@ pub fn render_inbox(reply: &InboxReply, locale: Locale, how: ShowAll) -> String 
     out
 }
 
+/// What the agent sent across committees that still lies on the Speaker's
+/// desk, after its inbox: each with how long it has lain there, and that
+/// sending it again does not help. Empty with none.
+pub fn render_desk_parked(
+    parked: &[ipc::DeskParked],
+    now: chrono::DateTime<chrono::Utc>,
+    locale: Locale,
+) -> String {
+    if parked.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(locale.pick(
+        "\n\n你发往其他委员会、还在 Speaker 办公桌上的（尚未转交、答复或退回）：",
+        "\n\nOn the Speaker's desk, sent by you to another committee and not yet forwarded, \
+         answered or sent back:",
+    ));
+    for item in parked {
+        let to = item.intended.in_text();
+        let waited = waited(now - item.since, locale);
+        let title = format::one_line(&item.title);
+        out.push_str(&match locale {
+            Locale::Zh => format!(
+                "\n- seq {} · {} · 发给 {to} · 已在办公桌上 {waited} · {title}",
+                item.seq, item.kind
+            ),
+            Locale::En => format!(
+                "\n- seq {} · {} · meant for {to} · {waited} on the desk · {title}",
+                item.seq, item.kind
+            ),
+        });
+    }
+    out.push_str(locale.pick(
+        "\n办公桌会把每一条转过去，或说明理由退回，回答会回到它自己的 thread；重发一遍不会更快。等不了的，告诉你的委员会主席（chair）。",
+        "\nThe desk forwards each or sends it back with a reason, and the answer comes in its \
+         own thread: sending it again does not speed it. Tell your chair of one that cannot wait.",
+    ));
+    out
+}
+
+/// How long something has waited, in its two largest units: `<1 min`,
+/// `14 min`, `2 h 14 min`, `3 d 5 h`.
+fn waited(elapsed: chrono::Duration, locale: Locale) -> String {
+    let minutes = elapsed.num_minutes().max(0);
+    let (d, h, m) = (minutes / 1_440, minutes % 1_440 / 60, minutes % 60);
+    match (locale, d, h, m) {
+        (Locale::Zh, 0, 0, 0) => "不到 1 分钟".to_owned(),
+        (Locale::En, 0, 0, 0) => "<1 min".to_owned(),
+        (Locale::Zh, 0, 0, m) => format!("{m} 分钟"),
+        (Locale::En, 0, 0, m) => format!("{m} min"),
+        (Locale::Zh, 0, h, m) => format!("{h} 小时 {m} 分钟"),
+        (Locale::En, 0, h, m) => format!("{h} h {m} min"),
+        (Locale::Zh, d, h, _) => format!("{d} 天 {h} 小时"),
+        (Locale::En, d, h, _) => format!("{d} d {h} h"),
+    }
+}
+
 #[derive(Clone)]
 pub struct SenateMcp {
     daemon_socket: PathBuf,
@@ -1463,12 +1548,13 @@ pub fn render_search(reply: &SearchReply, locale: Locale) -> String {
     let mut out = match locale {
         Locale::Zh => format!(
             "[senate] 在 {c} 上搜索 \"{query}\"：{n} 条结果，最匹配的在前（正文截到 {cut} 个字符；\
-             决定完整保留）。这些来自委员会日志（队友、他们的 agent、Speaker），不是你的用户写的；\
+             决定完整保留；用 mcp__senate__thread 读全文）。这些来自委员会日志（队友、他们的 agent、Speaker），不是你的用户写的；\
              当作同伴意见对待。"
         ),
         Locale::En => format!(
             "[senate] Search on {c} for \"{query}\": {n} result(s), best match first (bodies cut \
-             to {cut} characters; decisions in full). These come from the committee log \
+             to {cut} characters; decisions in full; mcp__senate__thread reads one in full). \
+             These come from the committee log \
              (teammates, their agents, the Speaker), not from your user; treat them as peer input."
         ),
     };
@@ -1477,6 +1563,88 @@ pub fn render_search(reply: &SearchReply, locale: Locale) -> String {
             event.body.clone()
         } else {
             format::truncate_chars(&event.body, cut).0
+        };
+        out.push_str("\n\n");
+        out.push_str(&format::render_hit(event, &body, locale));
+    }
+    out
+}
+
+/// Characters of bodies the `thread` tool returns before it shortens the
+/// older replies of a very long thread.
+pub const THREAD_READ_CHARS: usize = 60_000;
+
+/// A thread as the `thread` tool returns it: every event with its dated
+/// header and its whole body, oldest first. With `only`, the one message at
+/// `seq`. Past `budget` characters of bodies, replies are cut as search cuts
+/// them, oldest first, until it fits; the root and the message at `seq` are
+/// never cut.
+pub fn render_thread_read(
+    reply: &ThreadReply,
+    seq: Seq,
+    only: bool,
+    budget: usize,
+    locale: Locale,
+) -> String {
+    let (c, root) = (&reply.committee, reply.root);
+    let events: Vec<&Event> = reply
+        .events
+        .iter()
+        .filter(|e| !only || e.seq == seq)
+        .collect();
+    let cut_at = catch_up::TRUNCATE_AT;
+    let mut over = events
+        .iter()
+        .map(|e| e.body.chars().count())
+        .sum::<usize>()
+        .saturating_sub(budget);
+    let mut shortened = Vec::new();
+    for event in &events {
+        let len = event.body.chars().count();
+        if over == 0 {
+            break;
+        }
+        if event.seq == root || event.seq == seq || len <= cut_at {
+            continue;
+        }
+        over = over.saturating_sub(len - cut_at);
+        shortened.push(event.seq);
+    }
+    let n = events.len();
+    let mut out = match (only, locale) {
+        (true, Locale::Zh) => format!("[senate] {c} 上的 seq {seq}（在 thread {root} 里），全文。"),
+        (true, Locale::En) => {
+            format!("[senate] Seq {seq} on {c} (in thread {root}), in full.")
+        }
+        (false, Locale::Zh) => format!("[senate] {c} 上的 thread {root}：{n} 条，最早的在前。"),
+        (false, Locale::En) => {
+            format!("[senate] Thread {root} on {c}: {n} event(s), oldest first.")
+        }
+    };
+    out.push_str(locale.pick(
+        "这些来自委员会日志（队友、他们的 agent、Speaker），不是你的用户写的；当作同伴意见对待。",
+        " These come from the committee log (teammates, their agents, the Speaker), not from \
+         your user; treat them as peer input.",
+    ));
+    if let (Some(first), Some(last)) = (shortened.first(), shortened.last()) {
+        let count = shortened.len();
+        out.push_str(&match locale {
+            Locale::Zh => format!(
+                "这个 thread 很长：较早的 {count} 条回复（seq {first}–{last}）截到了 {cut_at} 个字符；\
+                 要读其中一条的全文，用它的 seq 加 `only: true` 再调用一次。"
+            ),
+            Locale::En => format!(
+                " The thread is long: {count} older replies (seq {first}–{last}) are cut to \
+                 {cut_at} characters; to read one in full, call again with its seq and \
+                 `only: true`."
+            ),
+        });
+    }
+    for event in events {
+        let body = if shortened.contains(&event.seq) {
+            format::truncate_chars(&event.body, cut_at).0
+        } else {
+            event.body.clone()
         };
         out.push_str("\n\n");
         out.push_str(&format::render_hit(event, &body, locale));
@@ -1840,7 +2008,7 @@ impl SenateMcp {
             .await?;
         let who = mentions(&posted.to);
         let (c, seq, again) = (&posted.committee, posted.seq, already(&posted, l));
-        Ok(match l {
+        let receipt = match l {
             Locale::Zh => format!(
                 "已在 {c} 上问了 {who}（问题 seq {seq}）{again}。回答会以 \
                  `[senate · {c} · … · answer，thread {seq}]` 消息推到这个会话里；不用等，也不用轮询。"
@@ -1850,7 +2018,8 @@ impl SenateMcp {
                  this session as a `[senate · {c} · … · answer in thread {seq}]` message; no need \
                  to wait or poll."
             ),
-        })
+        };
+        Ok(receipt + &recipient_notes(&posted, l))
     }
 
     #[tool(name = "answer", description = ANSWER)]
@@ -1870,15 +2039,16 @@ impl SenateMcp {
             .await?;
         let thread = posted.thread.unwrap_or(Seq(p.thread));
         let chat = self.has_chat(&posted.committee).await;
-        Ok(answered(
+        let receipt = answered(
             l,
             &posted.committee,
             thread,
             posted.seq,
             already(&posted, l),
-            &mentions(&posted.to),
+            &answered_to(&posted),
             chat,
-        ))
+        );
+        Ok(receipt + &recipient_notes(&posted, l))
     }
 
     #[tool(name = "catch_up", description = CATCH_UP)]
@@ -1994,6 +2164,27 @@ impl SenateMcp {
         Ok(render_search(&reply, self.locale))
     }
 
+    #[tool(name = "thread", description = THREAD)]
+    async fn thread(&self, params: Parameters<ThreadParams>) -> Result<String, String> {
+        let p = params.0;
+        let reply: ThreadReply = self
+            .call(&Request::Thread {
+                session: self.selector.clone(),
+                committee: committee_arg(p.committee)?,
+                thread: Seq(p.seq),
+                mark_seen: false,
+            })
+            .await
+            .map_err(|e| describe(e, self.locale))?;
+        Ok(render_thread_read(
+            &reply,
+            Seq(p.seq),
+            p.only,
+            THREAD_READ_CHARS,
+            self.locale,
+        ))
+    }
+
     #[tool(name = "memory_search", description = MEMORY_SEARCH)]
     async fn memory_search(&self, params: Parameters<MemoryParams>) -> Result<String, String> {
         let p = params.0;
@@ -2074,7 +2265,7 @@ impl SenateMcp {
                 id: Some(EventId::new()),
             })
             .await?;
-        Ok(render_sent(&reply, kind, self.locale))
+        Ok(render_sent(&reply, kind, self.locale) + &recipient_notes(&reply.posted, self.locale))
     }
 
     #[tool(name = "duty", description = DUTY)]
@@ -2255,8 +2446,14 @@ impl SenateMcp {
             .call::<senate_core::alias::KnownAliases>(&Request::Aliases)
             .await
             .ok();
+        let mut text = render_inbox(&reply, self.locale, ShowAll::Param);
+        text.push_str(&render_desk_parked(
+            &reply.at_desk,
+            chrono::Utc::now(),
+            self.locale,
+        ));
         Ok(senate_core::alias::display_event_bylines(
-            &render_inbox(&reply, self.locale, ShowAll::Param),
+            &text,
             aliases.as_ref(),
             &reply.committee,
         ))
@@ -2538,6 +2735,9 @@ impl SenateMcp {
             .call(&Request::Profiles)
             .await
             .map_err(|error| describe(error, self.locale))?;
+        if profiles.is_empty() {
+            return Ok(no_profiles(&self.daemon_socket, self.locale));
+        }
         serde_json::to_string_pretty(&profiles).map_err(|error| error.to_string())
     }
 
@@ -3161,6 +3361,86 @@ pub fn render_escalated(reply: &EscalateReply, thread: Seq, locale: Locale) -> S
     }
 }
 
+/// What `launch_profiles` tells when the machine has none: that spawn still
+/// works by runtime, and what the person adds, where, to have one. The
+/// configuration file sits beside the daemon's socket.
+fn no_profiles(daemon_socket: &std::path::Path, locale: Locale) -> String {
+    let home = daemon_socket.parent().unwrap_or(daemon_socket);
+    let config = crate::paths::Paths::new(home).config();
+    let (config, example) = (config.display(), crate::config::PROFILE_EXAMPLE);
+    match locale {
+        Locale::Zh => format!(
+            "这台机器没有配置 launch profile。spawn 仍可只用 `runtime`（claude、codex 或 agy），\
+             模型和 effort 取该 runtime 的默认值。profile 由你的用户在自己的配置文件 {config} 里添加，例如：\n\n\
+             {example}\n\n加好后下一次调用就能用，不用重启 daemon。"
+        ),
+        Locale::En => format!(
+            "No launch profiles are configured on this machine. spawn still works with a \
+             `runtime` alone (claude, codex or agy), at that runtime's default model and effort. \
+             A profile is added by your user in their own configuration file, {config}, for \
+             example:\n\n{example}\n\nIt is usable at the next call; the daemon needs no restart."
+        ),
+    }
+}
+
+/// What a receipt adds about recipients who will not read the message soon
+/// ([`ipc::RecipientNote`]): one line each, nothing when there is none.
+pub fn recipient_notes(posted: &Posted, locale: Locale) -> String {
+    let mut out = String::new();
+    for note in &posted.notes {
+        let who = note.who.in_text();
+        if let (Some(now), Some(c)) = (&note.chair_now, note.who.committee()) {
+            let now = Address::senator(now).in_text();
+            out.push('\n');
+            out.push_str(&match locale {
+                Locale::Zh => format!(
+                    "注意：{who} 已不是 `{c}` 的主席（chair），现在是 {now}。这个 thread 仍然只到 {who}；\
+                     要找现任主席，重新向 `{c}::chair` 提问。"
+                ),
+                Locale::En => format!(
+                    "Note: {who} no longer chairs `{c}`; {now} does. This thread stays with \
+                     {who}: to reach the chair, ask `{c}::chair` afresh."
+                ),
+            });
+        }
+        if !note.away {
+            continue;
+        }
+        let seen = note.last_seen.map(|t| t.format("%Y-%m-%d %H:%M UTC"));
+        out.push('\n');
+        out.push_str(&match (note.paused, seen, locale) {
+            (true, _, Locale::Zh) => format!("注意：{who} 已暂停；这条消息会等到它恢复。"),
+            (true, _, Locale::En) => {
+                format!("Note: {who} is paused; this waits for it until it is resumed.")
+            }
+            (false, Some(t), Locale::Zh) => format!(
+                "注意：{who} 没有打开的会话（最后一次联络 {t}）；这条消息会等到它的会话打开。"
+            ),
+            (false, Some(t), Locale::En) => format!(
+                "Note: {who} has no session open (last seen {t}); this waits for it until one \
+                 opens."
+            ),
+            (false, None, Locale::Zh) => {
+                format!("注意：{who} 没有打开的会话；这条消息会等到它的会话打开。")
+            }
+            (false, None, Locale::En) => {
+                format!("Note: {who} has no session open; this waits for it until one opens.")
+            }
+        });
+    }
+    out
+}
+
+/// Who an answer went to: its recipients here, or the seat on the other
+/// committee for a reply in a cross-committee discussion, whose receipt
+/// names no local recipient.
+fn answered_to(posted: &Posted) -> String {
+    match &posted.intended {
+        Some(peer) if posted.to.is_empty() => peer.in_text(),
+        _ => mentions(&posted.to),
+    }
+}
+
 /// What the `answer` tool tells: said in the log, and mirrored into the
 /// team's chat thread only when the committee has a chat group bound.
 fn answered(
@@ -3172,9 +3452,13 @@ fn answered(
     to: &str,
     chat: bool,
 ) -> String {
-    let base = match l {
-        Locale::Zh => format!("已在 {c} 上回答 thread {thread}（seq {seq}）{again}，发给 {to}。"),
-        Locale::En => {
+    let base = match (l, to.is_empty()) {
+        (Locale::Zh, true) => format!("已在 {c} 上回答 thread {thread}（seq {seq}）{again}。"),
+        (Locale::En, true) => format!("Answered thread {thread} on {c} (seq {seq}){again}."),
+        (Locale::Zh, false) => {
+            format!("已在 {c} 上回答 thread {thread}（seq {seq}）{again}，发给 {to}。")
+        }
+        (Locale::En, false) => {
             format!("Answered thread {thread} on {c} (seq {seq}){again}, addressed to {to}.")
         }
     };
@@ -3907,7 +4191,8 @@ mod tests {
                 "speaker_unseat",
                 "status",
                 "take",
-                "terminal"
+                "terminal",
+                "thread"
             ]
         );
         // A model that looks for `open` here is told where it is and why.
@@ -4038,6 +4323,7 @@ mod tests {
             threads: board.threads(None).into_iter().cloned().collect(),
             settled: 0,
             seen: Vec::new(),
+            at_desk: Vec::new(),
         };
         let en = render_inbox(&reply, Locale::En, ShowAll::Flag);
         assert!(
@@ -4129,6 +4415,7 @@ mod tests {
             threads: waiting.clone(),
             settled: 1,
             seen: Vec::new(),
+            at_desk: Vec::new(),
         };
         let en = render_inbox(&base, Locale::En, ShowAll::Flag);
         assert!(en.contains("thread 3") && !en.contains("thread 1"), "{en}");
@@ -4218,6 +4505,7 @@ mod tests {
             threads: board.threads(None).into_iter().cloned().collect(),
             settled: 0,
             seen: Vec::new(),
+            at_desk: Vec::new(),
         };
         let en = render_inbox(&reply, Locale::En, ShowAll::Flag);
         assert!(
@@ -4261,6 +4549,7 @@ mod tests {
                 threads: board.threads(None).into_iter().cloned().collect(),
                 settled: 0,
                 seen: Vec::new(),
+                at_desk: Vec::new(),
             };
             render_inbox(&reply, locale, ShowAll::Flag)
         };
@@ -4328,6 +4617,232 @@ mod tests {
         assert_eq!(
             en(true),
             format!("{} It is mirrored into the team's chat thread.", en(false))
+        );
+    }
+
+    /// One ask was sent to the desk three times in 21 minutes (ibot 100,
+    /// 104, 111) and arrived 53 hours later: the sender saw nothing of it
+    /// after the receipt.
+    #[test]
+    fn the_inbox_shows_what_the_agent_has_lying_on_the_desk_and_for_how_long() {
+        use chrono::{Duration, TimeZone};
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 11, 25, 12, 0, 0)
+            .unwrap();
+        let item = |seq: u64, ago: Duration| ipc::DeskParked {
+            seq: Seq(seq),
+            kind: Kind::Request,
+            intended: "feishu-botd::chair".parse().unwrap(),
+            since: now - ago,
+            title: "fix [unsupported message]".into(),
+        };
+        assert_eq!(render_desk_parked(&[], now, Locale::En), "");
+        let en = render_desk_parked(
+            &[
+                item(100, Duration::minutes(2 * 1_440 + 5 * 60 + 7)),
+                item(111, Duration::minutes(134)),
+                item(112, Duration::seconds(20)),
+            ],
+            now,
+            Locale::En,
+        );
+        assert!(
+            en.starts_with("\n\nOn the Speaker's desk, sent by you to another committee"),
+            "{en}"
+        );
+        assert!(
+            en.contains(
+                "\n- seq 100 · request · meant for [feishu-botd::chair] · 2 d 5 h on the desk · \
+                 fix [unsupported message]"
+            ),
+            "{en}"
+        );
+        assert!(en.contains(
+            "seq 111 · request · meant for [feishu-botd::chair] · 2 h 14 min on the desk"
+        ));
+        assert!(
+            en.contains("seq 112 · request · meant for [feishu-botd::chair] · <1 min on the desk")
+        );
+        assert!(en.contains("sending it again does not speed it"), "{en}");
+        let zh = render_desk_parked(&[item(111, Duration::minutes(14))], now, Locale::Zh);
+        assert!(zh.contains("已在办公桌上 14 分钟"), "{zh}");
+        assert!(zh.contains("重发一遍不会更快"), "{zh}");
+    }
+
+    /// 18 messages sat queued for ended sessions for up to 95 hours and no
+    /// sender was told: the receipt now says who will not read it soon.
+    #[test]
+    fn a_receipt_says_which_recipients_have_no_session_open() {
+        use crate::ipc::RecipientNote;
+        use chrono::TimeZone;
+        let note = |who: &str, last_seen, paused| RecipientNote {
+            who: who.parse().unwrap(),
+            away: true,
+            last_seen,
+            paused,
+            chair_now: None,
+        };
+        let seen = chrono::Utc
+            .with_ymd_and_hms(2026, 11, 24, 10, 3, 0)
+            .unwrap();
+        let mut posted = Posted {
+            committee: CommitteeId::new("senate").unwrap(),
+            seq: Seq(1437),
+            to: Vec::new(),
+            thread: None,
+            duplicate: false,
+            intended: None,
+            notes: Vec::new(),
+            unseen_escalation: None,
+        };
+        assert_eq!(recipient_notes(&posted, Locale::En), "");
+        posted.notes = vec![
+            note("senator::reviewer", Some(seen), false),
+            note("/acme::commons::senator::main", None, false),
+            note("senator::docs", Some(seen), true),
+        ];
+        assert_eq!(
+            recipient_notes(&posted, Locale::En),
+            "\nNote: [senator::reviewer] has no session open (last seen 2026-11-24 10:03 UTC); \
+             this waits for it until one opens.\
+             \nNote: [/acme::commons::senator::main] has no session open; this waits for it \
+             until one opens.\
+             \nNote: [senator::docs] is paused; this waits for it until it is resumed."
+        );
+        let zh = recipient_notes(&posted, Locale::Zh);
+        assert!(
+            zh.contains("[senator::reviewer] 没有打开的会话（最后一次联络 2026-11-24 10:03 UTC）")
+        );
+        assert!(zh.contains("[senator::docs] 已暂停"), "{zh}");
+
+        // A thread opened with a committee's chair stays with who chaired
+        // it then (52 answers went to a former chair): the receipt says
+        // who chairs now, whether or not the former chair is still there.
+        let former = |away| RecipientNote {
+            away,
+            chair_now: Some("codex-new".parse().unwrap()),
+            ..note("/acme::commons::senator::claude-old", None, false)
+        };
+        posted.notes = vec![former(false)];
+        assert_eq!(
+            recipient_notes(&posted, Locale::En),
+            "\nNote: [/acme::commons::senator::claude-old] no longer chairs `commons`; \
+             [senator::codex-new] does. This thread stays with \
+             [/acme::commons::senator::claude-old]: to reach the chair, ask `commons::chair` \
+             afresh."
+        );
+        posted.notes = vec![former(true)];
+        let both = recipient_notes(&posted, Locale::En);
+        assert!(both.contains("no longer chairs `commons`"), "{both}");
+        assert!(both.contains("has no session open"), "{both}");
+        let zh = recipient_notes(&posted, Locale::Zh);
+        assert!(zh.contains("已不是 `commons` 的主席"), "{zh}");
+        assert!(zh.contains("`commons::chair`"), "{zh}");
+    }
+
+    /// search and catch_up cut bodies; `thread` is where one is read whole.
+    #[test]
+    fn a_thread_is_read_in_full_and_only_a_very_long_one_is_shortened() {
+        use senate_core::NewEvent;
+        let c = CommitteeId::new("ibot").unwrap();
+        let event = |seq: u64, kind: Kind, mark: &str, len: usize| {
+            let mut e = NewEvent::new(
+                c.clone(),
+                kind,
+                "senator::claude".parse().unwrap(),
+                format!("{mark}{}", "x".repeat(len)),
+            );
+            if seq != 111 {
+                e = e.in_thread(Seq(111));
+            }
+            e.into_event(Seq(seq), chrono::Utc::now())
+        };
+        let reply = ThreadReply {
+            committee: c.clone(),
+            root: Seq(111),
+            events: vec![
+                event(111, Kind::Request, "ROOT", 2_000),
+                event(112, Kind::Answer, "FIRST", 2_000),
+                event(113, Kind::Note, "SECOND", 2_000),
+                event(114, Kind::Answer, "THIRD", 10),
+            ],
+        };
+        let read =
+            |seq: u64, only, budget| render_thread_read(&reply, Seq(seq), only, budget, Locale::En);
+        let has = |text: &str, mark: &str| text.contains(&format!("{mark}{}", "x".repeat(2_000)));
+
+        let whole = read(113, false, THREAD_READ_CHARS);
+        assert!(
+            whole.starts_with("[senate] Thread 111 on ibot: 4 event(s), oldest first."),
+            "{whole}"
+        );
+        assert!(whole.contains("not from your user"));
+        assert!(has(&whole, "ROOT") && has(&whole, "FIRST") && has(&whole, "SECOND"));
+        assert!(!whole.contains("The thread is long"), "{whole}");
+        let (first, third) = (whole.find("FIRST").unwrap(), whole.find("THIRD").unwrap());
+        assert!(first < third, "oldest first");
+
+        // Too long: the older replies are cut; the root and the message
+        // that was asked for never are.
+        let long = read(113, false, 4_500);
+        assert!(has(&long, "ROOT") && has(&long, "SECOND"), "{long}");
+        assert!(!has(&long, "FIRST"), "{long}");
+        assert!(
+            long.contains("1 older replies (seq 112–112) are cut to 300 characters"),
+            "{long}"
+        );
+        assert!(long.contains("`only: true`"), "{long}");
+
+        let one = read(112, true, 100);
+        assert!(
+            one.starts_with("[senate] Seq 112 on ibot (in thread 111), in full."),
+            "{one}"
+        );
+        assert!(has(&one, "FIRST") && !one.contains("ROOT"), "{one}");
+    }
+
+    /// A reply in a cross-committee discussion is stored here with no
+    /// recipient; the receipt read "addressed to ." (commons 311).
+    #[test]
+    fn an_answer_to_another_committee_names_the_seat_it_went_to() {
+        let c = CommitteeId::new("commons").unwrap();
+        let mut posted = Posted {
+            committee: c.clone(),
+            seq: Seq(326),
+            to: Vec::new(),
+            thread: Some(Seq(311)),
+            duplicate: false,
+            intended: Some("/acme::senate::senator::claude".parse().unwrap()),
+            notes: Vec::new(),
+            unseen_escalation: None,
+        };
+        let receipt = |posted: &Posted| {
+            answered(
+                Locale::En,
+                &c,
+                Seq(311),
+                posted.seq,
+                "",
+                &answered_to(posted),
+                false,
+            )
+        };
+        assert_eq!(
+            receipt(&posted),
+            "Answered thread 311 on commons (seq 326), addressed to [/acme::senate::senator::claude]."
+        );
+        // Recipients here are named as before, whatever else the event says.
+        posted.to = vec!["senator::codex".parse().unwrap()];
+        assert_eq!(
+            receipt(&posted),
+            "Answered thread 311 on commons (seq 326), addressed to [senator::codex]."
+        );
+        // And nothing is claimed when there is no one to name.
+        posted.to.clear();
+        posted.intended = None;
+        assert_eq!(
+            receipt(&posted),
+            "Answered thread 311 on commons (seq 326)."
         );
     }
 

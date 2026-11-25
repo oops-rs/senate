@@ -2590,6 +2590,27 @@ pub struct InboxReply {
     /// [`ThreadSummary::waits_on_person`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub seen: Vec<ThreadSeen>,
+    /// What `agents` sent to a seat on another committee that still lies
+    /// on the Speaker's desk, oldest first. An agent's inbox only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub at_desk: Vec<DeskParked>,
+}
+
+/// A message an agent sent to a seat on another committee, put to the
+/// Speaker's desk by the boundary rule and still there: not forwarded,
+/// answered or sent back. The sender's inbox shows it with how long it has
+/// lain, so it is not taken for lost and sent again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeskParked {
+    /// Its seq on the sender's committee: the thread the answer comes in.
+    pub seq: Seq,
+    pub kind: Kind,
+    /// The seat it is meant for.
+    pub intended: senate_core::Locator,
+    /// When it was put to the desk.
+    pub since: DateTime<Utc>,
+    /// Its first line.
+    pub title: String,
 }
 
 impl InboxReply {
@@ -2634,6 +2655,27 @@ pub struct HookReply {
     pub delivered: usize,
 }
 
+/// Something the sender of a message should know about one of its
+/// recipients, said in the receipt: the message was recorded all the same.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipientNote {
+    /// The recipient: a seat here, or a qualified one on another committee.
+    pub who: senate_core::Locator,
+    /// It has no session open: the message waits until one opens.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub away: bool,
+    /// When the server last heard from it, if it is away and ever was here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<DateTime<Utc>>,
+    /// Away because it was paused: it is expected back.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub paused: bool,
+    /// The thread was opened with a committee's chair, and `who` (the chair
+    /// then, whom the thread stays with) no longer is: who chairs it now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chair_now: Option<SenatorName>,
+}
+
 /// An event the daemon appended on the agent's behalf.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Posted {
@@ -2643,6 +2685,15 @@ pub struct Posted {
     #[serde(default)]
     pub thread: Option<Seq>,
     pub duplicate: bool,
+    /// The seat on another committee it went to (a reply in a
+    /// cross-committee discussion): the receipt stored here names no local
+    /// recipient, so `to` is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intended: Option<senate_core::Locator>,
+    /// Recipients who will not read it soon, or are no longer who the
+    /// sender takes them for; empty when there is nothing to say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<RecipientNote>,
     /// The person spoke in a thread and an escalation to them is still in
     /// force that they had not been shown when they spoke (the two crossed):
     /// its seq. Only on `say` and a person's `answer`; the reply left it
