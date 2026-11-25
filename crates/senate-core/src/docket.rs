@@ -371,10 +371,10 @@ pub fn close_docket_items(
             .and_then(Value::as_u64)
             .map(Seq);
         for root in event.thread.into_iter().chain(relayed) {
-            if open
-                .get(&root)
-                .is_some_and(|item| !item.is_hosted_approval(people))
-            {
+            if open.get(&root).is_some_and(|item| {
+                !item.is_hosted_approval(people)
+                    && !(crate::worker::is_question(item) && crate::is_provisional(event))
+            }) {
                 open.remove(&root);
             }
         }

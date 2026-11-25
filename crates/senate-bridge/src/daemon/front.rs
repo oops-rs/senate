@@ -488,9 +488,13 @@ impl Front {
                 committee,
                 seq,
                 to,
+                target_committee,
                 id,
             } => match self.presiding(&session) {
-                Ok((seat, speaker)) => wrap(seat.on_route(&speaker, committee, seq, to, id).await),
+                Ok((seat, speaker)) => wrap(
+                    seat.on_route(&speaker, committee, seq, to, target_committee, id)
+                        .await,
+                ),
                 Err(e) => Reply::err(e),
             },
             Request::Cover {

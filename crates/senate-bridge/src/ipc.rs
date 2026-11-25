@@ -1613,6 +1613,8 @@ pub enum Request {
         seq: Seq,
         to: SenatorName,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_committee: Option<CommitteeId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
     /// Answer a question to an away agent on its behalf, or one for a

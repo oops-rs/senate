@@ -31,6 +31,212 @@ fn codex_pushes(codex: &common::fake_codex::FakeCodex) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn desk_worker_intake_relays_a_guest_answer_after_secret_rotation() {
+    use senate_core::worker::{
+        self, Admin, Identity, Issued, Question, Receipt, Replies, RepliesQuery,
+    };
+    use senate_core::{EventId, meta};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut desk = Desk::new(dir.path(), "alice", Locale::En, ALONE);
+    desk.git_init("senate/refund-v2/alice");
+    desk.start().await;
+    let speaker = desk.inbox("s-claude");
+    desk.session_start_as("s-claude", &speaker, "claude")
+        .await
+        .unwrap();
+    let reviewer = desk.inbox("s-reviewer");
+    desk.session_start_as("s-reviewer", &reviewer, "reviewer")
+        .await
+        .unwrap();
+    let intake: senate_core::CommitteeId = "desk-inbox".parse().unwrap();
+    let target = committee();
+    let top = desk.senate();
+    let local = top.local_api().unwrap();
+    local
+        .append(&NewEvent::new(
+            intake.clone(),
+            Kind::Note,
+            senator("alice"),
+            "Opened desk inbox",
+        ))
+        .await
+        .unwrap();
+    let issued: Issued = desk
+        .ipc::<Option<Issued>>(Request::DeskWorker {
+            command: Admin::Issue {
+                worker: name("commons-dial"),
+                committees: Default::default(),
+                desk_inbox: Some(intake.clone()),
+            },
+        })
+        .await
+        .unwrap();
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = |path: &str| format!("{}{path}", top.url);
+    let identity = |token: &str| http.get(url(worker::IDENTITY_PATH)).bearer_auth(token);
+    let mut question = Question {
+        id: EventId::new(),
+        committee: Some(intake.clone()),
+        desk_intake: false,
+        question: "Which endpoint handles refunds?".into(),
+        caller: Some("Dial Caller".into()),
+    };
+    let submit = |token: &str, question: &Question| {
+        http.post(url(worker::QUESTIONS_PATH))
+            .bearer_auth(token)
+            .json(question)
+    };
+    assert_eq!(
+        submit(&issued.token, &question)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    question.desk_intake = true;
+    assert_eq!(
+        submit(&issued.token, &question)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    question.committee = None;
+    let receipt: Receipt = submit(&issued.token, &question)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(receipt.committee, intake);
+    let docket = local.docket(&intake).await.unwrap();
+    let root = &docket
+        .items
+        .iter()
+        .find(|item| item.event.seq == receipt.seq)
+        .unwrap()
+        .event;
+    assert!(worker::is_intake(root));
+    let guest = root.from.clone();
+    let poll = |token: &str, after| {
+        http.get(url(worker::REPLIES_PATH))
+            .bearer_auth(token)
+            .query(&RepliesQuery {
+                committee: intake.clone(),
+                root: receipt.seq,
+                after,
+            })
+    };
+
+    local
+        .append(
+            &NewEvent::new(intake.clone(), Kind::Answer, Address::Speaker, "Checking")
+                .with_meta(meta::ACTED_BY, serde_json::json!("claude"))
+                .with_meta(meta::PROVISIONAL, serde_json::json!(true))
+                .to(guest.clone())
+                .in_thread(receipt.seq),
+        )
+        .await
+        .unwrap();
+    let pending: Replies = poll(&issued.token, receipt.seq)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pending.events.len(), 1);
+    assert!(senate_core::is_provisional(&pending.events[0]));
+
+    let rotated: Issued = desk
+        .ipc::<Option<Issued>>(Request::DeskWorker {
+            command: Admin::Rotate {
+                id: issued.id.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(rotated.id, issued.id);
+    assert_eq!(identity(&issued.token).send().await.unwrap().status(), 401);
+    let stable: Identity = identity(&rotated.token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stable.id, issued.id);
+    assert_eq!(stable.desk_inbox.as_ref(), Some(&intake));
+    assert!(stable.committees.is_empty());
+    let retried: Receipt = submit(&rotated.token, &question)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(retried.seq, receipt.seq);
+
+    let routed: Posted = desk
+        .ipc(Request::Route {
+            session: Laptop::session("s-claude"),
+            committee: intake.clone(),
+            seq: receipt.seq,
+            to: path("reviewer"),
+            target_committee: Some(target.clone()),
+            id: None,
+        })
+        .await;
+    assert_eq!(routed.committee, target);
+    assert!(local.docket(&intake).await.unwrap().items.is_empty());
+    let empty: Replies = poll(&rotated.token, pending.next)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(empty.events.is_empty());
+    assert!(
+        empty.next > pending.next,
+        "scanned the non-answer forwarding receipt"
+    );
+
+    desk.answer("s-reviewer", routed.seq, "Refunds uses /refund.")
+        .await;
+    let answer: Replies = poll(&rotated.token, empty.next)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let [answer] = answer.events.as_slice() else {
+        panic!("expected one relayed answer");
+    };
+    assert_eq!(answer.body, "Refunds uses /refund.");
+    assert_eq!(answer.thread, Some(receipt.seq));
+    assert_eq!(answer.to, [guest]);
+    assert!(!senate_core::is_provisional(answer));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
     let dir = tempfile::tempdir().unwrap();
     let mut desk = Desk::new(dir.path(), "alice", Locale::En, ALONE);
@@ -250,6 +456,7 @@ async fn one_person_chains_claude_code_and_codex_under_a_presiding_agent() {
             committee: committee(),
             seq: away.seq,
             to: path("claude"),
+            target_committee: None,
             id: None,
         })
         .await;
@@ -406,6 +613,7 @@ async fn the_person_asks_whichever_agent_from_the_command_line_and_waits_for_the
             committee: committee(),
             seq: sent.posted.seq,
             to: path("codex"),
+            target_committee: None,
             id: None,
         })
         .await;

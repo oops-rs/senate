@@ -98,6 +98,7 @@ impl Shared {
         committee: CommitteeId,
         seq: Seq,
         to: SenatorName,
+        target_committee: Option<CommitteeId>,
         id: Option<EventId>,
     ) -> Result<Posted, IpcError> {
         let (item, _) = self.docket_item(&committee, seq).await?;
@@ -129,6 +130,20 @@ impl Shared {
             _ => {}
         }
         let root = item.event;
+        if target_committee
+            .as_ref()
+            .is_some_and(|target| target != &committee)
+            && !senate_core::worker::is_intake(&root)
+        {
+            return Err(IpcError::bad_request(
+                "Only a desk-worker intake question can be routed to another committee",
+            ));
+        }
+        if senate_core::worker::is_question(&root) {
+            return self
+                .route_worker_question(speaker, root, target_committee.unwrap_or(committee), to)
+                .await;
+        }
         let behalf = root
             .on_behalf_of
             .or_else(|| (root.from != Address::Committee).then_some(root.from));
@@ -144,6 +159,79 @@ impl Shared {
             event = event.with_id(id);
         }
         self.post(event).await
+    }
+
+    /// Forward the guest question with an explicit return address to its original thread.
+    async fn route_worker_question(
+        &self,
+        speaker: &SenatorName,
+        root: Event,
+        target: CommitteeId,
+        to: SenatorName,
+    ) -> Result<Posted, IpcError> {
+        let destination = self.locator_of(&target, Address::senator(&to));
+        let senate_core::api::Resolved::Here {
+            committee, address, ..
+        } = self
+            .api
+            .resolve(&destination, Some(&root.committee))
+            .await
+            .map_err(server_error)?
+        else {
+            return Err(IpcError::bad_request(
+                "Name an agent on the destination committee",
+            ));
+        };
+        let Some(agent) = self
+            .people()
+            .as_agent(&address)
+            .filter(|agent| *agent != speaker)
+        else {
+            return Err(IpcError::bad_request(
+                "Name an agent on the destination committee",
+            ));
+        };
+        if committee != target || self.seat_is_unseated(&target, agent).await? {
+            return Err(IpcError::bad_request(
+                "Name an agent on the destination committee",
+            ));
+        }
+        let ts = root.ts.timestamp_millis().cast_unsigned();
+        let origin = senate_core::Origin {
+            locator: self.locator_of(&root.committee, root.from.clone()),
+            thread: root.seq,
+        };
+        let acted_by = serde_json::json!(speaker.to_string());
+        let mut forwarded = NewEvent::new(committee, Kind::Question, Address::Speaker, root.body)
+            .to(address)
+            .on_behalf_of(root.from.clone())
+            .with_id(EventId::derived(
+                ts,
+                &format!("desk-worker-route:{}:{destination}", root.id),
+            ))
+            .with_meta(meta::ACTED_BY, acted_by.clone())
+            .with_meta(meta::ORIGIN, origin.value());
+        forwarded.refs = root.refs;
+        let posted = self.post(forwarded).await?;
+        let destination = destination.to_string();
+        self.post(
+            NewEvent::new(
+                root.committee,
+                Kind::Note,
+                Address::Speaker,
+                format!("Routed to {destination} #{}.", posted.seq),
+            )
+            .to(root.from)
+            .in_thread(root.seq)
+            .with_id(EventId::derived(
+                ts,
+                &format!("desk-worker-route-receipt:{}:{destination}", root.id),
+            ))
+            .with_meta(meta::ACTED_BY, acted_by)
+            .with_meta(meta::FORWARDED_TO, serde_json::json!(destination)),
+        )
+        .await?;
+        Ok(posted)
     }
 
     /// Answer a question to an away agent on that agent's behalf, from its

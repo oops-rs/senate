@@ -1,26 +1,33 @@
 # Machine desk-worker credentials
 
 The machine Senate has a separate loopback HTTP API for external desk intake.
-A grant names a worker and an explicit allowlist of existing committees. It
-never identifies a person or a senator. The general HTTP API refuses these
+A grant names a worker and authorizes direct submissions to an explicit
+committee allowlist, intake through one desk inbox, or both. It never
+identifies a person or a senator. The general HTTP API refuses these
 credentials. Standalone and team servers retain their configured credentials.
 
-## Issue and revoke
+## Issue, rotate and revoke
 
-Run these from an authorized terminal on the hosting Mac. Both require the
+Run these from an authorized terminal on the hosting Mac. Each requires the
 machine's sensitive-request confirmation.
 
 ```sh
-senate desk-worker issue --worker commons-dial --committee release --committee planning
+senate desk-worker issue --worker commons-dial --committee release --committee planning --desk-inbox intake
+senate desk-worker rotate <credential-id>
 senate desk-worker revoke <credential-id>
 ```
 
-Issue returns JSON with `id` and `token`. Save only the token in a private file
-owned by the consumer and keep the public ID for revocation. Use a new
-0600 file when rotating. Senate stores the digest and grant, and does not
-write the bearer into its home. Revocation blocks subsequent requests on
-that grant. Issue a separate grant for each worker integration. A stolen
-worker credential can submit questions and read replies within its grant.
+The named committees and inbox must already exist. Omit `--committee` for
+intake-only access, or omit `--desk-inbox` for direct submissions only.
+Issue and rotate return JSON with `id` and `token`. Save the token in a
+consumer-owned 0600 file and retain the public ID for rotation and revocation.
+Rotation replaces the secret immediately and preserves the ID, permissions,
+pending roots, and poll cursors. Swap the consumer's secret file before
+resuming its requests. Revoke-and-reissue starts a new identity, even under
+the same label. Drain open roots before that hard cut if their answers are
+still needed. Senate stores the digest and grant and keeps the bearer out of
+its home. A stolen worker credential can submit questions and read replies
+within its grant.
 The grant registry relies on the integrity of the Senate home. A process
 that can modify the server database or the installed daemon can alter its
 access policy.
@@ -34,8 +41,8 @@ saved polling state.
 
 | Method and path | Request | Response |
 | --- | --- | --- |
-| `GET /v1/desk-worker/identity` | No body | `worker`, `senate`, `epoch`, `committees`, and nullable `office` |
-| `POST /v1/desk-worker/questions` | `id` (an EventId), `committee`, `question`, optional `caller` | `id`, `seq`, `worker`, and sanitized nullable `caller` |
+| `GET /v1/desk-worker/identity` | No body | `id`, `worker`, `senate`, `epoch`, `committees`, nullable `desk_inbox` and `office` |
+| `POST /v1/desk-worker/questions` | `id` (an EventId), `question`, optional `caller`, exactly one of `committee` or `"desk_intake": true` | `id`, `committee`, `seq`, `worker`, and sanitized nullable `caller` |
 | `GET /v1/desk-worker/replies` | Query `committee`, `root` and `after` | `events` and the next cursor `next` |
 
 IDs are ULID strings. Sequences and cursors are unsigned integers. A non-null
@@ -43,11 +50,27 @@ IDs are ULID strings. Sequences and cursors are unsigned integers. A non-null
 reply is a Senate event envelope with `id`, `seq`, `kind`, `thread`, `from`,
 and `body` among its fields.
 
-Choose an ID once for each question. Repeating the same request returns the
-same receipt. A conflicting reuse returns 409. Start a reply poll with
-`root=seq&after=seq`, then advance to `next`, even on an empty page. The
-server scans at most 200 events per call and returns only desk answers in
-that credential's root thread. Other workers' roots are unavailable.
+Key saved tasks by Senate, epoch and the worker ID from identity. Choose a
+separate ID once per question. Repeating the same request returns the same
+receipt. A conflicting reuse returns 409.
+
+If the caller names a committee, submit `committee`. For a question with
+no committee, send `"desk_intake": true` and omit `committee`. Senate puts
+it in the grant's configured inbox and marks it internally for the
+Speaker's desk. The inbox grants no direct-submission rights by itself.
+The desk can answer in place or use `speaker_route` with `target_committee`
+to send it to an agent in another committee of this Senate. The final answer
+is relayed into the original inbox thread.
+
+Start a reply poll with the receipt's `committee` and `root=seq&after=seq`.
+Send the returned `next` as the next `after`, including when `events` is
+empty. `next` advances past scanned events that are unrelated to the root
+or are not answers. It stays at the current position if nothing was
+scanned. The server scans at most 200 events per call and returns only
+desk answers in that credential's root thread. An answer with
+`meta.provisional: true` is provisional. Keep polling for a final answer
+with that flag absent or false. Provisional answers on a routed copy stay
+in the destination committee. Other workers' roots are unavailable.
 
 Senate assigns a distinct guest worker as the author, `Question` as the
 kind, and the Speaker as the sole recipient. Caller text is an untrusted
@@ -56,9 +79,9 @@ desk and thread is prefixed with “Asked through <worker> on behalf of
 <caller>” when supplied. The label carries no human authority. Observe
 continues to exclude guest envelopes.
 
-Missing, revoked, or invalid worker credentials return 401. A committee
-outside the allowlist returns 403. A missing or other worker's thread
-returns 404. Invalid fields, empty questions and oversized questions
+Missing, revoked, or invalid worker credentials return 401. A request
+outside the grant's direct or intake scope returns 403. A missing or other
+worker's thread returns 404. Invalid fields, empty questions and oversized questions
 return a client error. Clients cannot choose author, kind, recipient,
 thread, or metadata. Worker credentials cannot use ordinary event append,
 archive, role, seat, alias, secretary, approval, or grant routes.
@@ -68,18 +91,21 @@ archive, role, seat, alias, secretary, approval, or grant routes.
 1. Add the scoped adapter. Keep the existing person-token adapter for
    explicitly configured standalone or team servers.
 2. Resolve the Dial caller before submission and pass their label as
-   attribution. Use the typed receipt and the worker-owned reply poll.
-   Retain the Senate-name, epoch, and idempotency checks.
+   attribution. For committee-free tasks, use desk intake and save the
+   receipt's committee as the poll location. Retain the Senate-name, epoch,
+   worker identity, and idempotency checks. Persist each returned cursor.
 3. Drain questions created with the old credential. The worker poll has
    no authority over their person-authored roots.
 4. Stop the old worker. Stage the scoped adapter configuration with a
    new Commons-owned secret-file path and the machine URL. Leave the
    worker stopped until that file is populated. This lets the installer
    confirm Commons no longer references the legacy credential.
-5. Install the machine build with the new API. Issue a scoped credential,
-   save it in the staged secret file, then start the worker.
-6. Verify an allowed question and its reply. Verify denial outside the
-   allowlist, inaccessible other-worker roots, and revocation.
+5. Install the machine build with the new API. Issue a scoped credential
+   with the desired allowlist and the Commons desk inbox, save it in the
+   staged secret file, then start the worker.
+6. Verify an allowed question and an inbox question routed to another
+   committee, including their final replies. Verify scope denial,
+   inaccessible other-worker roots, and rotation.
 
 A known local Commons Dial Speaker config that still points at the legacy
 machine person credential blocks install and startup. Coordinate the

@@ -2019,6 +2019,7 @@ async fn only_the_presiding_session_is_given_the_presiding_tools() {
             committee: committee(),
             seq: Seq(1),
             to: path("claude"),
+            target_committee: None,
             id: None,
         },
         Duration::from_secs(1),
