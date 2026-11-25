@@ -4,8 +4,8 @@
 use super::*;
 use crate::host;
 use crate::host_approval::{
-    ApprovalNotice, ClaudeCandidate, CodexApprovalOutcome, CodexApprovalSignal, HostApprovalState,
-    PromptDecision, observed_at, tool_label,
+    ApprovalNotice, ClaudeCandidate, CloseCause, CodexApprovalOutcome, CodexApprovalSignal,
+    HostApprovalState, PromptDecision, observed_at, tool_label,
 };
 use crate::ipc::{ClaudeApprovalSignal, HostedPrompt};
 use senate_core::StatusState;
@@ -149,7 +149,7 @@ impl Shared {
                         if completed {
                             state.claude = None;
                         }
-                        close_notices(state, |notice| {
+                        close_notices(state, CloseCause::ToolRan, |notice| {
                             notice.prompt == fingerprint && notice.at <= at
                         }) || completed
                     }
@@ -183,11 +183,15 @@ impl Shared {
                             return false;
                         };
                         notice.answer = Some(answer);
-                        close_notices(state, applies);
+                        close_notices(state, CloseCause::Answered, applies);
                         true
                     }
-                    CodexApprovalOutcome::ResolvedElsewhere => close_notices(state, applies),
-                    CodexApprovalOutcome::Dismissed => dismiss_notices(state, applies),
+                    CodexApprovalOutcome::ResolvedElsewhere => {
+                        close_notices(state, CloseCause::Resolved, applies)
+                    }
+                    CodexApprovalOutcome::Dismissed => {
+                        dismiss_notices(state, CloseCause::PromptGone, applies)
+                    }
                 }
             })?;
         }
@@ -272,7 +276,7 @@ impl Shared {
                 });
                 recorded = true;
             }
-            close_notices(state, applies) || recorded || forgotten
+            close_notices(state, CloseCause::Answered, applies) || recorded || forgotten
         })
     }
 
@@ -289,7 +293,9 @@ impl Shared {
                 return false;
             }
             let candidate = state.claude.take_if(|c| c.at <= through).is_some();
-            dismiss_notices(state, |n| !n.screen && n.at <= through) || candidate
+            dismiss_notices(state, CloseCause::PromptGone, |n| {
+                !n.screen && n.at <= through
+            }) || candidate
         })
     }
 
@@ -311,7 +317,10 @@ impl Shared {
             let candidate = state.claude.take_if(|c| c.at <= at).is_some();
             // Fence the old screen marker in the same state change that
             // makes these notices ineligible for the Sessions projection.
-            dismiss_notices(state, |n| n.at <= at) || candidate || contextualized || advanced
+            dismiss_notices(state, CloseCause::TurnEnded, |n| n.at <= at)
+                || candidate
+                || contextualized
+                || advanced
         })
     }
 
@@ -381,7 +390,10 @@ impl Shared {
                 let had_candidate = state.claude.take().is_some();
                 let had_stop = std::mem::take(&mut state.claude_stop_at) != 0;
                 let had_request = std::mem::take(&mut state.claude_request_at) != 0;
-                dismiss_notices(state, |_| true) || had_candidate || had_stop || had_request
+                dismiss_notices(state, CloseCause::SessionEnded, |_| true)
+                    || had_candidate
+                    || had_stop
+                    || had_request
             })?;
             if check_claude && current.as_deref() == Some(native.as_str()) {
                 let paths = &paths;
@@ -461,9 +473,13 @@ impl Shared {
                 let unattended = |n: &ApprovalNotice| {
                     viewer.as_ref().is_some_and(|viewer| viewer.input_at < n.at)
                 };
-                let dismissed =
-                    dismiss_notices(state, |n| screen_ended(n) && !approval && unattended(n));
-                let mut changed = close_notices(state, screen_ended) || dismissed;
+                let dismissed = dismiss_notices(state, CloseCause::PromptGone, |n| {
+                    screen_ended(n) && !approval && unattended(n)
+                });
+                // What is left ended with someone at the terminal, or is
+                // Senate's own approval notice to answer now.
+                let mut changed =
+                    close_notices(state, CloseCause::Typed, screen_ended) || dismissed;
                 if approval {
                     return changed;
                 }
@@ -797,17 +813,11 @@ impl Shared {
                 })?;
             }
             (Some(seq), Some(id)) => {
-                let mut status = StatusPayload::new(StatusState::Archived);
-                if notice.dismissed && notice.answer.is_none() {
-                    status.reason = Some(
-                        self.locale
-                            .pick(
-                                "终端提示已消失，未收到答复。",
-                                "The terminal prompt went away unanswered.",
-                            )
-                            .into(),
-                    );
-                }
+                // A bare archive: it is all the server takes for a notice,
+                // and a status that carried its reason was refused, so a
+                // prompt that went away unanswered was never closed. Why
+                // the wait ended is written beside the status instead.
+                let status = StatusPayload::new(StatusState::Archived);
                 let mut event = Self::status_event(
                     notice.committee.clone(),
                     sender,
@@ -816,8 +826,15 @@ impl Shared {
                     Some(id.clone()),
                 )
                 .with_meta(meta::HOSTED_APPROVAL, serde_json::json!(notice.id));
-                if let Some(reason) = status.reason {
-                    event.body = reason;
+                // A notice closed before causes were kept says only
+                // whether it went unanswered.
+                let cause = notice.cause.or_else(|| {
+                    (notice.dismissed && notice.answer.is_none()).then_some(CloseCause::PromptGone)
+                });
+                if let Some(cause) = cause {
+                    event.body = cause.words(self.locale).into();
+                    event =
+                        event.with_meta(meta::APPROVAL_CLOSED, serde_json::json!(cause.as_str()));
                 }
                 if notice.relay_thread.is_some() {
                     if let Some(answer) = &notice.answer {
@@ -908,7 +925,7 @@ fn set_context(state: &mut HostApprovalState, session_id: &str) -> bool {
     state.claude = None;
     state.claude_stop_at = 0;
     state.claude_request_at = 0;
-    dismiss_notices(state, |_| true);
+    dismiss_notices(state, CloseCause::ConversationChanged, |_| true);
     true
 }
 
@@ -920,7 +937,7 @@ fn observe_input(state: &mut HostApprovalState, at: u64) -> bool {
     if candidate {
         state.claude = None;
     }
-    close_notices(state, |notice| {
+    close_notices(state, CloseCause::Typed, |notice| {
         // A relayed Codex wait belongs to the task's requester. Typing
         // shows the terminal is attended but says nothing about its native
         // approval outcome.
@@ -948,6 +965,7 @@ fn typing_keeps_a_relayed_codex_wait_open_for_its_native_outcome() -> anyhow::Re
         archive: None,
         answer: None,
         dismissed: false,
+        cause: None,
         append_attempted: true,
         failures: 0,
         screen: false,
@@ -975,7 +993,9 @@ fn typing_keeps_a_relayed_codex_wait_open_for_its_native_outcome() -> anyhow::Re
     assert!(state.notices[0].archive.is_some());
     assert!(state.notices[1].archive.is_none());
     assert!(state.notices[2].archive.is_none());
-    assert!(close_notices(&mut state, |notice| notice.prompt == "relayed"));
+    assert!(close_notices(&mut state, CloseCause::Resolved, |notice| {
+        notice.prompt == "relayed"
+    }));
     assert!(state.notices[1].archive.is_some());
     Ok(())
 }
@@ -1013,6 +1033,7 @@ fn open_notice(
         archive: None,
         answer: None,
         dismissed: false,
+        cause: None,
         append_attempted: false,
         failures: 0,
         screen: false,
@@ -1020,20 +1041,28 @@ fn open_notice(
     true
 }
 
-fn close_notices(state: &mut HostApprovalState, applies: impl Fn(&ApprovalNotice) -> bool) -> bool {
-    settle_notices(state, false, applies)
-}
-
-fn dismiss_notices(
+/// Close the notices `applies` to: something settled the wait, `cause`.
+fn close_notices(
     state: &mut HostApprovalState,
+    cause: CloseCause,
     applies: impl Fn(&ApprovalNotice) -> bool,
 ) -> bool {
-    settle_notices(state, true, applies)
+    settle_notices(state, false, cause, applies)
+}
+
+/// Close the notices `applies` to as gone with no answer, for `cause`.
+fn dismiss_notices(
+    state: &mut HostApprovalState,
+    cause: CloseCause,
+    applies: impl Fn(&ApprovalNotice) -> bool,
+) -> bool {
+    settle_notices(state, true, cause, applies)
 }
 
 fn settle_notices(
     state: &mut HostApprovalState,
     dismissed: bool,
+    cause: CloseCause,
     applies: impl Fn(&ApprovalNotice) -> bool,
 ) -> bool {
     let mut changed = false;
@@ -1041,6 +1070,7 @@ fn settle_notices(
         if notice.archive.is_none() && applies(notice) {
             notice.archive = Some(EventId::new());
             notice.dismissed = dismissed;
+            notice.cause = Some(cause);
             notice.failures = 0;
             changed = true;
         }
