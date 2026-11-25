@@ -1796,6 +1796,29 @@ async fn each_agent_has_its_own_inbox_and_read_position() {
         .call("post", json!({"body": "from reviewer"}))
         .await;
     assert_eq!(h.server.last_event("refund-v2").from, senator("reviewer"));
+
+    // One note tells several members at once: a chair's rule for everyone
+    // needs one call, not one per member.
+    let (err, text) = claude_mcp
+        .call(
+            "post",
+            json!({"to": "reviewer, senator::tester", "body": "build in your own worktree"}),
+        )
+        .await;
+    assert!(!err, "{text}");
+    assert!(
+        text.starts_with("Told [senator::reviewer], [senator::tester] on refund-v2"),
+        "{text}"
+    );
+    assert_eq!(
+        h.server.last_event("refund-v2").to,
+        [senator("reviewer"), senator("tester")]
+    );
+    let (_, text) = reviewer_mcp.call("catch_up", json!({})).await;
+    assert!(
+        text.contains("build in your own worktree") && text.contains("1 addressed to you"),
+        "{text}"
+    );
     h.stop().await;
 }
 

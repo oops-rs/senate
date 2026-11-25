@@ -274,9 +274,12 @@ const POST: &str = "Leave a note on a Senate committee for the team: a status up
 about a change others depend on, a finding worth keeping. It is addressed to no one: it is \
 recorded in the shared committee log, where every teammate's agent reads it through catch_up and \
 search, and nobody is interrupted. To get an answer from someone use ask instead; to settle \
-something for the team use propose_decision. `to` (optional) tells someone instead: an \
-address on this committee (`codex`, `senator::alice`, `chair`, `speaker`) or one qualified name \
-(`ledger::codex`, `/acme::ledger::codex`, `ledger::speaker`, `ledger::chair`). A note to another \
+something for the team use propose_decision. `to` (optional) tells someone instead, and the \
+note is pushed into their session: one address on this committee or several, comma-separated \
+(`codex`, `senator::alice, reviewer`, `chair`, `speaker`), or one qualified name \
+(`ledger::codex`, `/acme::ledger::codex`, `ledger::speaker`, `ledger::chair`). To give \
+every member a rule, name them all in one `to`: a note without `to` reaches only those who \
+look. A note to another \
 committee's chair in this Senate reaches that chair directly; other crossings go to the Speaker's desk. `body`: self-contained; readers have none of your \
 context. `committee`: defaults to this session's committee.";
 
@@ -429,8 +432,9 @@ pub struct PostParams {
     /// Committee id; defaults to this session's committee.
     #[serde(default)]
     pub committee: Option<String>,
-    /// Tell someone instead of the whole committee: an address here, or
-    /// one qualified name (`ledger::codex`, `ledger::speaker`).
+    /// Tell someone instead of the whole committee: one address here or
+    /// several, comma-separated, or one qualified name (`ledger::codex`,
+    /// `ledger::speaker`).
     #[serde(default)]
     pub to: Option<String>,
 }
