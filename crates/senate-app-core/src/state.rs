@@ -89,6 +89,7 @@ pub struct HostedSession {
     /// Recorded paused (`senate session pause`): resume brings it back
     /// where it was.
     pub paused: bool,
+    pub host_warning: Option<String>,
 }
 
 impl From<&SessionRow> for HostedSession {
@@ -112,6 +113,10 @@ impl From<&SessionRow> for HostedSession {
             prompt_answerable: r.prompt.as_ref().is_some_and(|p| !p.screen)
                 && matches!(r.runtime, Runtime::Claude | Runtime::Codex),
             paused: r.paused,
+            host_warning: r
+                .host_health
+                .as_deref()
+                .map(senate_bridge::ipc::HostHealth::notice),
         }
     }
 }

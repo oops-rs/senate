@@ -509,7 +509,9 @@ impl Shared {
         }
         // Stopped on purpose: not to be resumed, nor started again unasked.
         self.store.clear_paused(primary).map_err(internal)?;
-        let reply = self.stop_audited(&auth, &target, force, false).await?;
+        let reply = self
+            .stop_audited(&auth, &target, force, false, false)
+            .await?;
         self.store
             .mark_stopped(primary, chrono::Utc::now())
             .map_err(internal)?;
@@ -524,6 +526,7 @@ impl Shared {
         target: &super::hosts::StopTarget,
         force: bool,
         paused: bool,
+        idle_only: bool,
     ) -> Result<StopReply, IpcError> {
         let primary = &target.senator;
         let actor = auth.actor();
@@ -566,7 +569,9 @@ impl Shared {
             format!("{actor} requested a {verb} of the hosted terminal for {who} in committee `{committee}`. The host ended with the stop result unconfirmed."),
         );
         let _audit = self.track_stop_notice(event.id.clone(), primary);
-        let (session_id, recorded) = self.stop_host(target, force, unconfirmed).await?;
+        let (session_id, recorded) = self
+            .stop_host(target, force, unconfirmed, idle_only)
+            .await?;
         if !recorded {
             return Err(IpcError::internal(format!(
                 "the terminal for {who} stopped, but the daemon did not acknowledge its session end",

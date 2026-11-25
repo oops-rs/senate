@@ -484,6 +484,46 @@ fn session_checks(sessions: &SessionsReply, l: Locale) -> Vec<Check> {
             format!("{running} hosted sessions running, {stopped} stopped"),
         ),
     )];
+    let outdated = sessions
+        .rows
+        .iter()
+        .filter(|row| {
+            row.host_health
+                .as_ref()
+                .is_some_and(|health| health.outdated)
+        })
+        .count();
+    if outdated > 0 {
+        let versions: std::collections::BTreeSet<_> = sessions
+            .rows
+            .iter()
+            .filter_map(|row| {
+                row.host_health
+                    .as_deref()
+                    .filter(|health| health.outdated)
+                    .map(|health| health.started_by.as_str())
+            })
+            .collect();
+        checks.push(Check::warn(
+            "sessions.outdated_hosts",
+            format!(
+                "{outdated} running host(s) need restart to be protected (started by {})",
+                versions.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+            Some("senate session restart --all-outdated"),
+        ));
+    }
+    for row in sessions.rows.iter().filter(|row| {
+        row.host_health
+            .as_ref()
+            .is_some_and(|health| health.daemon_unverified)
+    }) {
+        checks.push(Check::warn(
+            format!("sessions.daemon_identity.{}", row.session_id),
+            format!("{} has not verified the current daemon", row.label()),
+            Some("Check the daemon installation and save work before restarting the host"),
+        ));
+    }
     if !sessions.orphans.is_empty() {
         checks.push(Check::warn(
             "sessions.orphans",

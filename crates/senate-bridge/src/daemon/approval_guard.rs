@@ -56,11 +56,26 @@ pub(super) fn advisory_notice(locale: Locale) -> Option<&'static str> {
             "The person-only guard is advisory on this machine. A hosted agent that detaches can pass. Run senate setup guard to enforce it.",
         ))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        (!signed_local_daemon()).then(|| {
+            locale.pick(
+                "此未签名守护进程的终端来访身份仅为提示。",
+                "Hosted terminal authority is advisory on this unsigned macOS daemon.",
+            )
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = locale;
         None
     }
+}
+
+#[cfg(target_os = "macos")]
+fn signed_local_daemon() -> bool {
+    static SIGNED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SIGNED.get_or_init(|| crate::app_confirmation::macos::signed_daemon(std::process::id()))
 }
 
 /// The requests that answer a permission prompt.
@@ -131,6 +146,7 @@ pub(crate) fn person_only(request: &Request) -> Option<&'static str> {
         Request::NativeAuthorityCandidate { .. } | Request::AuthorizeNativeAuthority { .. } => {
             "Authorize a native seat from your own terminal or the Senate app"
         }
+        Request::RestartHost { .. } => "Restart hosted sessions from your own terminal",
         Request::RebindHost { .. } => "Run `senate session rebind` from your own terminal",
         Request::Timeline { .. }
         | Request::SessionHistory { .. }
@@ -167,6 +183,22 @@ pub(crate) fn person_only(request: &Request) -> Option<&'static str> {
         }
         _ => return None,
     })
+}
+
+/// Host upgrades and viewers still use the operator's available proof
+/// when this build has no device-owner authentication path.
+pub(super) fn advisory_host_action(request: &Request) -> bool {
+    if !matches!(
+        request,
+        Request::RestartHost { .. } | Request::OpenViewer { .. }
+    ) {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    if signed_local_daemon() {
+        return false;
+    }
+    true
 }
 
 /// Operations documented as operator-only which previously relied on their CLI
@@ -679,16 +711,17 @@ impl Front {
     #[cfg(not(target_os = "macos"))]
     pub(super) async fn app_confirmed_dispatch<R: tokio::io::AsyncBufRead + Unpin>(
         self: &Arc<Self>,
-        PresencePeer {
-            operator: _,
-            session: _,
-            signed_app: _,
-            remote_operator: _,
-        }: PresencePeer,
+        peer: PresencePeer,
         _request: Request,
         _reader: &mut R,
         _shutdown: watch::Receiver<bool>,
     ) -> Reply {
+        let _ = (
+            peer.operator,
+            peer.session,
+            peer.signed_app,
+            peer.remote_operator,
+        );
         Reply::err(refusal(APP_CONFIRMATION))
     }
 

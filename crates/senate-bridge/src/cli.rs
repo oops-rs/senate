@@ -985,6 +985,21 @@ enum SessionCmd {
         #[arg(long, value_name = "SECS")]
         timeout: Option<u64>,
     },
+    /// Checkpoint, stop, and restart the same hosted sessions.
+    Restart {
+        /// Running sessions by name, alias, or role.
+        #[arg(required_unless_present = "all_outdated", add = ArgValueCandidates::new(completion::sessions))]
+        names: Vec<String>,
+        /// Select every running host that needs a protocol upgrade.
+        #[arg(long, conflicts_with = "names")]
+        all_outdated: bool,
+        /// Restart despite recent typing or an active or unknown turn.
+        #[arg(long)]
+        force: bool,
+        /// Show the selection and activity checks without restarting.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Resume paused hosted sessions in the same conversation.
     ///
     /// Each session recorded paused is restored as `session restore` does,
@@ -2181,6 +2196,91 @@ async fn resume_sessions(
         }
     }
     anyhow::ensure!(failed == 0, "{failed} session(s) could not be resumed");
+    Ok(())
+}
+
+async fn restart_hosts(
+    paths: &Paths,
+    names: Vec<String>,
+    all_outdated: bool,
+    force: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    use crate::sessions::{StopSelector, TYPED_WINDOW_SECS, select_for_stop};
+    let sessions: ipc::SessionsReply = daemon_call(paths, &Request::Sessions).await?;
+    let rows: Vec<_> = if all_outdated {
+        sessions
+            .rows
+            .iter()
+            .filter(|row| {
+                row.is_running()
+                    && row
+                        .host_health
+                        .as_ref()
+                        .is_some_and(|health| health.outdated)
+            })
+            .collect()
+    } else {
+        select_for_stop(&sessions.rows, &StopSelector::Named(names), true)
+            .map_err(anyhow::Error::msg)?
+            .stop
+    };
+    if rows.is_empty() {
+        println!("No running outdated hosts.");
+    }
+    let mut failures = 0;
+    for row in rows {
+        let label = row.label();
+        let busy = row.working
+            || row
+                .typed_secs_ago
+                .is_some_and(|age| age < TYPED_WINDOW_SECS);
+        if busy && !force {
+            eprintln!("{label}: recently typed into or working. Use --force to restart.");
+            failures += 1;
+            continue;
+        }
+        if dry_run {
+            println!("{label}: would request a checkpoint and restart the terminal");
+            continue;
+        }
+        let request = Request::RestartHost {
+            senator: AliasName::bare(row.primary.clone()),
+            host: row.host_id.clone(),
+            force,
+        };
+        match ipc::request::<ipc::RestartHostReply>(
+            &paths.socket(),
+            &request,
+            Duration::from_secs(1),
+            REPLACE_TIMEOUT + crate::app_confirmation::LIFETIME,
+        )
+        .await
+        {
+            Ok(reply) => {
+                let checkpoint = reply.checkpoint.map_or_else(
+                    || "no new checkpoint".into(),
+                    |seq| format!("checkpoint {seq}"),
+                );
+                let conversation = if reply.started_empty {
+                    "no saved Claude transcript; started empty under the same ID"
+                } else {
+                    "restored saved runtime conversation"
+                };
+                println!(
+                    "{label}: restarted same seat ({checkpoint}; {conversation}). Unsent drafts, terminal screen, pending dialogs and in-flight turns do not carry over."
+                );
+            }
+            Err(error) => {
+                eprintln!("{label}: {error}");
+                failures += 1;
+            }
+        }
+    }
+    anyhow::ensure!(
+        failures == 0,
+        "{failures} session(s) could not be restarted"
+    );
     Ok(())
 }
 
@@ -3408,6 +3508,31 @@ fn run_service(command: ServiceCmd, output: Output) -> anyhow::Result<()> {
             if let Some(distro) = crate::wsl::distro() {
                 print!("{}", crate::wsl::notes(&distro, locale));
             }
+            if yes {
+                let paths = Paths::new(&spec.senate_home);
+                match runtime(false)?.block_on(daemon_call::<ipc::SessionsReply>(
+                    &paths,
+                    &Request::Sessions,
+                )) {
+                    Ok(sessions) => {
+                        let outdated = sessions
+                            .rows
+                            .iter()
+                            .filter(|row| {
+                                row.host_health
+                                    .as_ref()
+                                    .is_some_and(|health| health.outdated)
+                            })
+                            .count();
+                        println!(
+                            "{outdated} running host(s) need restart to be protected. Review with senate session restart --all-outdated --dry-run."
+                        );
+                    }
+                    Err(error) => eprintln!(
+                        "Could not check the host protocol after install: {error}. Run senate setup doctor."
+                    ),
+                }
+            }
         }
         ServiceCmd::Uninstall { yes } => {
             let plan = service::plan_uninstall(&spec);
@@ -4364,6 +4489,15 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             runtime(false)?.block_on(pause_sessions(
                 &paths, &selector, force, dry_run, timeout, locale,
             ))
+        }
+        SessionCmd::Restart {
+            names,
+            all_outdated,
+            force,
+            dry_run,
+        } => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(restart_hosts(&paths, names, all_outdated, force, dry_run))
         }
         SessionCmd::Authorize { session_id } => {
             use std::io::IsTerminal as _;

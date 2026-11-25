@@ -90,6 +90,7 @@ pub fn status(sessions: Vec<Session>) -> StatusReply {
         },
         hosted: Default::default(),
         hosted_unbound: Default::default(),
+        host_health: Default::default(),
         hosted_viewer_unavailable: Default::default(),
         dropped_hooks: None,
         queue: QueueCounts::default(),
@@ -1315,6 +1316,7 @@ pub const FAKE_SEAT: &str = "obs-0123456789ab-0123456789abcdef0123456789abcdef";
 /// prompt waiting, and a stopped Codex `reviewer`.
 pub fn hosted_sessions() -> SessionsReply {
     let row = |name: &str, alias: Option<&str>, runtime: Runtime, state: HostState| SessionRow {
+        host_health: None,
         codex_scope_advisory: false,
         paused: false,
         chair: false,
@@ -1962,6 +1964,7 @@ pub fn session_tree(w: &mut World) {
     let hosted =
         |id: &str, primary: &str, alias: &str, committee: &str, runtime: Runtime, chair: bool| {
             SessionRow {
+                host_health: None,
                 codex_scope_advisory: false,
                 host_id: EventId::new(),
                 session_id: id.into(),
@@ -2818,6 +2821,7 @@ pub fn seat_secretary(w: &mut World, state: senate_bridge::ipc::DefaultSecretary
         _ => HostState::Stopped,
     };
     w.sessions.rows.push(SessionRow {
+        host_health: None,
         codex_scope_advisory: false,
         paused: state == St::Paused,
         chair: false,
@@ -2878,6 +2882,7 @@ fn history_label(r: &senate_bridge::ipc::SessionHistoryRow) -> String {
 fn revive(w: &mut World, r: &senate_bridge::ipc::SessionHistoryRow) {
     use senate_bridge::ipc::LocalSessionRow;
     w.sessions.rows.push(SessionRow {
+        host_health: None,
         codex_scope_advisory: false,
         paused: false,
         chair: false,

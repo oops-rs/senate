@@ -34,7 +34,7 @@
 use super::host_policy::HostAuthority;
 use super::hosts::StopTarget;
 use super::*;
-use crate::ipc::{HostedModel, PAUSE_TIMEOUT_SECS, PauseReply, ResumeReply};
+use crate::ipc::{HostedModel, PAUSE_TIMEOUT_SECS, PauseReply, RestartHostReply, ResumeReply};
 use chrono::Utc;
 
 /// How often a pause looks for the checkpoint it asked for.
@@ -55,8 +55,114 @@ impl Shared {
         let target = self.resolve_stop(senator, None).await?;
         auth.check_target(&target.committee, false)?;
         let timeout = Duration::from_secs(timeout_secs.unwrap_or(PAUSE_TIMEOUT_SECS));
-        self.pause_target(&auth, &target, force, Instant::now() + timeout, false)
-            .await
+        self.pause_target(
+            &auth,
+            &target,
+            force,
+            Instant::now() + timeout,
+            false,
+            false,
+        )
+        .await
+    }
+
+    pub(super) async fn on_restart_host(
+        &self,
+        senator: &AliasName,
+        expected_host: &EventId,
+        force: bool,
+    ) -> Result<RestartHostReply, IpcError> {
+        let auth = self
+            .authorize_host_action(&SessionSelector::default())
+            .await?;
+        let target = self.resolve_stop(senator, None).await?;
+        auth.check_target(&target.committee, false)?;
+        if target.host_id != *expected_host {
+            return Err(IpcError::bad_request(
+                "The terminal host changed. List sessions again before restarting.",
+            ));
+        }
+        let session_id = self
+            .store
+            .session_for_host(&target.host_id)
+            .map_err(internal)?
+            .ok_or_else(|| IpcError::bad_request("The terminal host is no longer registered"))?;
+        if !force {
+            self.check_restart_idle(&target).await?;
+        }
+        let paused = self
+            .pause_target(
+                &auth,
+                &target,
+                force,
+                Instant::now() + Duration::from_secs(PAUSE_TIMEOUT_SECS),
+                false,
+                true,
+            )
+            .await?;
+        let started_empty = if target.runtime == Runtime::Claude {
+            let session = self
+                .store
+                .session(&session_id)
+                .map_err(internal)?
+                .ok_or_else(|| IpcError::bad_request("The paused session record is missing"))?;
+            !super::hosts::claude_has_transcript(&session)?
+        } else {
+            false
+        };
+        let resumed = self.on_resume(&AliasName::bare(target.senator.clone()))
+            .await.map_err(|error| IpcError::bad_request(format!(
+                "Paused {} but could not restart it: {}. Try senate session resume {} after correcting the error.",
+                target.senator, error.message, target.senator
+            )))?;
+        Ok(RestartHostReply {
+            checkpoint: paused.checkpoint,
+            resumed,
+            started_empty,
+        })
+    }
+
+    async fn check_restart_idle(&self, target: &StopTarget) -> Result<(), IpcError> {
+        let paths = Paths::new(&self.home);
+        let facts = crate::host::facts(&paths, &target.host_id).map_err(IpcError::internal)?;
+        if facts
+            .typed_secs_ago
+            .is_some_and(|age| age < crate::sessions::TYPED_WINDOW_SECS)
+        {
+            return Err(IpcError::bad_request(
+                "Someone typed into this terminal recently. Use --force to restart it.",
+            ));
+        }
+        let session = self
+            .store
+            .session_for_host(&target.host_id)
+            .map_err(internal)?
+            .and_then(|id| self.store.session(&id).ok().flatten())
+            .ok_or_else(|| IpcError::bad_request("The terminal host is no longer registered"))?;
+        let busy = if session.runtime == Runtime::Codex {
+            use crate::delivery::codex::{AppServer, ThreadState};
+            let transport = self
+                .dedicated_codex_route(&session.session_id)
+                .map_err(internal)?
+                .unwrap_or_else(|| self.codex_transport.clone());
+            let state = tokio::time::timeout(Duration::from_secs(4), async {
+                AppServer::connect(&transport)
+                    .await?
+                    .thread_state(&session.session_id)
+                    .await
+            })
+            .await;
+            // Refuse if the service cannot tell us whether it is safe to stop.
+            !matches!(state, Ok(Ok(ThreadState::Idle | ThreadState::NotLoaded)))
+        } else {
+            self.session_working(&session)
+        };
+        if busy {
+            return Err(IpcError::bad_request(
+                "A turn is in flight or its state is unavailable. Use --force to restart it.",
+            ));
+        }
+        Ok(())
     }
 
     /// Ask `target` to checkpoint, wait for it until `deadline` at most,
@@ -70,6 +176,7 @@ impl Shared {
         force: bool,
         deadline: Instant,
         shutdown: bool,
+        restart: bool,
     ) -> Result<PauseReply, IpcError> {
         let asked = Instant::now();
         let primary = &target.senator;
@@ -103,11 +210,17 @@ impl Shared {
             None
         };
         let waited_secs = asked.elapsed().as_secs();
+        if restart && !force {
+            self.check_restart_idle(target).await?;
+        }
         // Recorded before the stop, so the bridge's leave says paused.
         self.store
             .mark_paused(primary, committee, Utc::now(), checkpoint)
             .map_err(internal)?;
-        match self.stop_audited(auth, target, force, true).await {
+        match self
+            .stop_audited(auth, target, force, true, restart && !force)
+            .await
+        {
             Ok(_) => Ok(PauseReply {
                 senator: primary.clone(),
                 committee: committee.clone(),
@@ -308,7 +421,7 @@ impl Shared {
                     }
                 };
                 if let Err(error) = shared
-                    .pause_target(&auth, &target, true, ask_until, true)
+                    .pause_target(&auth, &target, true, ask_until, true, false)
                     .await
                 {
                     tracing::warn!(senator = %row.primary, %error, "pausing at shutdown");

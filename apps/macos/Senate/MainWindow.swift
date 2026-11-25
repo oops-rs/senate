@@ -423,6 +423,10 @@ private struct SessionRow: View {
                 .font(Theme.Fonts.row.weight(session.status == .unread || session.status == .needsYou ? .semibold : .regular))
                 .foregroundStyle(session.active ? Theme.onSurface : Theme.onSurfaceVariant)
                 .lineLimit(1)
+            if session.hosted?.hostWarning != nil {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(Theme.attention)
+            }
             Spacer(minLength: Theme.Space.xs)
             Ago(date: session.lastActivity)
                 .font(Theme.Fonts.meta)
@@ -434,7 +438,12 @@ private struct SessionRow: View {
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isStaticText)
         .accessibilityLabel(session.displayName)
-        .accessibilityValue("\(session.statusLabel), \(session.runtime), \(session.lastActivity.formatted(.relative(presentation: .named)))")
+        .accessibilityValue(accessibilityStatus)
+    }
+
+    private var accessibilityStatus: String {
+        ["\(session.statusLabel), \(session.runtime), \(session.lastActivity.formatted(.relative(presentation: .named)))",
+         session.hosted?.hostWarning].compactMap { $0 }.joined(separator: ", ")
     }
 
     private var tooltip: String {
@@ -443,6 +452,7 @@ private struct SessionRow: View {
         if let branch = session.branch { place += " · \(branch)" }
         lines.append(place)
         lines.append(session.statusLabel)
+        if let warning = session.hosted?.hostWarning { lines.append(warning) }
         return lines.joined(separator: "\n")
     }
 }

@@ -516,7 +516,7 @@ import SenateCore
             displayName: "lead", active: true, label: "refund-v2::lead", sessionId: "s-1", mention: "senator::claude",
             committee: "refund-v2", runtime: "claude", model: nil, dir: "/work",
             running: true, startedAt: nil, attached: false, typedSecsAgo: nil,
-            promptTool: "cargo publish", promptSince: .now, promptAnswerable: true, paused: false)
+            promptTool: "cargo publish", promptSince: .now, promptAnswerable: true, paused: false, hostWarning: nil)
         await store.decide(lead, .allow)
         await store.decide(lead, .allowForSession)
         await store.decide(lead, .deny)

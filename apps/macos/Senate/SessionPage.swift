@@ -68,6 +68,11 @@ struct SessionHeader: View {
         // Its name, state and actions are in the window's toolbar
         // (SessionToolbar); here, what describes it.
         VStack(alignment: .leading, spacing: Theme.Space.s) {
+            if let warning = s.hosted?.hostWarning {
+                Text(verbatim: warning)
+                    .foregroundStyle(Theme.attention)
+                    .help("Save your work, then run senate session restart --all-outdated.")
+            }
             if let title = s.title {
                 Text(verbatim: title)
                     .font(Theme.Fonts.text)

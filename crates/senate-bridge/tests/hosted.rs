@@ -5545,6 +5545,86 @@ async fn replace_refuses_an_unknown_seat_and_hands_nothing_over_when_the_spawn_f
 
 // ---- pause and resume -------------------------------------------------------
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_upgrades_an_outdated_host_without_changing_its_seat() {
+    let fixture = HostedClaude::launch(false).await;
+    let h = &fixture.h;
+    git(&fixture.project, &["init", "-q", "-b", "main"]);
+    std::fs::write(fixture.project.join("README.md"), "fixture\n").unwrap();
+    git(&fixture.project, &["add", "README.md"]);
+    git(&fixture.project, &["commit", "-q", "-m", "fixture"]);
+    let original: ipc::SessionsReply = call(h, &Request::Sessions).await;
+    let old = original
+        .rows
+        .iter()
+        .find(|row| row.primary == fixture.seat.senator)
+        .unwrap();
+    for marker in ["host-process", "host-protocol.json"] {
+        std::fs::remove_file(fixture.terminal.with_file_name(marker)).unwrap();
+    }
+    let (ok, dry) = senate(h, &["session", "restart", "--all-outdated", "--dry-run"]).await;
+    assert!(ok && dry.contains("would request a checkpoint"), "{dry}");
+    assert!(fixture.terminal.exists(), "dry run left the terminal live");
+    let restarting = tokio::spawn({
+        let socket = h.socket();
+        let request = Request::RestartHost {
+            senator: old.primary.clone().into(),
+            host: old.host_id.clone(),
+            force: false,
+        };
+        async move {
+            ipc::request::<ipc::RestartHostReply>(
+                &socket,
+                &request,
+                TIMEOUT,
+                Duration::from_secs(35),
+            )
+            .await
+        }
+    });
+    eventually("checkpoint request", TIMEOUT, || {
+        h.server
+            .events("refund-v2")
+            .into_iter()
+            .find(|event| event.body.contains("about to be paused"))
+    })
+    .await;
+    let checkpoint: ipc::CheckpointReply = call(
+        h,
+        &Request::Checkpoint {
+            session: ipc::SessionSelector {
+                session_id: Some(old.session_id.clone()),
+                claude_pid: None,
+            },
+            summary: Some("work saved before host upgrade".into()),
+            progress: Some("- fixture checkpoint\n".into()),
+            decisions: None,
+            open: None,
+            push: false,
+            id: None,
+        },
+    )
+    .await;
+    let reply = restarting.await.unwrap().unwrap();
+    assert_eq!(reply.checkpoint, Some(checkpoint.posted.seq));
+    assert_eq!(reply.resumed.senator, old.primary);
+    assert_eq!(
+        reply.resumed.session_id.as_deref(),
+        Some(old.session_id.as_str())
+    );
+    let current: ipc::SessionsReply = call(h, &Request::Sessions).await;
+    let restored = current
+        .rows
+        .iter()
+        .find(|row| row.primary == old.primary)
+        .unwrap();
+    assert_ne!(old.host_id, restored.host_id);
+    assert!(
+        restored.is_running() && restored.host_health.is_none(),
+        "{restored:?}"
+    );
+}
+
 fn git(dir: &std::path::Path, args: &[&str]) {
     let out = std::process::Command::new("git")
         .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])

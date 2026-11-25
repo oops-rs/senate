@@ -260,6 +260,7 @@ pub(crate) const SESSION_DROP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Error codes.
 pub mod codes {
+    pub const LEGACY_HOST: &str = "legacy_host";
     /// The request was malformed or its arguments invalid.
     pub const BAD_REQUEST: &str = "bad_request";
     /// No registered session matches the selector.
@@ -544,6 +545,8 @@ pub struct SessionsReply {
 /// and `senate session watch` shows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_health: Option<Box<HostHealth>>,
     /// A hosted Codex thread still uses the shared app-server.
     #[serde(default, skip_serializing_if = "is_false")]
     pub codex_scope_advisory: bool,
@@ -599,6 +602,30 @@ pub struct SessionRow {
     /// Recorded paused (`senate session pause`): stopped, to be resumed.
     #[serde(default, skip_serializing_if = "is_false")]
     pub paused: bool,
+}
+
+/// An actionable warning about the host process, independent of its seat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostHealth {
+    pub started_by: String,
+    pub outdated: bool,
+    pub daemon_unverified: bool,
+}
+
+impl HostHealth {
+    pub fn notice(&self) -> String {
+        if self.outdated {
+            format!(
+                "needs restart to be protected (started by {})",
+                self.started_by
+            )
+        } else {
+            format!(
+                "terminal host has not verified the current daemon (started by {})",
+                self.started_by
+            )
+        }
+    }
 }
 
 /// A permission prompt waiting in a hosted terminal ([`SessionRow::prompt`]).
@@ -731,6 +758,8 @@ pub struct AttachInfo {
     pub primary: SenatorName,
     pub tty: Option<PathBuf>,
     pub paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_health: Option<HostHealth>,
 }
 
 /// An office whose current holder can be used as a hosted session selector.
@@ -768,6 +797,13 @@ pub struct ResumeReply {
     /// The resumed note's seq, when it was posted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<Seq>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartHostReply {
+    pub checkpoint: Option<Seq>,
+    pub resumed: ResumeReply,
+    pub started_empty: bool,
 }
 
 /// The hints available when a hook times out before reading its payload.
@@ -1185,6 +1221,11 @@ pub enum Request {
     /// directories of hosts that have ended ([`PruneReply`]). The local
     /// operator's: the CLI only.
     PruneHosts,
+    RestartHost {
+        senator: senate_core::alias::AliasName,
+        host: EventId,
+        force: bool,
+    },
     /// Resolve a locally hosted terminal for the person attaching to it.
     /// Look up a hosted session without starting its terminal.
     AttachInfo {
@@ -2766,6 +2807,8 @@ impl CommitteeStatus {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusReply {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub host_health: std::collections::BTreeMap<String, HostHealth>,
     pub pid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptors: Option<crate::fd::Snapshot>,

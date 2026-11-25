@@ -3466,6 +3466,9 @@ impl Shared {
                 force,
                 timeout_secs,
             } => self.sessions_changed(wrap(self.on_pause(&senator, force, timeout_secs).await)),
+            Request::RestartHost { senator, host, force } => {
+                self.sessions_changed(wrap(self.on_restart_host(&senator, &host, force).await))
+            }
             Request::Resume { senator } => {
                 self.sessions_changed(wrap(self.on_resume(&senator).await))
             }
@@ -3896,6 +3899,17 @@ impl Shared {
         let mut prompts = self.hosted_prompts();
         for (session, host_id) in hosted {
             let facts = crate::host::facts(&paths, &host_id).map_err(IpcError::internal)?;
+            let mut host_health = facts
+                .running
+                .then(|| crate::host::health(&paths, &host_id))
+                .flatten();
+            if host_health
+                .as_ref()
+                .is_some_and(|health| health.daemon_unverified && !health.outdated)
+            {
+                crate::host::control::refresh_daemon_identity(&paths, &host_id).await;
+                host_health = crate::host::health(&paths, &host_id);
+            }
             let prompt = prompts.remove(&host_id);
             let committee = session.committee().cloned();
             let alias = committee
@@ -3907,6 +3921,7 @@ impl Shared {
                 transcripts.remove(&session.session_id),
             );
             rows.push(SessionRow {
+                host_health: host_health.map(Box::new),
                 codex_scope_advisory: facts.running
                     && session.runtime == Runtime::Codex
                     && self
@@ -4087,6 +4102,7 @@ impl Shared {
             hosted: host_status.hosted,
             hosted_unbound: host_status.unbound,
             hosted_viewer_unavailable: host_status.viewer_unavailable,
+            host_health: host_status.health,
             dropped_hooks,
             sessions,
             paused: self
@@ -6644,6 +6660,18 @@ impl Front {
         if shared.store.session_host(&session).ok().flatten().as_ref() != Some(host) {
             return Reply::err(IpcError::bad_request("The terminal binding changed"));
         }
+        if !self.scope_fixture
+            && crate::host::legacy_viewer(&paths, host)
+            && let Some(health) = crate::host::health(&paths, host)
+        {
+            return Reply::err(IpcError::new(
+                codes::LEGACY_HOST,
+                format!(
+                    "This terminal {}. Save your work, then run senate session restart --all-outdated.",
+                    health.notice()
+                ),
+            ));
+        }
         wrap(crate::host::control::grant_viewer(&paths, host, peer, writable).await)
     }
 }
@@ -6778,6 +6806,15 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                 #[cfg(not(target_os = "macos"))]
                 let (signed_app, remote_operator) = (false, false);
                 let mut decoded = serde_json::from_str::<Request>(line);
+                #[cfg(target_os = "macos")]
+                let person_peer = if decoded
+                    .as_ref()
+                    .is_ok_and(approval_guard::advisory_host_action)
+                {
+                    person_peer.or(peer)
+                } else {
+                    person_peer
+                };
                 let origin = if signed_app { "app" } else { "person-terminal" };
                 let identity_refusal = if fixture {
                     None
@@ -6829,6 +6866,9 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     Ok(_) if let Some(error) = identity_refusal => (Reply::err(error), false),
                     Ok(request)
                         if crate::app_confirmation::required(&request)
+                            && !approval_guard::advisory_host_action(&request)
+                            && !matches!(&request, Request::OpenViewer { host, .. }
+                                if crate::host::legacy_viewer(&Paths::new(&shared.primary().home), host))
                             && (!fixture
                                 || crate::app_confirmation::fixture_requires_confirmation(
                                     &request,

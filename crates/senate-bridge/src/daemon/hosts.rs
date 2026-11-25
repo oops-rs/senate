@@ -101,8 +101,8 @@ pub(super) struct RestoreTarget {
 pub(super) struct StopTarget {
     pub(super) committee: CommitteeId,
     pub(super) senator: SenatorName,
-    runtime: Runtime,
-    host_id: EventId,
+    pub(super) runtime: Runtime,
+    pub(super) host_id: EventId,
 }
 
 pub(super) struct StopAuditGuard<'a> {
@@ -731,6 +731,7 @@ impl Shared {
         target: &StopTarget,
         force: bool,
         unconfirmed_audit: NewEvent,
+        idle_only: bool,
     ) -> Result<(String, bool), IpcError> {
         let binding = if target.runtime == Runtime::Codex {
             // Drain a push that started before this stop was marked.
@@ -771,6 +772,7 @@ impl Shared {
             force,
             unconfirmed_audit,
             (session.runtime == Runtime::Codex).then_some((&codex, session.session_id.as_str())),
+            idle_only,
         )
         .await?;
         drop(binding);
@@ -1064,6 +1066,7 @@ impl Shared {
                 .map_err(internal)?
                 .is_some();
         Ok(Some(crate::ipc::AttachInfo {
+            host_health: tty.as_ref().and_then(|_| host::health(&paths, &id)),
             session_id: session.session_id,
             primary: session.agent,
             tty,
@@ -1702,7 +1705,7 @@ fn owns_claude_hook(tui: u32, reported: Option<u32>, ancestors: &[u32]) -> bool 
     reported == Some(tui) && ancestors.contains(&tui)
 }
 
-fn claude_has_transcript(session: &Session) -> Result<bool, IpcError> {
+pub(super) fn claude_has_transcript(session: &Session) -> Result<bool, IpcError> {
     let recorded = session
         .transcript_path
         .as_ref()

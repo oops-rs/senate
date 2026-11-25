@@ -51,6 +51,7 @@ pub struct StatusView {
     pub paused: std::collections::BTreeSet<senate_core::SenatorName>,
     pub hosted: std::collections::BTreeMap<String, Option<String>>,
     pub hosted_unbound: std::collections::BTreeMap<String, String>,
+    pub host_health: std::collections::BTreeMap<String, crate::ipc::HostHealth>,
     pub hosted_viewer_unavailable: std::collections::BTreeSet<String>,
     pub dropped_hooks: Option<HookDropStatus>,
     pub queue: QueueCounts,
@@ -113,6 +114,7 @@ impl StatusView {
             paused: reply.paused,
             hosted: reply.hosted,
             hosted_unbound: reply.hosted_unbound,
+            host_health: reply.host_health,
             hosted_viewer_unavailable: reply.hosted_viewer_unavailable,
             dropped_hooks: reply.dropped_hooks,
             queue: reply.queue,
@@ -260,6 +262,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
         paused: Default::default(),
         hosted: Default::default(),
         hosted_unbound: Default::default(),
+        host_health: Default::default(),
         hosted_viewer_unavailable: Default::default(),
         dropped_hooks: None,
         queue: QueueCounts::default(),
@@ -279,6 +282,7 @@ fn offline(paths: &Paths) -> anyhow::Result<StatusView> {
     let host_status = crate::host::status(paths, &store, &view.sessions)?;
     view.hosted = host_status.hosted;
     view.hosted_unbound = host_status.unbound;
+    view.host_health = host_status.health;
     view.hosted_viewer_unavailable = host_status.viewer_unavailable;
     let configured: Vec<_> = config.map(|c| c.committees).unwrap_or_default();
     view.committees = store
@@ -504,6 +508,9 @@ fn advisories(view: &StatusView) -> Vec<String> {
                 format!("托管 Claude 席位 {seat} 可能漏掉了工具授权或上下文钩子。最近一次钩子上报丢弃于 {last}。"),
                 format!("Hosted Claude seat {seat} may have missed an approval or context hook. Its last hook report was dropped at {last}."),
             ));
+        }
+        if let Some(health) = view.host_health.get(&session.session_id) {
+            lines.push(format!("{seat}: {}.", health.notice()));
         }
         if view.hosted_viewer_unavailable.contains(&session.session_id) {
             lines.push(l.pick(
@@ -1011,6 +1018,7 @@ mod tests {
             paused: Default::default(),
             hosted: Default::default(),
             hosted_unbound: Default::default(),
+            host_health: Default::default(),
             hosted_viewer_unavailable: Default::default(),
             dropped_hooks: None,
             queue: QueueCounts::default(),

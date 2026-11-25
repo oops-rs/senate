@@ -391,6 +391,7 @@ impl Front {
 
     pub(crate) async fn dispatch(self: &Arc<Self>, request: Request) -> Reply {
         if crate::app_confirmation::required(&request)
+            && !approval_guard::advisory_host_action(&request)
             && (!self.scope_fixture
                 || crate::app_confirmation::fixture_requires_confirmation(&request))
         {
@@ -1021,6 +1022,7 @@ macro_rules! request_selector {
             | Request::ActivityWatch { .. }
             | Request::TimelineWatch { .. }
             | Request::PruneHosts
+            | Request::RestartHost { .. }
             | Request::AttachInfo { .. }
             | Request::AttachChoices
             | Request::ResolveSessionRole { .. }

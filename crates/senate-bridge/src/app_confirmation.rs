@@ -319,6 +319,9 @@ pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> 
         Request::Pause { senator, .. } => format!("Pause {senator}'s hosted terminal"),
         Request::Resume { senator } => format!("Resume {senator}'s hosted terminal"),
         Request::Replace { senator, .. } => format!("Replace {senator}'s hosted session"),
+        Request::RestartHost { senator, .. } => {
+            format!("Checkpoint and restart {senator}'s hosted terminal")
+        }
         Request::ArchiveCommittee {
             committee,
             archived,
@@ -678,6 +681,14 @@ pub(crate) mod macos {
                 .to_string_lossy()
                 .into_owned()
         })
+    }
+
+    pub(crate) fn signed_daemon(pid: u32) -> bool {
+        requirement("dev.senate.daemon").is_some_and(|rule| guest_hash(None, pid, &rule).is_some())
+    }
+
+    pub(crate) fn has_daemon_pin(home: &Path) -> bool {
+        trusted_code(home).is_some()
     }
 
     pub(crate) fn pin_doctor(home: &Path) -> crate::doctor::Check {
@@ -1059,6 +1070,7 @@ pub fn required(request: &crate::ipc::Request) -> bool {
         | Request::Resume { .. }
         | Request::Replace { .. }
         | Request::PruneHosts
+        | Request::RestartHost { .. }
         | Request::Attach { .. }
         | Request::Desk { set: Some(_) } => true,
         Request::OpenViewer { writable, .. } => *writable,

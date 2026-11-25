@@ -409,9 +409,9 @@ pub(crate) struct ViewTicket {
 }
 
 pub(super) struct Admission {
-    #[cfg(target_os = "macos")]
     paths: Paths,
-    daemon: crate::kernel_process::BoundProcess,
+    daemon: DaemonIdentity,
+    admitted: Mutex<crate::kernel_process::BoundProcess>,
     tickets: Mutex<Vec<(Instant, ViewTicket)>>,
 }
 
@@ -424,17 +424,21 @@ impl Admission {
         u32::try_from(credentials.pid()?).ok()
     }
 
-    async fn is_daemon(&self, stream: &UnixStream) -> bool {
-        let Some(pid) = Self::peer(stream) else {
+    async fn is_daemon(&self, stream: &UnixStream, host: &EventId) -> bool {
+        if !self.daemon.admits(&self.paths, stream).await {
             return false;
-        };
-        if self.daemon.live() {
-            return pid == self.daemon.pid;
         }
-        #[cfg(target_os = "macos")]
-        return replacement_daemon(&self.paths, pid).await;
-        #[cfg(not(target_os = "macos"))]
-        false
+        if let Some(pid) = Self::peer(stream)
+            && let Ok(candidate) = DaemonIdentity::capture(pid)
+        {
+            let mut admitted = self.admitted.lock().unwrap_or_else(|e| e.into_inner());
+            if *admitted != candidate.process
+                && write_protocol(&self.paths, host, &candidate.process).is_ok()
+            {
+                *admitted = candidate.process;
+            }
+        }
+        true
     }
 
     fn grant(&self, ticket: ViewTicket) -> bool {
@@ -496,17 +500,140 @@ impl Admission {
     }
 }
 
-#[cfg(target_os = "macos")]
-async fn replacement_daemon(paths: &Paths, pid: u32) -> bool {
-    if !crate::app_confirmation::macos::trusted_helper(paths.home(), pid) {
-        return false;
+const HOST_PROTOCOL: u32 = 1;
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct HostProtocol {
+    version: u32,
+    started_by: String,
+    daemon: crate::kernel_process::BoundProcess,
+}
+
+fn write_protocol(
+    paths: &Paths,
+    host: &EventId,
+    daemon: &crate::kernel_process::BoundProcess,
+) -> anyhow::Result<()> {
+    let dir = directory(paths, host);
+    let mut file = tempfile::NamedTempFile::new_in(&dir)?;
+    serde_json::to_writer(
+        &mut file,
+        &HostProtocol {
+            version: HOST_PROTOCOL,
+            started_by: env!("CARGO_PKG_VERSION").into(),
+            daemon: daemon.clone(),
+        },
+    )?;
+    file.persist(dir.join("host-protocol.json"))?;
+    Ok(())
+}
+
+pub(crate) fn legacy_viewer(paths: &Paths, id: &EventId) -> bool {
+    let dir = directory(paths, id);
+    !dir.join("host-protocol.json").exists() && !dir.join("host-process").exists()
+}
+
+pub(crate) fn health(paths: &Paths, id: &EventId) -> Option<ipc::HostHealth> {
+    let protocol = std::fs::read(directory(paths, id).join("host-protocol.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<HostProtocol>(&bytes).ok());
+    if let Some(protocol) = protocol {
+        let outdated = protocol.version < HOST_PROTOCOL;
+        let daemon_unverified =
+            protocol.daemon.pid != std::process::id() || !protocol.daemon.live();
+        return (outdated || daemon_unverified).then_some(ipc::HostHealth {
+            started_by: protocol.started_by,
+            outdated,
+            daemon_unverified,
+        });
     }
-    tokio::time::timeout(
-        Duration::from_millis(300),
-        UnixStream::connect(paths.socket()),
-    )
-    .await
-    .is_ok_and(|result| result.is_ok_and(|stream| Admission::peer(&stream) == Some(pid)))
+    // The first ticket-aware version wrote the generation file but had
+    // no version record. Legacy hosts wrote neither.
+    legacy_viewer(paths, id).then(|| ipc::HostHealth {
+        started_by: "an unrecorded pre-ticket version".into(),
+        outdated: true,
+        daemon_unverified: false,
+    })
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(super) struct DaemonIdentity {
+    pub process: crate::kernel_process::BoundProcess,
+    executable: PathBuf,
+    #[serde(default)]
+    hardened_linux: bool,
+    #[serde(default)]
+    signed_mac: bool,
+}
+
+impl DaemonIdentity {
+    pub(super) fn capture(pid: u32) -> io::Result<Self> {
+        use crate::kernel_process;
+        let process =
+            kernel_process::BoundProcess::capture(kernel_process::inspect(pid)?.identity)?;
+        let executable = kernel_process::executable(pid)?;
+        #[cfg(target_os = "linux")]
+        let hardened_linux = crate::linux_scope::available();
+        #[cfg(not(target_os = "linux"))]
+        let hardened_linux = false;
+        #[cfg(target_os = "macos")]
+        let signed_mac = crate::app_confirmation::macos::signed_daemon(pid);
+        #[cfg(not(target_os = "macos"))]
+        let signed_mac = false;
+        Ok(Self {
+            process,
+            executable,
+            hardened_linux,
+            signed_mac,
+        })
+    }
+
+    pub(super) async fn admits(&self, paths: &Paths, peer: &UnixStream) -> bool {
+        let Some(pid) = Admission::peer(peer) else {
+            return false;
+        };
+        if self.process.live() {
+            return pid == self.process.pid;
+        }
+        let Ok(candidate) = Self::capture(pid) else {
+            return false;
+        };
+        let Ok(Ok(bridge)) = tokio::time::timeout(
+            Duration::from_millis(300),
+            UnixStream::connect(paths.socket()),
+        )
+        .await
+        else {
+            return false;
+        };
+        if Admission::peer(&bridge) != Some(pid) || !candidate.process.live() {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        if self.signed_mac
+            || candidate.signed_mac
+            || crate::app_confirmation::macos::has_daemon_pin(paths.home())
+        {
+            return crate::app_confirmation::macos::trusted_helper(paths.home(), pid)
+                && candidate.process.live();
+        }
+        #[cfg(target_os = "linux")]
+        if self.hardened_linux || candidate.hardened_linux {
+            use crate::linux_scope::Peer;
+            let outside = |socket| {
+                Peer::capture(socket, pid)
+                    .ok()
+                    .and_then(|peer| peer.classify())
+                    == Some((pid, false))
+            };
+            if !outside(peer) || !outside(&bridge) {
+                return false;
+            }
+        }
+        // Advisory on unsigned macOS and unprovisioned Linux. The installed
+        // path is stable across replacement of the managed executable.
+        candidate.executable == self.executable && candidate.process.live()
+    }
 }
 
 fn viewer_address(socket: &Path) -> anyhow::Result<(Paths, EventId)> {
@@ -525,14 +652,21 @@ fn viewer_address(socket: &Path) -> anyhow::Result<(Paths, EventId)> {
 
 pub(crate) async fn open_viewer(socket: &Path, writable: bool) -> anyhow::Result<UnixStream> {
     let (paths, host) = viewer_address(socket)?;
-    let nonce: String = ipc::request(
+    let result: Result<String, _> = ipc::request(
         &paths.socket(),
         &ipc::Request::OpenViewer { host, writable },
         Duration::from_secs(1),
         crate::app_confirmation::LIFETIME + Duration::from_secs(5),
     )
-    .await?;
-    connect_viewer(socket, &nonce).await
+    .await;
+    match result {
+        Ok(nonce) => connect_viewer(socket, &nonce).await,
+        Err(ipc::ClientError::Remote(error)) if error.code == ipc::codes::LEGACY_HOST => {
+            eprintln!("{}", error.message);
+            Ok(UnixStream::connect(socket).await?)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Connect an integration fixture that owns the host's launching process.
@@ -702,12 +836,11 @@ pub async fn run(
     cwd: &Path,
     session: &SessionCommand<'_>,
 ) -> anyhow::Result<()> {
-    let daemon = crate::kernel_process::inspect(std::os::unix::process::parent_id())
-        .and_then(|process| crate::kernel_process::BoundProcess::capture(process.identity))
+    let daemon = DaemonIdentity::capture(std::os::unix::process::parent_id())
         .context("bind the terminal host to its launching daemon")?;
     let admission = Arc::new(Admission {
-        #[cfg(target_os = "macos")]
         paths: paths.clone(),
+        admitted: Mutex::new(daemon.process.clone()),
         daemon,
         tickets: Mutex::default(),
     });
@@ -746,6 +879,7 @@ pub async fn run(
             .open(dir.join("host-process"))?,
         &process,
     )?;
+    write_protocol(paths, id, &admission.daemon.process)?;
     let mut terminate = signal(SignalKind::terminate())?;
     let socket = socket(paths, id);
     let listener = UnixListener::bind(&socket).context("listen for terminal attachments")?;
@@ -1267,6 +1401,7 @@ pub(crate) struct HostStatus {
     pub(crate) hosted: BTreeMap<String, Option<String>>,
     pub(crate) unbound: BTreeMap<String, String>,
     pub(crate) viewer_unavailable: BTreeSet<String>,
+    pub(crate) health: BTreeMap<String, ipc::HostHealth>,
 }
 
 pub(crate) fn status(
@@ -1279,6 +1414,9 @@ pub(crate) fn status(
         if let Some(id) = store.session_host(&session.session_id)?
             && running(paths, &id)?
         {
+            if let Some(health) = health(paths, &id) {
+                status.health.insert(session.session_id.clone(), health);
+            }
             status.hosted.insert(
                 session.session_id.clone(),
                 unverified_switch(paths, &id).filter(|new| new != &session.session_id),
@@ -1679,6 +1817,82 @@ async fn forward_keys(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn replacement_daemon_fixture_process() -> anyhow::Result<()> {
+        use std::io::Read as _;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let Some(home) = std::env::var_os("SENATE_DAEMON_HANDOFF_FIXTURE") else {
+            return Ok(());
+        };
+        let paths = Paths::new(&home);
+        let _bridge = UnixListener::bind(paths.socket())?;
+        let _control = UnixStream::connect(paths.home().join("control"))?;
+        let _ = std::io::stdin().read(&mut [0])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn advisory_host_admits_a_live_replacement_of_the_same_executable() -> anyhow::Result<()>
+    {
+        #[cfg(target_os = "macos")]
+        if crate::app_confirmation::team().is_some() {
+            return Ok(()); // this fixture executable is not the signed release daemon
+        }
+        let home = tempfile::tempdir_in("/tmp")?;
+        let paths = Paths::new(home.path());
+        let listener = UnixListener::bind(home.path().join("control"))?;
+        let start = || {
+            let mut command = Command::new(std::env::current_exe()?);
+            command
+                .args(["--exact", "host::tests::replacement_daemon_fixture_process"])
+                .env("SENATE_DAEMON_HANDOFF_FIXTURE", home.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .kill_on_drop(true);
+            command.spawn()
+        };
+        let mut original = start()?;
+        let (peer, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await??;
+        let owner = DaemonIdentity::capture(original.id().context("original daemon PID")?)?;
+        assert!(owner.admits(&paths, &peer).await);
+        assert!(!owner.admits(&paths, &UnixStream::pair()?.0).await);
+        drop(original.stdin.take());
+        assert!(original.wait().await?.success());
+        std::fs::remove_file(paths.socket())?;
+        let mut replacement = start()?;
+        let (peer, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await??;
+        assert!(owner.admits(&paths, &peer).await);
+        #[cfg(target_os = "macos")]
+        {
+            let mut signed = owner.clone();
+            signed.signed_mac = true;
+            assert!(!signed.admits(&paths, &peer).await);
+        }
+        let mut wrong_executable = owner;
+        wrong_executable.executable = home.path().join("another-installation");
+        assert!(!wrong_executable.admits(&paths, &peer).await);
+        drop(replacement.stdin.take());
+        assert!(replacement.wait().await?.success());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_detection_does_not_fall_back_for_ticket_aware_hosts() -> anyhow::Result<()> {
+        let home = tempfile::tempdir()?;
+        let paths = Paths::new(home.path());
+        let id = EventId::new();
+        let host = directory(&paths, &id);
+        std::fs::create_dir_all(&host)?;
+        assert!(legacy_viewer(&paths, &id));
+        assert!(health(&paths, &id).unwrap().outdated);
+        std::fs::write(host.join("host-process"), b"generation marker")?;
+        assert!(!legacy_viewer(&paths, &id));
+        let owner = DaemonIdentity::capture(std::process::id())?;
+        write_protocol(&paths, &id, &owner.process)?;
+        assert!(health(&paths, &id).is_none());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn viewer_ticket_requires_its_process_and_mode_and_is_consumed() -> anyhow::Result<()> {
         let bind = |pid| {
@@ -1687,17 +1901,18 @@ mod tests {
         };
         let peer = bind(std::process::id())?;
         let dir = tempfile::tempdir()?;
+        let daemon = DaemonIdentity::capture(std::os::unix::process::parent_id())?;
         let admission = Admission {
-            #[cfg(target_os = "macos")]
             paths: Paths::new(dir.path()),
-            daemon: bind(std::os::unix::process::parent_id())?,
+            admitted: Mutex::new(daemon.process.clone()),
+            daemon,
             tickets: Mutex::default(),
         };
         let socket = dir.path().join("test.sock");
         let listener = UnixListener::bind(&socket)?;
         let (mut sender, (mut receiver, _)) =
             tokio::try_join!(UnixStream::connect(&socket), listener.accept(),)?;
-        assert!(!admission.is_daemon(&receiver).await);
+        assert!(!admission.is_daemon(&receiver, &EventId::new()).await);
         assert!(!admission.viewer(&mut receiver, false).await);
 
         let nonce = [37; 32];

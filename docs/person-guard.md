@@ -112,10 +112,35 @@ TTY share the scope, including automation in an already authorized pane.
 Detaching from tmux can leave the pane, its kernel TTY, and its authorization
 alive. An authorized interactive viewer can still type directly into a
 terminal prompt.
-Existing hosts must be restarted to pick up the host socket checks. On
-macOS a replacement daemon needs the installed daemon code pin to regain
-control of an existing host. Recovery after an unsigned or Linux daemon
-restart requires a fresh host at present.
+Existing pre-ticket hosts keep their old sockets until they restart. The
+installer, session list, app, status and doctor identify that condition.
+Versions that never recorded their version are displayed as unrecorded.
+Attach can still open a legacy terminal to save work and prints a warning
+before connecting.
+
+Signed macOS requires the installed daemon pin for a replacement serving
+the same home's bridge socket. Unsigned and unprovisioned Linux or WSL
+also check the UID, active bridge peer and daemon executable path. This
+is advisory. Provisioned Linux additionally verifies both connections
+with pidfds and rejects a daemon in a hosted cgroup. Doctor probes a host
+with an unverified daemon binding and reports any that still do not
+recognize the current process.
+
+Review the migration with
+`senate session restart --all-outdated --dry-run`, then run
+`senate session restart --all-outdated` or name one session at a time.
+Restart requests a checkpoint, stops the terminal, and resumes the
+recorded seat. It refuses recent interactive use or an active turn known
+to the daemon unless forced. When Codex turn state cannot be verified it
+also refuses without force. Pause timeout can leave no new checkpoint.
+Save drafts and finish active work first.
+
+Restart replaces the TUI and PTY. For Claude, Codex and agy it loses unsent
+input, on-screen state and pending dialogs, and an in-flight turn does
+not continue automatically. Saved runtime conversations remain the
+restore target. Claude without a saved transcript starts empty under its
+original ID. Dedicated Codex returns an error if it cannot load the
+recorded thread. It never opens a substitute thread.
 
 These viewer checks cover the terminal host's control, input and screen
 sockets. For dedicated Codex sessions, the supervisor owns the Unix RPC
