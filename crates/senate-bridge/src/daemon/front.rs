@@ -195,7 +195,14 @@ impl Front {
     /// Whether `session` is one that predates process bindings and still
     /// runs as it did then: the same host, or the same runtime process.
     pub(crate) fn is_legacy(&self, session: &Session) -> bool {
-        let store = &self.primary().store;
+        self.primary().is_legacy(session)
+    }
+}
+
+impl Shared {
+    /// [`Front::is_legacy`].
+    pub(crate) fn is_legacy(&self, session: &Session) -> bool {
+        let store = &self.store;
         let Some(anchor) = store
             .legacy_anchor(&session.session_id)
             .ok()
@@ -215,7 +222,9 @@ impl Front {
                 LegacyAnchor::Unanchored => true,
             }
     }
+}
 
+impl Front {
     /// The live session `selector` names, when the caller may act for it:
     /// `peer` proved its process with a session proof, and the session's
     /// bound process contains it. A legacy session ([`Front::is_legacy`])

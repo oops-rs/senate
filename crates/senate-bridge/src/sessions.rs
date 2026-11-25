@@ -166,7 +166,11 @@ pub fn render_with_ids(
                     .map_or_else(|| "-".to_owned(), ToString::to_string),
                 row.runtime.as_str().to_owned(),
                 row.model.label(),
-                first_line_within(&state(row, locale), CELL_COLUMNS),
+                format!(
+                    "{}{}",
+                    first_line_within(&state(row, locale), CELL_COLUMNS),
+                    marker(row)
+                ),
                 row.started_at
                     .map_or_else(|| "-".to_owned(), |at| uptime(at, now)),
                 viewer(row, locale),
@@ -198,19 +202,25 @@ pub fn render_with_ids(
     for line in &lines {
         row(&line.each_ref().map(String::as_str));
     }
-    for row in &reply.rows {
-        if let Some(health) = &row.host_health {
-            let _ = writeln!(out, "{}: {}", row.display_name(verbose), health.notice());
+    if verbose {
+        for row in &reply.rows {
+            if let Some(health) = &row.host_health {
+                let _ = writeln!(out, "{}: {}", row.display_name(verbose), health.notice());
+            }
+            if row.codex_scope_advisory {
+                let warning = locale.pick(
+                    "使用共享 Codex app-server，守卫仅为提示",
+                    "shared Codex app-server; tool process protection is advisory",
+                );
+                let _ = writeln!(out, "{}: {warning}", row.display_name(verbose));
+            }
+            if let Some(warning) = &row.model.verification_warning {
+                let _ = writeln!(out, "{}: {warning}", row.display_name(verbose));
+            }
         }
-        if row.codex_scope_advisory {
-            let warning = locale.pick(
-                "使用共享 Codex app-server，守卫仅为提示",
-                "shared Codex app-server; tool process protection is advisory",
-            );
-            let _ = writeln!(out, "{}: {warning}", row.display_name(verbose));
-        }
-        if let Some(warning) = &row.model.verification_warning {
-            let _ = writeln!(out, "{}: {warning}", row.display_name(verbose));
+    } else {
+        for line in summary(reply, locale) {
+            let _ = writeln!(out, "{line}");
         }
     }
     for id in &reply.orphans {
@@ -227,6 +237,68 @@ pub fn render_with_ids(
         );
     }
     out.trim_end().to_owned()
+}
+
+/// The STATE cell's note: `*` its host needs a restart (or has not
+/// verified this daemon), `~` it shares Codex's app-server, `!` its model
+/// has a warning. [`summary`] counts them; `--verbose` says each.
+fn marker(row: &SessionRow) -> String {
+    let mut marker = String::new();
+    if row.host_health.is_some() {
+        marker.push('*');
+    }
+    if row.codex_scope_advisory {
+        marker.push('~');
+    }
+    if row.model.verification_warning.is_some() {
+        marker.push('!');
+    }
+    if marker.is_empty() {
+        marker
+    } else {
+        format!(" {marker}")
+    }
+}
+
+/// At most two lines under the table: the hosts that need a restart, and
+/// the rest of the notes.
+pub(crate) fn summary(reply: &SessionsReply, locale: Locale) -> Vec<String> {
+    let count = |test: fn(&SessionRow) -> bool| reply.rows.iter().filter(|row| test(row)).count();
+    let restart = count(|row| row.host_health.is_some());
+    let shared = count(|row| row.codex_scope_advisory);
+    let model = count(|row| row.model.verification_warning.is_some());
+    let mut lines = Vec::new();
+    if restart > 0 {
+        lines.push(match locale {
+            Locale::Zh => format!(
+                "* {restart} 个宿主需要重启才受保护：senate session restart --all-outdated --dry-run"
+            ),
+            Locale::En => format!(
+                "* {restart} host(s) need a restart to be protected: senate session restart --all-outdated --dry-run"
+            ),
+        });
+    }
+    let mut notes = Vec::new();
+    if shared > 0 {
+        notes.push(match locale {
+            Locale::Zh => format!("~ {shared} 个使用共享 Codex app-server（守卫仅为提示）"),
+            Locale::En => format!("~ {shared} on the shared Codex app-server (advisory)"),
+        });
+    }
+    if model > 0 {
+        notes.push(match locale {
+            Locale::Zh => format!("! {model} 个模型有警告"),
+            Locale::En => format!("! {model} with a model warning"),
+        });
+    }
+    if !notes.is_empty() {
+        lines.push(format!(
+            "{}{}",
+            notes.join("; "),
+            locale.pick("；详情见 --verbose", "; details with --verbose")
+        ));
+    }
+    lines
 }
 
 /// Most columns a waiting prompt's command takes in the STATE cell: a
@@ -462,6 +534,58 @@ pub(crate) mod tests {
         assert!(line.contains("paused"), "{text}");
         let line = text.lines().find(|l| l.starts_with("idle")).unwrap();
         assert!(line.contains("stopped"), "{text}");
+    }
+
+    /// Seven sessions with notes: a marker each in STATE and at most two
+    /// lines under the table; each one's note only with --verbose.
+    #[test]
+    fn notes_are_markers_and_two_summary_lines() {
+        let health = || {
+            Some(Box::new(crate::ipc::HostHealth {
+                started_by: "0.12.3".into(),
+                outdated: true,
+                daemon_unverified: false,
+            }))
+        };
+        let mut rows = Vec::new();
+        for (i, (outdated, shared)) in [
+            (true, false),
+            (true, false),
+            (true, false),
+            (true, true),
+            (false, true),
+            (false, true),
+            (false, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut row = row(
+                &format!("codex-{i}"),
+                Some(&format!("m{i}")),
+                HostState::Running,
+            );
+            row.host_health = if outdated { health() } else { None };
+            row.codex_scope_advisory = shared;
+            rows.push(row);
+        }
+        let reply = SessionsReply {
+            rows,
+            local_rows: Vec::new(),
+            orphans: Vec::new(),
+        };
+        let text = render(&reply, Utc::now(), Locale::En);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1 + 7 + 2, "{text}");
+        assert!(lines[4].contains("running *~"), "{text}");
+        assert!(lines[8].starts_with("* 4 host(s) need a restart"), "{text}");
+        assert!(lines[9].starts_with("~ 3 on the shared Codex"), "{text}");
+        let verbose = render_with_ids(&reply, Utc::now(), Locale::En, true);
+        assert!(verbose.lines().count() > 10, "{verbose}");
+        assert!(
+            verbose.contains("needs restart to be protected"),
+            "{verbose}"
+        );
     }
 
     #[test]

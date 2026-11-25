@@ -4133,14 +4133,31 @@ impl Shared {
                 && host_status.hosted.contains_key(&session.session_id)
                 && !matches!(self.store.codex_backend(&session.session_id), Ok(Some(_)))
         });
-        Ok(StatusReply {
-            descriptors: Some(crate::fd::snapshot()),
-            person_guard_advisory: crate::app_confirmation::security_status(&Paths::new(&self.home)).1.or_else(|| approval_guard::advisory_notice(self.locale).or_else(|| {
+        let legacy = sessions
+            .iter()
+            .filter(|session| self.is_legacy(session))
+            .count();
+        let legacy = (legacy > 0).then(|| match self.locale {
+            Locale::Zh => format!(
+                "{legacy} 个会话早于本版本启动，重启前仅以旧方式（提示性）识别：托管的用 senate session restart --all-outdated，原生的请自行重启。"
+            ),
+            Locale::En => format!(
+                "{legacy} session(s) started before this version are identified the old, advisory way until restarted: senate session restart --all-outdated for hosted ones; restart native ones yourself."
+            ),
+        });
+        let guard = crate::app_confirmation::security_status(&Paths::new(&self.home)).1.or_else(|| approval_guard::advisory_notice(self.locale).or_else(|| {
                 shared_codex.then(|| self.locale.pick(
                     "共享 Codex app-server 的托管会话仅受提示性守卫保护。",
                     "Hosted Codex sessions on the shared app-server have advisory process protection.",
                 ))
-            }).map(str::to_owned)),
+            }).map(str::to_owned));
+        let person_guard_advisory = match (guard, legacy) {
+            (Some(guard), Some(legacy)) => Some(format!("{guard} {legacy}")),
+            (guard, legacy) => guard.or(legacy),
+        };
+        Ok(StatusReply {
+            descriptors: Some(crate::fd::snapshot()),
+            person_guard_advisory,
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             person: self.config.person.clone(),
