@@ -133,7 +133,7 @@ xcodebuild -project Senate.xcodeproj -scheme Senate -configuration Release \
   -derivedDataPath build -archivePath "$archive" archive \
   CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$identity" ${team_flags[@]+"${team_flags[@]}"} \
   SENATE_BUNDLED_SCENES_STAGE="$scenes_stage" \
-  OTHER_CODE_SIGN_FLAGS="--timestamp" | grep -E "^(\*\*|error|warning: [^S])" || true
+  OTHER_CODE_SIGN_FLAGS="$helper_timestamp" | grep -E "^(\*\*|error|warning: [^S])" || true
 [[ -d "$archive/Products/Applications/Senate.app" ]] || die "the archive has no Senate.app"
 ditto "$archive/Products/Applications/Senate.app" "$out/Senate.app"
 app="$out/Senate.app"
@@ -145,7 +145,7 @@ codesign --verify --deep --strict --verbose=2 "$app"
 details="$(codesign -dv --entitlements - "$app" 2>&1)"
 grep -q "flags=.*runtime" <<<"$details" || die "the hardened runtime is not on"
 grep -q "com.apple.security.automation.apple-events" <<<"$details" || die "the Apple Events entitlement is missing"
-if [[ "$identity" != "-" ]]; then
+if [[ "$identity" != "-" && $notarize == 1 ]]; then
   grep -q "Timestamp=" <<<"$details" || die "no secure timestamp (notarization needs one)"
 fi
 echo "$details" | grep -E "^(Identifier|Authority|TeamIdentifier|Timestamp|CodeDirectory)" || true
@@ -166,8 +166,10 @@ trap 'rm -rf "$stage"' EXIT
 ditto "$app" "$stage/Senate.app"
 ln -s /Applications "$stage/Applications"
 hdiutil create -quiet -volname "Senate $version" -srcfolder "$stage" -ov -format UDZO "$dmg"
+# A secure timestamp needs Apple's timestamp service, and only a notarized
+# build needs one: without notarizing, sign without it.
 timestamp=(--timestamp)
-[[ "$identity" == "-" ]] && timestamp=()
+[[ "$identity" == "-" || $notarize == 0 ]] && timestamp=()
 codesign --force --sign "$identity" ${timestamp[@]+"${timestamp[@]}"} "$dmg"
 if [[ $notarize == 1 ]]; then
   say "notarizing the DMG"
