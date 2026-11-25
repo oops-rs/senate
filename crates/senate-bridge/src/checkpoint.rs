@@ -69,6 +69,9 @@ pub async fn toplevel(dir: &Path) -> Option<PathBuf> {
 
 /// The commit `HEAD` names in `dir`, if any.
 pub async fn head(dir: &Path) -> Option<String> {
+    if let Some(read) = read_pinned(dir).await {
+        return read.and_then(|repository| repository.head);
+    }
     git(dir, &["rev-parse", "HEAD"], GIT_TIMEOUT)
         .await
         .ok()
@@ -77,10 +80,56 @@ pub async fn head(dir: &Path) -> Option<String> {
 
 /// `HEAD`'s branch, `None` when detached.
 pub async fn branch(dir: &Path) -> Option<String> {
+    if let Some(read) = read_pinned(dir).await {
+        return read.and_then(|repository| repository.branch);
+    }
     git(dir, &["symbolic-ref", "--short", "-q", "HEAD"], GIT_TIMEOUT)
         .await
         .ok()
         .filter(|s| !s.is_empty())
+}
+
+/// What the repository's own files say of `dir` ([`crate::git_read`]):
+/// `Some(None)` for no repository, and `None` when `git` must be asked.
+///
+/// The checkpointer asks these two things of every live session every
+/// minute, and a `git` process each time was the largest thing left in an
+/// idle daemon. [`git`] runs in a directory it has opened component by
+/// component, following no link; the files are read only while `dir` names
+/// that same directory, before the read and after it.
+async fn read_pinned(dir: &Path) -> Option<Option<crate::git_read::Repository>> {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let pinned = crate::safe_path::Directory::open(&dir).ok()?;
+        read_in(&dir, &pinned)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn read_in(
+    dir: &Path,
+    pinned: &crate::safe_path::Directory,
+) -> Option<Option<crate::git_read::Repository>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let same = || {
+        let held = rustix::fs::fstat(pinned.fd()).ok()?;
+        let named = std::fs::metadata(dir).ok()?;
+        // The casts only widen: the fields' types differ by platform.
+        #[allow(clippy::unnecessary_cast, clippy::cast_sign_loss)]
+        let is = named.dev() == held.st_dev as u64 && named.ino() == held.st_ino as u64;
+        is.then_some(())
+    };
+    same()?;
+    let answer = crate::git_read::read(dir);
+    same()?;
+    match answer {
+        crate::git_read::Answer::Repository(repository) => Some(Some(repository)),
+        crate::git_read::Answer::NotARepository => Some(None),
+        crate::git_read::Answer::Uncertain => None,
+    }
 }
 
 /// `origin`'s URL without credentials, if there is an `origin`.
@@ -258,6 +307,78 @@ pub async fn snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_git(dir: &Path, args: &[&str]) -> Option<String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .output()
+            .ok()?;
+        let text = String::from_utf8(output.stdout).ok()?;
+        (output.status.success() && !text.trim().is_empty()).then(|| text.trim().to_owned())
+    }
+
+    /// The branch and the commit are what `git` says, whether the files
+    /// settled them or `git` was asked.
+    #[tokio::test]
+    async fn the_branch_and_head_are_gits_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        let agree = |root: PathBuf| async move {
+            assert_eq!(
+                branch(&root).await,
+                run_git(&root, &["symbolic-ref", "--short", "-q", "HEAD"])
+            );
+            assert_eq!(head(&root).await, run_git(&root, &["rev-parse", "HEAD"]));
+        };
+        // No repository, then one with no commit, a commit, a tag sharing
+        // the branch's name (the files do not settle that), detached.
+        agree(root.clone()).await;
+        run_git(&root, &["init", "-q", "-b", "main"]);
+        agree(root.clone()).await;
+        assert_eq!(branch(&root).await.as_deref(), Some("main"));
+        assert_eq!(head(&root).await, None);
+        std::fs::write(root.join("a"), "a").unwrap();
+        run_git(&root, &["add", "a"]);
+        run_git(&root, &["commit", "-q", "-m", "a"]);
+        agree(root.clone()).await;
+        assert!(head(&root).await.is_some());
+        run_git(&root, &["tag", "main"]);
+        agree(root.clone()).await;
+        assert_eq!(branch(&root).await.as_deref(), Some("heads/main"));
+        run_git(&root, &["tag", "-d", "main"]);
+        run_git(&root, &["checkout", "-q", "--detach"]);
+        agree(root.clone()).await;
+        assert_eq!(branch(&root).await, None);
+    }
+
+    /// The files are read only while the path still names the directory
+    /// that was opened: another directory moved into its place is not read.
+    #[test]
+    fn a_directory_swapped_under_its_path_is_left_to_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let (root, other) = (base.join("repo"), base.join("other"));
+        for repo in [&root, &other] {
+            std::fs::create_dir(repo).unwrap();
+            run_git(repo, &["init", "-q", "-b", "main"]);
+        }
+        let pinned = crate::safe_path::Directory::open(&root).unwrap();
+        if crate::git_read::read(&root) == crate::git_read::Answer::Uncertain {
+            // An environment the files are never read in.
+            return;
+        }
+        assert!(matches!(read_in(&root, &pinned), Some(Some(_))));
+        std::fs::rename(&root, base.join("moved")).unwrap();
+        std::fs::rename(&other, &root).unwrap();
+        assert!(read_in(&root, &pinned).is_none());
+    }
 
     #[test]
     fn credentials_are_stripped() {
