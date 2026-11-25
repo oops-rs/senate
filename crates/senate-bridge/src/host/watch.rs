@@ -213,6 +213,12 @@ impl Screen {
         self.last_output.store(at, Ordering::Release);
     }
 
+    /// Whether the program asked for application cursor keys, which
+    /// changes what an arrow key sends ([`super::keys`]).
+    pub(super) fn application_cursor(&self) -> bool {
+        self.parser().screen().application_cursor()
+    }
+
     /// The text of each row of the screen, top to bottom. Kept in memory
     /// only, for [`super::prompt`].
     pub(super) fn rows(&self) -> Vec<String> {

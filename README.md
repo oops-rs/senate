@@ -674,6 +674,81 @@ inside a coding session's process tree, so an agent cannot approve its own
 prompts or another's. That check walks the caller's ancestors and is defence
 in depth: a process that detached from its agent escapes it.
 
+### Terminal Use
+
+Terminal use is to a terminal what computer use is to a desktop: an agent
+looks at a screen and operates it. An agent that has to drive something
+interactive (a REPL, a debugger, an installer, a TUI under test, Senate's own
+watch grid in a test home) opens a *scratch terminal* and works it through
+its `terminal` tool, or through the same commands in a script:
+
+```sh
+id=$(senate terminal open -- python3 -i)   # run a program; prints the terminal's id
+senate terminal wait $id --text '>>>'      # until the screen shows it (no polling)
+senate terminal type $id 'print(6 * 7)'    # typed as written; a line end is Enter
+senate terminal key $id enter              # named keys: down down enter, ctrl-c, esc, f5
+senate terminal screen $id                 # the screen as text, with size and cursor
+senate terminal wait $id --still 500       # until nothing was written for 500 ms
+senate terminal resize $id 40 120
+senate terminal close $id
+senate terminal list                       # yours; every one, from your own terminal
+senate terminal attach $id                 # a person takes it over (Ctrl-] detaches)
+senate terminal attach $id --read-only     # ...or only looks
+senate terminal screen --of reviewer       # a hosted session's screen (its chair, or you)
+```
+
+`open` takes `--rows`, `--cols` and `--cwd` before the `--`. `type`, `key` and
+`resize` print the screen once it settles; `wait` without `--text` or `--still`
+waits until the screen is other than its opener was last shown, returns at
+once when the program exits, and fails when `--timeout` (30 s by default, 300
+at most) runs out. A program that exits keeps its last screen, with how it
+ended, until the terminal is closed. `--json` prints any of it as JSON, and
+`--session <id>` names the coding session to act as where the shell's
+environment does not.
+
+**Opening is a shell command, and only a shell command.** The `terminal` tool
+has every action but `open`, and Senate's daemon starts no program for
+anyone. The process that runs `senate terminal open` starts the terminal's
+host itself, so the program has exactly that shell command's environment,
+working directory and sandbox, and went through whatever approval the
+runtime puts on its shell commands. (An MCP server is not the agent's shell:
+Codex and agy share one among all their sessions and approve its tools
+unasked, so a tool that started programs would run them outside the
+agent's sandbox.) The host leaves the opening command's session, so the
+terminal outlives that command and is not ended when a runtime kills the
+command's process group; the sandbox it was opened in still holds for
+everything typed into it later. A command killed before its terminal started
+leaves nothing: the reservation is forgotten within seconds.
+
+What a scratch terminal may and may not do, enforced by the daemon:
+
+- It belongs to the coding session that opened it. Every other session,
+  whatever its role, is told there is no such terminal. The session's own
+  identity is checked as for any other request: the caller must be a
+  process of that session's runtime.
+- A session may have four at a time. They are closed when the session ends,
+  and when it is found dead without having said so.
+- It is not a senator: no seat, no hooks, no approval relay. Inside it,
+  `senate` has no session identity, and person-only requests are refused as
+  they are from any hosted terminal.
+- From your own terminal you see all of them, read any, close any, and
+  attach to any. While you are attached the keyboard is yours: the owner's
+  `type`, `key` and `resize` are refused, in words that tell it to stop.
+  Nothing runs hidden.
+
+**No agent types into another session.** Typing, keys, resizing, waiting and
+closing exist for scratch terminals only, and the terminal of a hosted
+session is never one: an agent that could press keys there could answer
+that session's permission prompts. The one thing offered across sessions is
+reading. The chair of a committee may read the screen of a hosted senator
+on its own committee (`terminal` with `action: screen` and `session`, or
+`senate terminal screen --of <alias>`), to see what a stuck senator is
+showing. A member is refused, and so is another committee's chair. The
+screen comes back marked as untrusted text: it was not written for its
+reader, and nothing in it is an instruction. The host of a hosted session
+has no request for input at all, so the refusal does not rest on the daemon
+alone.
+
 ### The Default Secretary
 
 Each machine has one default secretary: a coding agent on the Speaker's
@@ -745,6 +820,7 @@ The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 | Group | Commands |
 | :--- | :--- |
 | `senate session` | `list` · `watch` · `find` · `approve` · `stop` · `restore` · `pause` · `resume` · `replace` · `prune` |
+| `senate terminal` | `open -- <command>` · `list` · `screen` · `type` · `key` · `wait` · `resize` · `close` · `attach` (scratch terminals; see [Terminal Use](#terminal-use)) |
 | `senate senator` | `list` · `alias` · `unalias` · `chair` · `seat` · `unseat` · `duty` |
 | `senate desk` | `list` (the default: what awaits the Speaker, as `committee#seq`) · `show <item>` · `answer <item> <text>` · `close <item> [--reason]` · `forward <item>` · `refuse <item> <reason>`; the Speaker in person, from your own terminal; items tab-complete |
 | `senate secretary` | `ask` (your default secretary) · `list` · `appoint` · `dismiss` · `work list\|show\|create\|assign` (the secretary team) · `desk` · `desk set` (the Speaker's desk workers, in order) |
@@ -1089,6 +1165,7 @@ Running `senate setup install --yes` registers these tools into your agent runti
 - `card`: Replace the bound seat card or the committee card if you chair it.
 - `secretary_work`: Read and claim shared work items across a secretary team.
 - `receipt`: Verify log publication status and local delivery receipts.
+- `terminal`: Read and drive a scratch terminal the session opened with `senate terminal open -- <command>` (`list`, `screen`, `type`, `key`, `wait`, `resize`, `close`); for a chair, read a hosted senator's screen. It starts no program. See [Terminal Use](#terminal-use).
 
 #### Presiding & Chair Tools
 - `speaker_docket`: Inspect picks, committee crossings, and unattended agent questions.

@@ -23,6 +23,8 @@ mod cli_open;
 mod cli_scene;
 #[path = "cli_secretary.rs"]
 mod cli_secretary;
+#[path = "cli_terminal.rs"]
+mod cli_terminal;
 #[path = "cli_remote.rs"]
 mod remote_cli;
 #[path = "cli_session_role.rs"]
@@ -275,6 +277,23 @@ enum Cmd {
     },
     /// Appoint session secretaries and manage their shared work.
     Secretary(cli_secretary::Secretary),
+    /// Operate a program in a scratch terminal: screen, type, keys, wait.
+    ///
+    /// Terminal use, for an agent that has to drive something interactive
+    /// (a REPL, a debugger, an installer, a TUI under test) and for scripts.
+    /// `open` runs the program with this shell's own rights and prints the
+    /// terminal's id; the other commands, and an agent's `terminal` tool,
+    /// take that id. A scratch terminal belongs to the coding session that
+    /// opened it: nobody else's session can read or type into it, and it
+    /// is closed when that session ends. From your own terminal you see
+    /// them all (`list`), and can look at one or take it over (`attach`).
+    #[command(after_help = "Examples:
+  id=$(senate terminal open -- python3 -i)
+  senate terminal wait $id --text '>>>'
+  senate terminal type $id 'print(6 * 7)'
+  senate terminal key $id enter
+  senate terminal close $id")]
+    Terminal(cli_terminal::Terminal),
     /// List and decide what awaits the Speaker.
     ///
     /// Read an item, and answer, close, forward or refuse it: the Speaker
@@ -725,6 +744,19 @@ stdin.")]
         id: EventId,
         program: PathBuf,
         cwd: PathBuf,
+    },
+    /// The host of a scratch terminal, started by `senate terminal open`.
+    #[command(hide = true)]
+    TerminalHost {
+        id: EventId,
+        #[arg(long)]
+        rows: u16,
+        #[arg(long)]
+        cols: u16,
+        #[arg(long)]
+        cwd: PathBuf,
+        #[arg(required = true, last = true)]
+        command: Vec<std::ffi::OsString>,
     },
     /// Manual checks of the delivery plumbing.
     #[command(hide = true)]
@@ -3666,6 +3698,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         Cmd::Session { command } => run_session(command, output),
         Cmd::Senator { command } => run_senator(command, output),
         Cmd::Secretary(args) => cli_secretary::run(args),
+        Cmd::Terminal(args) => cli_terminal::run(args),
         Cmd::Desk(args) => cli_desk::run(args),
         Cmd::Chat(args) => cli_chat::run(args),
         Cmd::DeskWorker { command } => {
@@ -4270,6 +4303,25 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             let paths = Paths::from_env()?;
             runtime(false)?.block_on(crate::host::codex_backend::supervise(
                 &paths, &id, &program, &cwd,
+            ))
+        }
+        Cmd::TerminalHost {
+            id,
+            rows,
+            cols,
+            cwd,
+            command,
+        } => {
+            let paths = Paths::from_env()?;
+            runtime(false)?.block_on(crate::host::scratch::run(
+                &paths,
+                &id,
+                &crate::host::scratch::Program {
+                    argv: &command,
+                    cwd: &cwd,
+                    rows,
+                    cols,
+                },
             ))
         }
         Cmd::Mcp {

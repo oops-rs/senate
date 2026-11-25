@@ -1659,7 +1659,13 @@ impl Shared {
         limit: usize,
     ) -> Result<(), IpcError> {
         let mut used: BTreeSet<EventId> = launches.keys().cloned().collect();
-        used.extend(host::running_ids(paths).map_err(IpcError::internal)?);
+        // A scratch terminal is no hosted session: it has its own limit.
+        used.extend(
+            host::running_ids(paths)
+                .map_err(IpcError::internal)?
+                .into_iter()
+                .filter(|id| !host::scratch::is_scratch(paths, id)),
+        );
         if used.len() >= limit {
             return Err(IpcError::bad_request(format!(
                 "the machine is at its hosted session limit ({limit})"

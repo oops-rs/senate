@@ -1098,6 +1098,7 @@ macro_rules! request_selector {
             | Request::SpeakerUnseat { session, .. }
             | Request::Forward { session, .. }
             | Request::Refuse { session, .. }
+            | Request::Terminal { session, .. }
             | Request::SetChair { session, .. } => Some(session),
             Request::RemoteControl { .. }
             | Request::ObserveAdmin { .. }

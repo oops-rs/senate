@@ -277,6 +277,15 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
                 Operator
             }
         }
+        // A session acts on its own scratch terminals (the daemon checks
+        // whose each one is); without a session it is the person's.
+        Request::Terminal { session, .. } => {
+            if session == &SessionSelector::default() {
+                Operator
+            } else {
+                SessionOrRead
+            }
+        }
 
         Request::ServerHealth
         | Request::Ping

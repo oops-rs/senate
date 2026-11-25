@@ -622,7 +622,8 @@ async fn ask_answer_and_catch_up_end_to_end() {
             "secretary_cover",
             "secretary_work",
             "status",
-            "take"
+            "take",
+            "terminal"
         ]
     );
     let tool = |name: &str| {
