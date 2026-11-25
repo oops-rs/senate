@@ -1,4 +1,5 @@
 import AppKit
+import LocalAuthentication
 import SenateCore
 
 @MainActor
@@ -8,14 +9,22 @@ enum PersonApprovalPresenter {
         while !Task.isCancelled {
             if let home = store.senateHome, NSApp.modalWindow == nil {
                 let prompts = await Task.detached(priority: .utility) {
-                    personApprovalPrompts(home: home).map { (id: $0.id, display: $0.display) }
+                    personApprovalPrompts(home: home).map { (id: $0.id, display: $0.display, reason: $0.reason) }
                 }.value
                 shown.formIntersection(prompts.map(\.id))
                 if !Task.isCancelled, let prompt = prompts.first(where: { !shown.contains($0.id) }) {
                     shown.insert(prompt.id)
-                    let allowed = confirm(details: prompt.display)
+                    var allowed = false
+                    if confirm(details: prompt.display) && !Task.isCancelled {
+                        let context = LAContext()
+                        context.touchIDAuthenticationAllowableReuseDuration = 0
+                        allowed = (try? await context.evaluatePolicy(
+                            .deviceOwnerAuthentication, localizedReason: prompt.reason
+                        )) == true
+                    }
+                    let approved = allowed && !Task.isCancelled
                     _ = await Task.detached(priority: .utility) {
-                        resolvePersonApproval(home: home, id: prompt.id, approved: allowed)
+                        resolvePersonApproval(home: home, id: prompt.id, approved: approved)
                     }.value
                 }
             }

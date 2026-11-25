@@ -1,21 +1,20 @@
 //! Caller checks for person-only IPC and app-confirmed operations.
 //!
-//! IPC admission rejects operator requests from protected hosted processes.
-//! On macOS it requires a per-request Mach proof of process generation and
-//! coalition membership. Missing proof is a refusal. On Linux and WSL with
-//! administrator-provisioned cgroups it checks membership using a stable
-//! socket peer handle. These checks survive reparenting.
+//! On macOS, operator IPC requires a per-request Mach proof of process
+//! generation, an eligible signed origin, and an unblocked coalition.
+//! Linux/WSL with provisioned cgroups check membership using a stable socket
+//! peer handle. Inherited membership survives reparenting.
 //!
 //! A kernel ancestry walk additionally rejects recorded runtimes, hosts,
 //! the daemon and named coding runtimes. Native detached agents, shared
-//! Codex backends outside protected scopes, and jobs started independently
-//! by system schedulers can pass routine checks. Linux and WSL advertise an
+//! Codex backends outside protected scopes, and eligible terminal deputies
+//! can pass routine checks. Linux and WSL advertise an
 //! advisory guard when protected scopes are unavailable.
 //!
-//! Line-bearing Observe grants and session rebind also require a signed
-//! macOS app decision. A decision applies once to the exact queued request.
-//! These operations are refused without the signed app, including on Linux
-//! and WSL. See `docs/person-guard.md` for platform and hook policy.
+//! Sensitive mutations require a decision from the pinned Mac app or an
+//! OS user-authentication result in a trusted component. A decision applies
+//! once to the exact request. Sensitive operations are refused in unsupported
+//! environments. See `docs/person-guard.md` for platform and hook policy.
 
 use std::collections::BTreeMap;
 
@@ -24,9 +23,16 @@ use crate::host;
 
 /// The most ancestors walked; a deeper chain is refused.
 const DEPTH: usize = 64;
-pub(super) const APP_CONFIRMATION: &str = "This operation requires confirmation in the signed Senate app on the machine hosting this Senate";
+pub(super) const APP_CONFIRMATION: &str = "This operation requires confirmation in the signed Senate app or local user authentication on the hosting Mac. Use the signed app there";
 /// Executable names of the coding runtimes.
 const RUNTIMES: [&str; 3] = ["claude", "codex", "agy"];
+
+pub(super) struct PresencePeer {
+    pub operator: Option<u32>,
+    pub session: Option<u32>,
+    pub signed_app: bool,
+    pub remote_operator: bool,
+}
 
 pub(super) fn advisory_notice(locale: Locale) -> Option<&'static str> {
     #[cfg(target_os = "linux")]
@@ -331,7 +337,7 @@ impl Front {
     #[cfg(target_os = "macos")]
     pub(super) async fn app_confirmed_dispatch<R: tokio::io::AsyncBufRead + Unpin>(
         self: &Arc<Self>,
-        peer: Option<u32>,
+        peer: PresencePeer,
         request: Request,
         reader: &mut R,
         mut shutdown: watch::Receiver<bool>,
@@ -339,19 +345,133 @@ impl Front {
         use crate::app_confirmation::{EnqueueError, LIFETIME};
         use tokio::io::AsyncBufReadExt;
 
-        if let Err(error) = self.refuse_agent_caller(peer, APP_CONFIRMATION).await {
-            return Reply::err(error);
-        }
-        let mut ticket = match self.app_confirmations.enqueue(request) {
-            Ok(ticket) => ticket,
-            Err(EnqueueError::AppUnavailable) => return Reply::err(refusal(APP_CONFIRMATION)),
-            Err(EnqueueError::Busy) => {
-                return Reply::err(refusal("The Senate app has too many pending confirmations"));
+        let session_action = role_selector(&request).is_some()
+            || matches!(&request, Request::SetCard { session, .. } if session != &SessionSelector::default());
+        let requester_pid = if session_action {
+            peer.session
+        } else {
+            if let Err(error) = self
+                .refuse_agent_caller(peer.operator, APP_CONFIRMATION)
+                .await
+            {
+                return Reply::err(error);
             }
-            Err(EnqueueError::RequestTooLarge) => {
-                return Reply::err(IpcError::bad_request(
+            peer.operator
+        };
+        if peer.signed_app && !session_action {
+            return self
+                .dispatch_app_confirmation(
+                    self.app_confirmations.accept_signed_app(request),
+                    peer.session,
+                )
+                .await;
+        }
+        if peer.remote_operator
+            || requester_pid.is_none_or(|pid| {
+                kernel_process::ancestors(pid, DEPTH).map_or(true, |ancestors| {
+                    ancestors.into_iter().any(|process| {
+                        kernel_process::executable(process.pid).is_ok_and(|path| {
+                            matches!(
+                                path.to_str(),
+                                Some("/usr/sbin/sshd" | "/usr/libexec/sshd-session")
+                            )
+                        })
+                    })
+                })
+            })
+        {
+            return Reply::err(refusal(APP_CONFIRMATION));
+        }
+        let requester = requester_pid.map_or_else(
+            || "unidentified process".to_owned(),
+            |pid| {
+                let program = kernel_process::ancestors(pid, DEPTH)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|process| kernel_process::executable(process.pid).ok())
+                    .find_map(|path| {
+                        let name = path.file_name()?.to_str()?;
+                        matches!(name, "tmux" | "screen" | "Terminal" | "iTerm2" | "ghostty")
+                            .then(|| name.to_owned())
+                    })
+                    .or_else(|| {
+                        kernel_process::executable(pid)
+                            .ok()?
+                            .file_name()?
+                            .to_str()
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| "process".to_owned());
+                let program: String = program
+                    .chars()
+                    .take(64)
+                    .flat_map(char::escape_default)
+                    .collect();
+                let terminal = kernel_process::terminal(pid)
+                    .map(|name| format!(", {}", name.escape_default()))
+                    .unwrap_or_default();
+                format!("{program} (PID {pid}{terminal})")
+            },
+        );
+        let mut reason = crate::app_confirmation::request_reason(&request, &requester);
+        let approval_target = if let Request::ApproveSession { senator, decision } = &request {
+            match self.primary().pending_hosted_approval(senator).await {
+                Ok(target) => {
+                    let subject: String = target
+                        .description
+                        .chars()
+                        .take(120)
+                        .flat_map(char::escape_default)
+                        .collect();
+                    reason = format!("{decision:?} {subject} — requested by {requester}");
+                    Some(target)
+                }
+                Err(error) => return Reply::err(error),
+            }
+        } else {
+            None
+        };
+        if let Request::AuthorizeNativeAuthority {
+            session_id,
+            approval,
+        } = &request
+        {
+            match self.pending_native_details(session_id) {
+                Ok(Some(candidate)) if &candidate.approval == approval => {
+                    reason = format!(
+                        "{reason}\nPID {} running {:?}, team {}, cwd {:?}, hosted {}, started {:?}",
+                        candidate.pid,
+                        candidate.executable,
+                        candidate.signing_team.as_deref().unwrap_or("none verified"),
+                        candidate.cwd,
+                        candidate.hosted,
+                        candidate.started_at
+                    );
+                }
+                Ok(_) => {
+                    return Reply::err(IpcError::bad_request(
+                        "The pending process changed before authorization",
+                    ));
+                }
+                Err(error) => return Reply::err(error),
+            }
+        }
+        let authorization = async {
+            match self.app_confirmations.enqueue(request.clone(), &reason) {
+                Ok(mut ticket) => Ok((&mut ticket.reply).await.ok().flatten()),
+                Err(EnqueueError::AppUnavailable) => {
+                    let home = &self.primary().home;
+                    Ok(self
+                        .app_confirmations
+                        .authenticate_helper(home, request, &reason)
+                        .await)
+                }
+                Err(EnqueueError::Busy) => {
+                    Err(refusal("The Senate app has too many pending confirmations"))
+                }
+                Err(EnqueueError::RequestTooLarge) => Err(IpcError::bad_request(
                     "The confirmation request is too large",
-                ));
+                )),
             }
         };
         let approved = tokio::select! {
@@ -359,18 +479,36 @@ impl Front {
             _ = shutdown.changed() => None,
             _ = reader.fill_buf() => None,
             _ = tokio::time::sleep(LIFETIME) => None,
-            result = &mut ticket.reply => result.ok().flatten(),
+            result = authorization => match result {
+                Ok(value) => value,
+                Err(error) => return Reply::err(error),
+            },
         };
         let Some(approved) = approved else {
-            return Reply::err(refusal("The Senate app did not confirm this request"));
+            return Reply::err(refusal(APP_CONFIRMATION));
         };
-        self.dispatch_app_confirmation(approved).await
+        if let Some(target) = approval_target {
+            let Request::ApproveSession { decision, .. } = approved.into_request() else {
+                unreachable!("presence request is sealed to its original payload");
+            };
+            return wrap(
+                self.primary()
+                    .answer_confirmed_hosted_prompt(&target, decision)
+                    .await,
+            );
+        }
+        self.dispatch_app_confirmation(approved, peer.session).await
     }
 
     #[cfg(not(target_os = "macos"))]
     pub(super) async fn app_confirmed_dispatch<R: tokio::io::AsyncBufRead + Unpin>(
         self: &Arc<Self>,
-        _peer: Option<u32>,
+        PresencePeer {
+            operator: _,
+            session: _,
+            signed_app: _,
+            remote_operator: _,
+        }: PresencePeer,
         _request: Request,
         _reader: &mut R,
         _shutdown: watch::Receiver<bool>,

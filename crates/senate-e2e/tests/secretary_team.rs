@@ -357,7 +357,7 @@ async fn appointed_native_sessions_share_explicit_work_across_committees() {
     b.wait_for(&first.id.to_string()).await;
     // The principal's second machine has never registered work-b locally.
     let other_paths = senate_bridge::Paths::new(root.path().join("other-machine"));
-    let other = senate_bridge::daemon::start(senate_bridge::daemon::DaemonOptions {
+    let other = start_fixture_bridge(senate_bridge::daemon::DaemonOptions {
         paths: other_paths.clone(),
         config: senate_bridge::BridgeConfig::new(
             &desk.senate().url,
@@ -367,8 +367,7 @@ async fn appointed_native_sessions_share_explicit_work_across_committees() {
         timing: fast_timing(),
         desktop: None,
     })
-    .await
-    .unwrap();
+    .await;
     let dismissed: senate_core::api::Secretaries = ipc::request(
         &other_paths.socket(),
         &Request::SetSecretarySession {

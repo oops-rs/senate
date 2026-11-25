@@ -753,6 +753,18 @@ pub async fn start_in_process(
     start_bridge(options, host_binary, true, observe, observe_consent, false).await
 }
 
+/// Start an unsigned, disposable machine fixture. The scope fixture still
+/// checks the build and home before allowing fixture callers.
+#[doc(hidden)]
+pub async fn start_in_process_fixture(
+    options: DaemonOptions,
+    observe: Option<Arc<senate_observe::Registry>>,
+    observe_consent: Option<Arc<senate_observe::AppConsentedGrants>>,
+) -> anyhow::Result<DaemonHandle> {
+    let host_binary = std::env::current_exe()?.with_file_name("senate");
+    start_bridge(options, host_binary, true, observe, observe_consent, true).await
+}
+
 /// Start the bridge with a companion Senate CLI at an explicit path.
 pub async fn start_with_host_binary(
     options: DaemonOptions,
@@ -6665,7 +6677,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                 let fixture = shared.scope_fixture
                     || (cfg!(debug_assertions) && peer == Some(std::process::id()));
                 #[cfg(target_os = "macos")]
-                let (line, person_peer, session_peer) = {
+                let (line, person_peer, session_peer, signed_app, remote_operator) = {
                     use crate::mac_scope::ProofKind;
                     if let Some((ticket, body)) = line
                         .strip_prefix("SCOPE1 ")
@@ -6679,15 +6691,24 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         (
                             body,
                             attested
-                                .filter(|(_, kind)| *kind == ProofKind::Operator)
+                                .filter(|(_, kind)| {
+                                    matches!(
+                                        kind,
+                                        ProofKind::Operator
+                                            | ProofKind::App
+                                            | ProofKind::RemoteOperator
+                                    )
+                                })
                                 .map(|(sender, _)| sender.pid),
                             attested
                                 .filter(|(_, kind)| *kind == ProofKind::Session)
                                 .map(|(sender, _)| sender.pid),
+                            attested.is_some_and(|(_, kind)| kind == ProofKind::App),
+                            attested.is_some_and(|(_, kind)| kind == ProofKind::RemoteOperator),
                         )
                     } else {
                         let permitted = peer.filter(|_| fixture);
-                        (line.as_str(), permitted, permitted)
+                        (line.as_str(), permitted, permitted, false, false)
                     }
                 };
                 #[cfg(target_os = "linux")]
@@ -6707,6 +6728,8 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                 };
                 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                 let (line, person_peer, session_peer) = (line.as_str(), peer, peer);
+                #[cfg(not(target_os = "macos"))]
+                let (signed_app, remote_operator) = (false, false);
                 let decoded = serde_json::from_str::<Request>(line);
                 let role_refusal = if fixture {
                     None
@@ -6719,6 +6742,27 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                 };
                 match decoded {
                     Ok(_) if let Some(error) = role_refusal => (Reply::err(error), false),
+                    Ok(request)
+                        if crate::app_confirmation::required(&request)
+                            && (!fixture
+                                || crate::app_confirmation::fixture_requires_confirmation(
+                                    &request,
+                                )) =>
+                    {
+                        let reply = Box::pin(shared.app_confirmed_dispatch(
+                            approval_guard::PresencePeer {
+                                operator: person_peer,
+                                session: session_peer,
+                                signed_app,
+                                remote_operator,
+                            },
+                            request,
+                            &mut reader,
+                            shutdown.clone(),
+                        ))
+                        .await;
+                        (reply, false)
+                    }
                     Ok(Request::RemoteControl { command }) => {
                         let reply = match shared
                             .refuse_agent_caller(
@@ -6728,25 +6772,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                             .await
                         {
                             Err(error) => Reply::err(error),
-                            Ok(()) => match command {
-                                crate::remote::Control::PrepareEnable { listen } => wrap(
-                                    crate::remote::prepare_enable(
-                                        &Paths::new(&shared.primary().home),
-                                        listen,
-                                    )
-                                    .map_err(|error| IpcError::bad_request(error.to_string())),
-                                ),
-                                command => match &shared.remote {
-                                    Some(remote) => wrap(
-                                        remote
-                                            .control(command)
-                                            .map_err(|e| IpcError::bad_request(e.to_string())),
-                                    ),
-                                    None => Reply::err(IpcError::bad_request(
-                                        "remote access is disabled on this machine",
-                                    )),
-                                },
-                            },
+                            Ok(()) => shared.dispatch_remote_control(command),
                         };
                         (reply, false)
                     }
@@ -6908,16 +6934,6 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                             }
                             Err(error) => Reply::err(error),
                         };
-                        (reply, false)
-                    }
-                    Ok(request) if crate::app_confirmation::required(&request) => {
-                        let reply = Box::pin(shared.app_confirmed_dispatch(
-                            person_peer,
-                            request,
-                            &mut reader,
-                            shutdown.clone(),
-                        ))
-                        .await;
                         (reply, false)
                     }
                     Ok(request) if let Some(guidance) = approval_guard::person_only(&request) => (

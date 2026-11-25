@@ -12,6 +12,7 @@ pub(crate) const LIFETIME: Duration = Duration::from_secs(60);
 pub struct Prompt {
     pub id: EventId,
     pub display: String,
+    pub reason: String,
 }
 
 #[cfg(target_os = "macos")]
@@ -32,6 +33,7 @@ mod queue {
     #[derive(Default)]
     pub(crate) struct Queue {
         state: Mutex<State>,
+        helper: tokio::sync::Mutex<()>,
     }
 
     #[derive(Default)]
@@ -51,6 +53,7 @@ mod queue {
     struct Pending {
         request: Request,
         display: String,
+        reason: String,
         created: Instant,
         result: oneshot::Sender<Option<ConfirmedRequest>>,
     }
@@ -76,9 +79,31 @@ mod queue {
     }
 
     impl Queue {
-        pub(crate) fn enqueue(self: &Arc<Self>, request: Request) -> Result<Ticket, EnqueueError> {
-            let display = serde_json::to_string_pretty(&request)
-                .map_err(|_| EnqueueError::RequestTooLarge)?;
+        pub(crate) fn accept_signed_app(&self, request: Request) -> ConfirmedRequest {
+            ConfirmedRequest(request)
+        }
+
+        pub(crate) async fn authenticate_helper(
+            &self,
+            home: &std::path::Path,
+            request: Request,
+            reason: &str,
+        ) -> Option<ConfirmedRequest> {
+            let _exclusive = self.helper.try_lock().ok()?;
+            macos::authenticate_helper(home, reason)
+                .await
+                .then_some(ConfirmedRequest(request))
+        }
+
+        pub(crate) fn enqueue(
+            self: &Arc<Self>,
+            request: Request,
+            reason: &str,
+        ) -> Result<Ticket, EnqueueError> {
+            let value =
+                serde_json::to_value(&request).map_err(|_| EnqueueError::RequestTooLarge)?;
+            let display =
+                serde_json::to_string_pretty(&value).map_err(|_| EnqueueError::RequestTooLarge)?;
             // Keep untrusted text visibly escaped in the signed app's prompt.
             let mut escaped = String::with_capacity(display.len());
             for ch in display.chars() {
@@ -88,7 +113,7 @@ mod queue {
                     escaped.extend(ch.escape_unicode());
                 }
             }
-            let display = escaped;
+            let display = format!("{reason}\n\n{escaped}");
             if display.len() > 16 * 1024 {
                 return Err(EnqueueError::RequestTooLarge);
             }
@@ -111,6 +136,7 @@ mod queue {
                 Pending {
                     request,
                     display,
+                    reason: reason.to_owned(),
                     created: now,
                     result,
                 },
@@ -141,6 +167,7 @@ mod queue {
                 .map(|(id, item)| Prompt {
                     id: id.clone(),
                     display: item.display.clone(),
+                    reason: item.reason.clone(),
                 })
                 .collect()
         }
@@ -177,12 +204,12 @@ mod queue {
         fn approval_is_bound_to_one_queued_request() {
             let queue = Arc::new(Queue::default());
             assert!(matches!(
-                queue.enqueue(Request::Ping),
+                queue.enqueue(Request::Ping, "test terminal"),
                 Err(EnqueueError::AppUnavailable)
             ));
             assert!(queue.poll().is_empty());
-            let mut first = queue.enqueue(Request::Ping).unwrap();
-            let mut second = queue.enqueue(Request::Status).unwrap();
+            let mut first = queue.enqueue(Request::Ping, "test terminal").unwrap();
+            let mut second = queue.enqueue(Request::Status, "test terminal").unwrap();
             assert_ne!(first.id, second.id);
             assert!(!queue.respond(&EventId::new(), true));
             assert!(queue.respond(&first.id, true));
@@ -199,11 +226,11 @@ mod queue {
         fn dropped_or_expired_requests_cannot_be_approved() {
             let queue = Arc::new(Queue::default());
             queue.poll();
-            let dropped = queue.enqueue(Request::Ping).unwrap();
+            let dropped = queue.enqueue(Request::Ping, "test terminal").unwrap();
             let id = dropped.id.clone();
             drop(dropped);
             assert!(!queue.respond(&id, true));
-            let expired = queue.enqueue(Request::Ping).unwrap();
+            let expired = queue.enqueue(Request::Ping, "test terminal").unwrap();
             queue
                 .state
                 .lock()
@@ -215,6 +242,43 @@ mod queue {
             assert!(!queue.respond(&expired.id, true));
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> String {
+    use crate::ipc::Request;
+    let action = match request {
+        Request::ApproveSession { senator, decision } => {
+            format!("{decision:?} permission prompt for {senator}")
+        }
+        Request::Approve { id, decision } => format!("{decision:?} permission prompt {id}"),
+        Request::AuthorizeNativeAuthority { session_id, .. } => {
+            format!("Authorize native seat {session_id}")
+        }
+        Request::ObserveAdmin { command } => {
+            let action = serde_json::to_value(command).ok();
+            let verb = action
+                .as_ref()
+                .and_then(|value| value["action"].as_str())
+                .unwrap_or("change");
+            format!("{verb} Observe access")
+        }
+        other => serde_json::to_value(other)
+            .ok()
+            .and_then(|value| value["op"].as_str().map(|op| op.replace('_', " ")))
+            .unwrap_or_else(|| "Senate action".into()),
+    };
+    let action: String = action
+        .chars()
+        .take(110)
+        .flat_map(char::escape_default)
+        .collect();
+    format!("{action} — requested by {requester}")
+}
+
+#[cfg(target_os = "macos")]
+pub fn run_presence_helper() -> anyhow::Result<()> {
+    macos::run_presence_helper()
 }
 
 #[cfg(target_os = "macos")]
@@ -289,6 +353,8 @@ fn call(paths: &Paths, command: AppCommand) -> Option<AppReply> {
     macos::call(
         &service_name(&message.home),
         &serde_json::to_vec(&message).ok()?,
+        &message.home,
+        true,
     )
 }
 
@@ -302,7 +368,8 @@ fn call(_: &Paths, _: AppCommand) -> Option<AppReply> {
 pub(crate) mod macos {
     use super::*;
     use std::ffi::{CString, c_char, c_void};
-    use std::path::PathBuf;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
     use std::ptr::NonNull;
     use std::sync::Arc;
 
@@ -312,6 +379,8 @@ pub(crate) mod macos {
     }
 
     unsafe extern "C" {
+        fn senate_device_owner_authenticated(reason: *const c_char) -> bool;
+        fn senate_guest_team(pid: i32, text: *mut c_char, size: usize) -> bool;
         pub(crate) fn senate_xpc_listen(
             name: *const c_char,
             requirement: *const c_char,
@@ -328,6 +397,17 @@ pub(crate) mod macos {
             size: usize,
             reply_size: *mut usize,
         ) -> *mut u8;
+        fn senate_code_hash_path(
+            path: *const c_char,
+            requirement: *const c_char,
+            hash: *mut u8,
+        ) -> bool;
+        fn senate_code_hash_guest(
+            audit: *const u32,
+            pid: i32,
+            requirement: *const c_char,
+            hash: *mut u8,
+        ) -> bool;
     }
 
     pub(crate) struct Listener(pub(crate) NonNull<c_void>);
@@ -342,11 +422,196 @@ pub(crate) mod macos {
         }
     }
 
-    fn requirement(identifier: &str) -> Option<CString> {
+    pub(crate) fn requirement(identifier: &str) -> Option<CString> {
         let team = team()?;
         CString::new(format!(
             "anchor apple generic and identifier \"{identifier}\" and certificate leaf[subject.OU] = \"{team}\""
         )).ok()
+    }
+
+    const PIN_NAME: &str = "presence-code.json";
+
+    #[derive(Serialize, Deserialize)]
+    struct InstalledCode {
+        app: Option<(PathBuf, [u8; 20])>,
+        daemon: [u8; 20],
+    }
+
+    fn installed(home: &Path) -> Option<InstalledCode> {
+        serde_json::from_slice(&std::fs::read(home.join(PIN_NAME)).ok()?).ok()
+    }
+
+    fn hash_path(path: &Path, requirement: &std::ffi::CStr) -> Option<[u8; 20]> {
+        let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut hash = [0; 20];
+        unsafe { senate_code_hash_path(path.as_ptr(), requirement.as_ptr(), hash.as_mut_ptr()) }
+            .then_some(hash)
+    }
+
+    pub(crate) fn guest_hash(
+        audit: Option<&[u32; 8]>,
+        pid: u32,
+        requirement: &std::ffi::CStr,
+    ) -> Option<[u8; 20]> {
+        let mut hash = [0; 20];
+        let audit = audit.map_or(std::ptr::null(), |token| token.as_ptr());
+        let pid = i32::try_from(pid).ok()?;
+        unsafe { senate_code_hash_guest(audit, pid, requirement.as_ptr(), hash.as_mut_ptr()) }
+            .then_some(hash)
+    }
+
+    pub(crate) fn trusted_app(home: &Path, audit: &[u32; 8]) -> bool {
+        let Some((_, expected)) = installed(home).and_then(|pins| pins.app) else {
+            return false;
+        };
+        requirement("dev.senate.app").is_some_and(|requirement| {
+            guest_hash(Some(audit), audit[5], &requirement) == Some(expected)
+        })
+    }
+
+    pub(crate) fn signing_team(pid: u32) -> Option<String> {
+        let pid = i32::try_from(pid).ok()?;
+        let mut team = [0; 32];
+        unsafe { senate_guest_team(pid, team.as_mut_ptr(), team.len()) }.then(|| {
+            unsafe { std::ffi::CStr::from_ptr(team.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        })
+    }
+
+    pub(crate) fn pin_doctor(home: &Path) -> crate::doctor::Check {
+        use crate::doctor::Check;
+
+        const ID: &str = "person_presence.app";
+        const FIX: &str = "Run senate setup service install --yes --app /path/to/Senate.app";
+        let Some((path, expected)) = installed(home).and_then(|pins| pins.app) else {
+            return Check::warn(ID, "No Senate app code is pinned", Some(FIX));
+        };
+        let Some(requirement) = requirement("dev.senate.app") else {
+            return Check::warn(ID, "This build has no Apple signing team", Some(FIX));
+        };
+        if hash_path(&path, &requirement) != Some(expected) {
+            return Check::warn(
+                ID,
+                "The installed Senate app does not match the pin",
+                Some(FIX),
+            );
+        }
+        if !crate::kernel_process::running_pids()
+            .into_iter()
+            .any(|pid| {
+                crate::kernel_process::executable(pid)
+                    .is_ok_and(|program| program.starts_with(&path))
+                    && guest_hash(None, pid, &requirement) == Some(expected)
+            })
+        {
+            return Check::warn(
+                ID,
+                "The pinned Senate app is not running",
+                Some("Open the installed Senate app"),
+            );
+        }
+        Check::ok(ID, "The running Senate app matches its installed code pin")
+    }
+
+    pub(crate) fn trusted_helper(home: &Path, pid: u32) -> bool {
+        let Some(pins) = installed(home) else {
+            return false;
+        };
+        requirement("dev.senate.daemon")
+            .is_some_and(|requirement| guest_hash(None, pid, &requirement) == Some(pins.daemon))
+    }
+
+    pub(super) async fn authenticate_helper(home: &Path, reason: &str) -> bool {
+        use std::process::Stdio;
+        use tokio::io::AsyncWriteExt as _;
+
+        let Ok(executable) = std::env::current_exe() else {
+            return false;
+        };
+        let Ok(mut child) = tokio::process::Command::new(executable)
+            .arg("--person-presence-helper")
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+        else {
+            return false;
+        };
+        if !child.id().is_some_and(|pid| trusted_helper(home, pid)) {
+            return false;
+        }
+        let Some(mut input) = child.stdin.take() else {
+            return false;
+        };
+        if input.write_all(reason.as_bytes()).await.is_err() {
+            return false;
+        }
+        drop(input);
+        child.wait().await.is_ok_and(|status| status.success())
+    }
+
+    pub(super) fn run_presence_helper() -> anyhow::Result<()> {
+        use std::io::Read as _;
+
+        let requirement = requirement("dev.senate.daemon")
+            .ok_or_else(|| anyhow::anyhow!("Missing daemon signing requirement"))?;
+        let own_signature = guest_hash(None, std::process::id(), &requirement);
+        let parent = std::os::unix::process::parent_id();
+        anyhow::ensure!(
+            own_signature.is_some() && guest_hash(None, parent, &requirement) == own_signature,
+            "The presence helper requires its signed daemon parent"
+        );
+        let mut reason = Vec::new();
+        std::io::stdin().take(4097).read_to_end(&mut reason)?;
+        anyhow::ensure!(
+            (1..=4096).contains(&reason.len()),
+            "Invalid authentication request"
+        );
+        let reason = CString::new(reason)?;
+        anyhow::ensure!(
+            unsafe { senate_device_owner_authenticated(reason.as_ptr()) },
+            "Authentication declined or unavailable"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn install_pins(
+        home: &Path,
+        app: Option<&Path>,
+        daemon: &Path,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        use std::io::Write as _;
+
+        if team().is_none() {
+            anyhow::ensure!(app.is_none(), "This build has no configured signing team");
+            return Ok(());
+        }
+        let daemon_rule =
+            requirement("dev.senate.daemon").context("Invalid daemon signing requirement")?;
+        let daemon = hash_path(daemon, &daemon_rule)
+            .context("senated does not have the required code identity")?;
+        let app = app
+            .map(|path| -> anyhow::Result<_> {
+                let path = path
+                    .canonicalize()
+                    .context("locating the installed Senate app")?;
+                let app_rule =
+                    requirement("dev.senate.app").context("Invalid app signing requirement")?;
+                let hash = hash_path(&path, &app_rule)
+                    .context("The installed Senate app does not have the required code identity")?;
+                Ok((path, hash))
+            })
+            .transpose()?;
+        let mut file = tempfile::NamedTempFile::new_in(home)?;
+        serde_json::to_writer(&mut file, &InstalledCode { app, daemon })?;
+        file.flush()?;
+        file.as_file().sync_all()?;
+        file.persist(home.join(PIN_NAME))?;
+        Ok(())
     }
 
     pub(crate) fn listen(paths: &Paths, queue: Arc<Queue>) -> Option<Listener> {
@@ -380,7 +645,7 @@ pub(crate) mod macos {
         bytes: *const u8,
         len: usize,
         reply: *mut c_void,
-        _audit: *const u32,
+        audit: *const u32,
     ) {
         // libxpc owns the input and reply objects for the duration of this
         // callback. The listener's context outlives its peer connections.
@@ -389,7 +654,8 @@ pub(crate) mod macos {
         let Ok(message) = serde_json::from_slice::<AppMessage>(bytes) else {
             return;
         };
-        let response = if message.home != context.home {
+        let audit = unsafe { &*audit.cast::<[u32; 8]>() };
+        let response = if message.home != context.home || !trusted_app(&context.home, audit) {
             AppReply::WrongHome
         } else {
             match message.command {
@@ -407,9 +673,24 @@ pub(crate) mod macos {
         }
     }
 
-    pub(crate) fn call<T: serde::de::DeserializeOwned>(service: &str, message: &[u8]) -> Option<T> {
+    pub(crate) fn call<T: serde::de::DeserializeOwned>(
+        service: &str,
+        message: &[u8],
+        home: &Path,
+        require_pin: bool,
+    ) -> Option<T> {
         let name = CString::new(service).ok()?;
-        let requirement = requirement("dev.senate.daemon")?;
+        let mut requirement = requirement("dev.senate.daemon")?;
+        if let Some(pin) = installed(home) {
+            requirement = CString::new(format!(
+                "{} and cdhash H\"{}\"",
+                requirement.to_str().ok()?,
+                hex::encode(pin.daemon)
+            ))
+            .ok()?;
+        } else if require_pin {
+            return None;
+        }
         let mut size = 0;
         // The arguments remain live until the synchronous XPC call returns.
         let data = unsafe {
@@ -428,9 +709,74 @@ pub(crate) mod macos {
         unsafe { libc::free(data.as_ptr().cast()) };
         decoded
     }
+
+    #[cfg(test)]
+    #[test]
+    fn apple_signature_and_code_directory_hash_are_independent_requirements() {
+        let app = Path::new("/System/Applications/Utilities/Terminal.app");
+        let base = r#"anchor apple and identifier "com.apple.Terminal""#;
+        let rule = CString::new(base).unwrap();
+        let actual = hash_path(app, &rule).expect("macOS Terminal has a valid platform signature");
+        let rule = CString::new(format!("{base} and cdhash H\"{}\"", hex::encode(actual))).unwrap();
+        assert_eq!(hash_path(app, &rule), Some(actual));
+        let rule =
+            CString::new(format!("{base} and cdhash H\"{}\"", hex::encode([0; 20]))).unwrap();
+        assert_eq!(hash_path(app, &rule), None);
+    }
 }
 
 pub(crate) fn required(request: &crate::ipc::Request) -> bool {
+    use crate::ipc::{Request, SessionSelector};
+    use crate::remote::Control;
+    use senate_observe::AdminRequest;
+
+    match request {
+        Request::Approve { .. }
+        | Request::ApproveSession { .. }
+        | Request::DeskDecide { .. }
+        | Request::Forward { .. }
+        | Request::Refuse { .. }
+        | Request::DeskOpenCommittee { .. }
+        | Request::AuthorizeNativeAuthority { .. }
+        | Request::RebindHost { .. }
+        | Request::SetChair { .. }
+        | Request::SetSecretarySession { .. }
+        | Request::SetAlias { .. }
+        | Request::RemoveAlias { .. }
+        | Request::SetCommitteeSeat { .. }
+        | Request::SpeakerAlias { .. }
+        | Request::SpeakerUnseat { .. }
+        | Request::EnsureSecretary
+        | Request::ArchiveCommittee { .. }
+        | Request::SetCard { .. }
+        | Request::Pause { .. }
+        | Request::Resume { .. }
+        | Request::Replace { .. }
+        | Request::PruneHosts
+        | Request::Desk { set: Some(_) } => true,
+        Request::Stop { session, .. } | Request::Restore { session, .. } => {
+            session == &SessionSelector::default()
+        }
+        Request::Spawn {
+            chair, secretary, ..
+        } => *chair || *secretary,
+        Request::ObserveAdmin { command } => matches!(
+            command,
+            AdminRequest::Create { .. }
+                | AdminRequest::Revoke { .. }
+                | AdminRequest::Publish { .. }
+                | AdminRequest::Withdraw { .. }
+        ),
+        Request::RemoteControl { command } => {
+            !matches!(command, Control::Devices | Control::Candidate)
+        }
+        _ => false,
+    }
+}
+
+/// The unsigned, disposable integration fixtures exercise the existing
+/// operational handlers directly. Keep prior signed-consent tests gated.
+pub(crate) fn fixture_requires_confirmation(request: &crate::ipc::Request) -> bool {
     use crate::ipc::Request;
     matches!(request, Request::RebindHost { .. })
         || matches!(
@@ -446,6 +792,35 @@ mod tests {
     use super::*;
     use crate::ipc::Request;
     use senate_observe::{AdminRequest, LinePolicy};
+
+    #[test]
+    fn sensitive_requests_do_not_accept_client_assertions_of_presence() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "op": "approve",
+            "id": "fixture",
+            "decision": "allow",
+            "authenticated": true
+        }))
+        .unwrap();
+        assert!(required(&request));
+        assert!(required(&Request::EnsureSecretary));
+        assert!(required(&Request::ObserveAdmin {
+            command: AdminRequest::Revoke {
+                id: "fixture".into()
+            },
+        }));
+        assert!(required(&Request::RemoteControl {
+            command: crate::remote::Control::PrepareEnroll,
+        }));
+        assert!(!required(&Request::ObserveAdmin {
+            command: AdminRequest::List
+        }));
+        assert!(!required(&Request::RemoteControl {
+            command: crate::remote::Control::Devices
+        }));
+        assert!(!required(&Request::Status));
+        assert!(!required(&Request::Sessions));
+    }
 
     #[test]
     fn caller_fields_cannot_authorize_either_line_policy() {

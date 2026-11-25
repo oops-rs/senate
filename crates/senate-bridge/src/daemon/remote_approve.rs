@@ -27,6 +27,19 @@ use crate::ipc::ApproveSessionReply;
 
 const AUDIT_TIMEOUT: Duration = Duration::from_secs(4);
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+enum PendingPrompt {
+    Codex(String),
+    Claude { fingerprint: String, at: u64 },
+}
+
+#[cfg(target_os = "macos")]
+pub(super) struct HostedApprovalTarget {
+    session_id: String,
+    prompt: PendingPrompt,
+    pub description: String,
+}
+
 impl Shared {
     pub(super) async fn on_approve_session(
         &self,
@@ -41,13 +54,75 @@ impl Shared {
             .await
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) async fn pending_hosted_approval(
+        &self,
+        senator: &AliasName,
+    ) -> Result<HostedApprovalTarget, IpcError> {
+        let session = self.find_local_senator(senator, None).await?;
+        let (host, session) = self
+            .approval_host(&session.session_id)
+            .map_err(internal)?
+            .ok_or_else(|| IpcError::bad_request("This session has no running hosted terminal"))?;
+        let (prompt, tool) = match session.runtime {
+            Runtime::Codex => {
+                let approval = self
+                    .relay
+                    .list()
+                    .into_iter()
+                    .find(|approval| approval.session_id == session.session_id)
+                    .ok_or_else(|| self.nothing_pending(&host, &session))?;
+                (
+                    PendingPrompt::Codex(approval.id),
+                    crate::host_approval::tool_label(&approval.summary),
+                )
+            }
+            Runtime::Claude => {
+                let candidate = self
+                    .claude_candidate(&host, &session.session_id)
+                    .map_err(internal)?
+                    .ok_or_else(|| self.nothing_pending(&host, &session))?;
+                (
+                    PendingPrompt::Claude {
+                        fingerprint: candidate.fingerprint,
+                        at: candidate.at,
+                    },
+                    candidate.tool,
+                )
+            }
+            Runtime::Agy | Runtime::Acp => return Err(self.nothing_pending(&host, &session)),
+        };
+        let subject = session.committee().map_or_else(
+            || session.agent.to_string(),
+            |committee| format!("{committee}::{}", session.agent),
+        );
+        Ok(HostedApprovalTarget {
+            session_id: session.session_id,
+            prompt,
+            description: format!("{tool} for {subject}"),
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) async fn answer_confirmed_hosted_prompt(
+        &self,
+        target: &HostedApprovalTarget,
+        decision: Decision,
+    ) -> Result<ApproveSessionReply, IpcError> {
+        let auth = self
+            .authorize_host_action(&SessionSelector::default())
+            .await?;
+        self.approve_hosted(&auth, &target.session_id, Some(&target.prompt), decision)
+            .await
+    }
+
     /// Answer what waits in the terminal hosting `session_id`; for Codex,
     /// approval `codex_id` when given, else its oldest.
     async fn approve_hosted(
         &self,
         auth: &HostAuthority,
         session_id: &str,
-        codex_id: Option<&str>,
+        expected: Option<&PendingPrompt>,
         decision: Decision,
     ) -> Result<ApproveSessionReply, IpcError> {
         // The host keeps its session while it is answered.
@@ -74,7 +149,10 @@ impl Shared {
                     .list()
                     .into_iter()
                     .find(|a| {
-                        a.session_id == session.session_id && codex_id.is_none_or(|id| a.id == id)
+                        a.session_id == session.session_id
+                            && expected.is_none_or(
+                                |prompt| matches!(prompt, PendingPrompt::Codex(id) if &a.id == id),
+                            )
                     })
                     .ok_or_else(|| self.nothing_pending(&host_id, &session))?;
                 let answered = self
@@ -107,6 +185,9 @@ impl Shared {
                     .claude_candidate(&host_id, &session.session_id)
                     .map_err(internal)?
                     .ok_or_else(|| self.nothing_pending(&host_id, &session))?;
+                if expected.is_some_and(|prompt| !matches!(prompt, PendingPrompt::Claude { fingerprint, at } if fingerprint == &candidate.fingerprint && *at == candidate.at)) {
+                    return Err(IpcError::bad_request("The permission prompt changed while awaiting confirmation"));
+                }
                 let paths = Paths::new(&self.home);
                 let attach = format!("senate attach {}", session.agent);
                 let check_started = crate::host_approval::observed_at();

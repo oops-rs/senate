@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_void};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -19,6 +19,7 @@ const LIMIT: usize = 256;
 
 #[derive(Default)]
 pub(crate) struct Scope {
+    home: PathBuf,
     hosted: HashSet<u64>,
     receipts: Mutex<HashMap<String, Receipt>>,
 }
@@ -29,12 +30,15 @@ pub(crate) enum ProofKind {
     #[default]
     Operator,
     Session,
+    App,
+    RemoteOperator,
 }
 
 struct Receipt {
     request: [u8; 32],
     sender: ProcessIdentity,
     kind: ProofKind,
+    app_audit: Option<[u32; 8]>,
     expires: Instant,
 }
 
@@ -50,6 +54,7 @@ pub(crate) fn service(home: &Path) -> String {
 }
 
 unsafe extern "C" {
+    fn responsibility_get_pid_responsible_for_pid(pid: i32) -> i32;
     fn __proc_info_extended_id(
         call: i32,
         pid: i32,
@@ -60,6 +65,27 @@ unsafe extern "C" {
         buffer: usize,
         size: i32,
     ) -> i32;
+}
+
+fn trusted_origin(pid: u32) -> Option<ProofKind> {
+    let ancestry = kernel_process::ancestors(pid, 64).ok()?;
+    let pid = i32::try_from(pid).ok()?;
+    let responsible =
+        u32::try_from(unsafe { responsibility_get_pid_responsible_for_pid(pid) }).ok()?;
+    for owner in ancestry.iter().map(|p| p.pid).chain([responsible]) {
+        if kernel_process::executable(owner).is_ok_and(|path| {
+            matches!(
+                path.to_str(),
+                Some("/usr/sbin/sshd" | "/usr/libexec/sshd-session")
+            )
+        }) {
+            return Some(ProofKind::RemoteOperator);
+        }
+    }
+    let owner = kernel_process::inspect(responsible).ok()?.identity;
+    let requirement = c"((anchor apple and identifier \"com.apple.Terminal\") or (anchor apple generic and identifier \"com.mitchellh.ghostty\" and certificate leaf[subject.OU] = \"24VZTF6M5V\") or (anchor apple generic and identifier \"com.googlecode.iterm2\" and certificate leaf[subject.OU] = \"H7V7XYVQ7D\"))";
+    macos::guest_hash(None, responsible, requirement)?;
+    (kernel_process::inspect(responsible).ok()?.identity == owner).then_some(ProofKind::Operator)
 }
 
 fn coalition(pid: i32, version: Option<u32>) -> std::io::Result<u64> {
@@ -114,6 +140,13 @@ pub(crate) fn boot_id() -> std::io::Result<String> {
 }
 
 impl Scope {
+    pub(crate) fn contains_process(&self, pid: u32) -> bool {
+        i32::try_from(pid)
+            .ok()
+            .and_then(|pid| coalition(pid, None).ok())
+            .is_some_and(|scope| self.hosted.contains(&scope))
+    }
+
     /// A launchd job has a separate kernel resource coalition. The managed
     /// profile uses that coalition for its direct host processes.
     pub(crate) fn start(home: &Path) -> anyhow::Result<(Arc<Self>, macos::Listener)> {
@@ -145,6 +178,7 @@ impl Scope {
 
         let name = CString::new(service(home))?;
         let scope = Arc::new(Self {
+            home: home.to_owned(),
             hosted,
             receipts: Mutex::default(),
         });
@@ -178,10 +212,22 @@ impl Scope {
                 tracing::debug!(pid, %error, "could not attest caller coalition");
             })
             .ok()?;
-        if kind == ProofKind::Operator && self.hosted.contains(&scope) {
+        if kind != ProofKind::Session && self.hosted.contains(&scope) {
             tracing::debug!(pid, scope, "refused person proof for hosted coalition");
             return None;
         }
+        let kind = match kind {
+            ProofKind::Operator | ProofKind::App if macos::trusted_app(&self.home, &token) => {
+                ProofKind::App
+            }
+            ProofKind::Operator => trusted_origin(sender.pid)?,
+            ProofKind::App | ProofKind::RemoteOperator => return None,
+            ProofKind::Session => ProofKind::Session,
+        };
+        if kernel_process::inspect(sender.pid).ok()?.identity != sender {
+            return None;
+        }
+        let app_audit = (kind == ProofKind::App).then_some(token);
         let mut receipts = self.receipts.lock().ok()?;
         let now = Instant::now();
         receipts.retain(|_, proof| proof.expires > now);
@@ -197,6 +243,7 @@ impl Scope {
                 request,
                 sender,
                 kind,
+                app_audit,
                 expires: now + TTL,
             },
         );
@@ -212,6 +259,12 @@ impl Scope {
         let proof = self.receipts.lock().ok()?.remove(token)?;
         let digest: [u8; 32] = Sha256::digest(request).into();
         if proof.expires <= Instant::now() || proof.request != digest {
+            return None;
+        }
+        if proof
+            .app_audit
+            .is_some_and(|audit| !macos::trusted_app(&self.home, &audit))
+        {
             return None;
         }
         let current = kernel_process::inspect(proof.sender.pid).ok()?;
@@ -246,7 +299,8 @@ extern "C" fn handle(
 
 pub(crate) async fn prove(path: &Path, request: &[u8], kind: ProofKind) -> Option<String> {
     app_confirmation::team()?;
-    let service = service(path.parent()?);
+    let home = path.parent()?.to_owned();
+    let service = service(&home);
     let bytes = serde_json::to_vec(&Claim {
         kind,
         request: Sha256::digest(request).into(),
@@ -255,7 +309,7 @@ pub(crate) async fn prove(path: &Path, request: &[u8], kind: ProofKind) -> Optio
     tokio::time::timeout(
         Duration::from_secs(2),
         tokio::task::spawn_blocking(move || {
-            macos::call::<Option<String>>(&service, &bytes).flatten()
+            macos::call::<Option<String>>(&service, &bytes, &home, false).flatten()
         }),
     )
     .await
@@ -287,11 +341,8 @@ mod tests {
         let own_coalition = coalition(pid, Some(audit[7])).unwrap();
         let request = Sha256::digest(b"fixture").into();
         let eligible = Scope::default();
-        assert!(
-            eligible
-                .issue(audit, request, ProofKind::Operator)
-                .is_some()
-        );
+        assert!(eligible.issue(audit, request, ProofKind::Session).is_some());
+        assert!(eligible.issue(audit, request, ProofKind::App).is_none());
 
         let hosted = Scope {
             hosted: HashSet::from([own_coalition]),
@@ -300,11 +351,7 @@ mod tests {
         assert!(hosted.issue(audit, request, ProofKind::Operator).is_none());
 
         audit[7] ^= 1;
-        assert!(
-            eligible
-                .issue(audit, request, ProofKind::Operator)
-                .is_none()
-        );
+        assert!(eligible.issue(audit, request, ProofKind::Session).is_none());
     }
 
     #[test]
@@ -320,6 +367,7 @@ mod tests {
                     request: Sha256::digest(b"first").into(),
                     sender,
                     kind: ProofKind::Operator,
+                    app_audit: None,
                     expires: Instant::now() + TTL,
                 },
             );

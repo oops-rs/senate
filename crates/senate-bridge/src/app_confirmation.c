@@ -2,6 +2,7 @@
 #include <stdatomic.h>
 #include <dispatch/dispatch.h>
 #include <mach/message.h>
+#include <Security/Security.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -10,6 +11,86 @@
 #define MAX_FRAME (1024 * 1024)
 
 extern void xpc_dictionary_get_audit_token(xpc_object_t, audit_token_t *);
+
+static SecRequirementRef senate_requirement(const char *expression) {
+    CFStringRef source = CFStringCreateWithCString(NULL, expression, kCFStringEncodingUTF8);
+    SecRequirementRef requirement = NULL;
+    if (!source) return NULL;
+    OSStatus result = SecRequirementCreateWithString(source, kSecCSDefaultFlags, &requirement);
+    CFRelease(source);
+    return result == errSecSuccess ? requirement : NULL;
+}
+
+static bool senate_copy_code_hash(SecStaticCodeRef code, uint8_t hash[20]) {
+    CFDictionaryRef info = NULL;
+    if (SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info) != errSecSuccess) return false;
+    CFDataRef identity = CFDictionaryGetValue(info, kSecCodeInfoUnique);
+    bool valid = identity && CFGetTypeID(identity) == CFDataGetTypeID() && CFDataGetLength(identity) == 20;
+    if (valid) memcpy(hash, CFDataGetBytePtr(identity), 20);
+    CFRelease(info);
+    return valid;
+}
+
+bool senate_code_hash_path(const char *path, const char *requirement, uint8_t hash[20]) {
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
+    SecStaticCodeRef code = NULL;
+    if (!url) return false;
+    OSStatus result = SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code);
+    CFRelease(url);
+    if (result != errSecSuccess) return false;
+    SecRequirementRef rule = senate_requirement(requirement);
+    bool valid = rule && SecStaticCodeCheckValidity(code, kSecCSStrictValidate, rule) == errSecSuccess
+        && senate_copy_code_hash(code, hash);
+    if (rule) CFRelease(rule);
+    CFRelease(code);
+    return valid;
+}
+
+bool senate_code_hash_guest(const uint32_t *audit, int32_t pid, const char *expression, uint8_t hash[20]) {
+    CFTypeRef value = audit ? (CFTypeRef)CFDataCreate(NULL, (const UInt8 *)audit, sizeof(audit_token_t))
+                            : (CFTypeRef)CFNumberCreate(NULL, kCFNumberSInt32Type, &pid);
+    if (!value) return false;
+    const void *key = audit ? kSecGuestAttributeAudit : kSecGuestAttributePid;
+    CFDictionaryRef attributes = CFDictionaryCreate(NULL, &key, &value, 1,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFRelease(value);
+    if (!attributes) return false;
+    SecCodeRef guest = NULL;
+    OSStatus result = SecCodeCopyGuestWithAttributes(NULL, attributes, kSecCSDefaultFlags, &guest);
+    CFRelease(attributes);
+    if (result != errSecSuccess) return false;
+    SecRequirementRef rule = senate_requirement(expression);
+    bool valid = rule && SecCodeCheckValidity(guest, kSecCSDefaultFlags, rule) == errSecSuccess
+        && senate_copy_code_hash(guest, hash);
+    if (rule) CFRelease(rule);
+    CFRelease(guest);
+    return valid;
+}
+
+bool senate_guest_team(int32_t pid, char *text, size_t size) {
+    CFTypeRef value = CFNumberCreate(NULL, kCFNumberSInt32Type, &pid);
+    if (!value) return false;
+    const void *key = kSecGuestAttributePid;
+    CFDictionaryRef attributes = CFDictionaryCreate(NULL, &key, &value, 1,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFRelease(value);
+    if (!attributes) return false;
+    SecCodeRef guest = NULL;
+    OSStatus result = SecCodeCopyGuestWithAttributes(NULL, attributes, kSecCSDefaultFlags, &guest);
+    CFRelease(attributes);
+    if (result != errSecSuccess) return false;
+    CFDictionaryRef info = NULL;
+    bool valid = false;
+    if (SecCodeCheckValidity(guest, kSecCSDefaultFlags, NULL) == errSecSuccess
+        && SecCodeCopySigningInformation(guest, kSecCSSigningInformation, &info) == errSecSuccess) {
+        CFStringRef team = CFDictionaryGetValue(info, kSecCodeInfoTeamIdentifier);
+        valid = team && CFGetTypeID(team) == CFStringGetTypeID()
+            && CFStringGetCString(team, text, size, kCFStringEncodingUTF8);
+        CFRelease(info);
+    }
+    CFRelease(guest);
+    return valid;
+}
 
 typedef void (*senate_handle_message)(void *, const void *, size_t, void *, const uint32_t *);
 

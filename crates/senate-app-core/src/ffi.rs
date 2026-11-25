@@ -1492,6 +1492,7 @@ impl From<DefaultSecretary> for SecretaryView {
 pub struct PersonApprovalPrompt {
     pub id: String,
     pub display: String,
+    pub reason: String,
 }
 
 #[uniffi::export]
@@ -1501,6 +1502,7 @@ pub fn person_approval_prompts(home: String) -> Vec<PersonApprovalPrompt> {
         .map(|prompt| PersonApprovalPrompt {
             id: prompt.id.to_string(),
             display: prompt.display,
+            reason: prompt.reason,
         })
         .collect()
 }

@@ -139,6 +139,13 @@ enum SecretaryCommand {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--person-presence-helper"))
+    {
+        return senate_bridge::app_confirmation::run_presence_helper();
+    }
+
     tracing_subscriber::fmt()
         .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)

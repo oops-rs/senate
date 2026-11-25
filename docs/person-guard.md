@@ -1,16 +1,17 @@
 # Local IPC caller authorization
 
 A Unix peer UID identifies an account. A coding agent running under that
-account can change its name, terminal, and process parent. Senate uses hosted
-lineage for routine commands, independent app consent for selected operations,
-and process identity for session claims. Trusted files, protected Keychain
+account can change its name, terminal, and process parent. Senate checks hosted lineage and operator origin, requires local user
+authentication for sensitive CLI requests, and binds session claims to a
+verified process. A signed, pinned desktop app can submit its own explicit
+UI actions. Trusted files, protected Keychain
 items, trusted UI control, debugger access, and administrator access are outside
 this threat model.
 
 ## Routine commands
 
 Keep the routine CLI flow for Ghostty, Terminal, iTerm, tmux, SSH, and the
-terminal attach viewer. The viewer sends input to the host. Commands executed
+terminal attach viewer for routine operations. The viewer sends input to the host. Commands executed
 inside the terminal still have the host's lineage. The paired-machine transport
 keeps its own authentication and operation allowlist.
 
@@ -31,27 +32,28 @@ keeps its own authentication and operation allowlist.
   drops elevated credentials before executing the host. The daemon never
   installs it.
 
-Lineage covers processes born in the hosted scope. An independent scheduler can
-launch in a separate scope. A native agent can also detach from the user's
-terminal. In both cases the routine ancestry check may allow the caller. Runtime
-names and ancestry provide additional rejection while the original tree is visible.
+Lineage covers processes born in the hosted scope. An independent system
+scheduler or a person-owned server can start a process in its own scope. On
+macOS, operator receipts additionally require a known signed terminal,
+verified system SSH process, or the pinned Senate app. This removes generic
+launch jobs from the eligible set. An eligible terminal or multiplexer may
+still act on input from another process. Native agents and shared app servers
+are also advisory at this layer. The signed user-presence path is the control
+for the sensitive IPC operations in the table. User-writable transcript files
+retain their filesystem access policy. Routine IPC reads, including timelines,
+history, search, and committee threads, still use the operator proof.
 
-| Policy target | Hosted descendants | Native agents | Lines and rebind | Hooks |
+| Policy target | Hosted lineage | Routine caller checks | Sensitive requests | Hooks |
 | --- | --- | --- | --- | --- |
-| macOS with signed app | Enforced by coalition | Routine checks advisory | App consent enforced | Process binding and role reauthorization enforced |
-| macOS headless | Enforced by coalition | Routine checks advisory | Refused | Process binding and role reauthorization enforced |
-| Linux/WSL with protected scope | Enforced by cgroup | Routine checks advisory | Refused | Process binding and role reauthorization enforced |
-| Linux/WSL without protected scope | Routine checks advisory | Routine checks advisory | Refused | Privileged claims require stable proof |
+| macOS GUI login | Inherited across reparenting | Signed origin plus ancestry. Person-owned deputies remain possible. | LocalAuthentication or explicit action by the pinned app | Verified process binding and native role reauthorization |
+| macOS SSH or headless | Inherited across reparenting | Known system SSH remains eligible for reads | Refused without an interactive local path | Verified process binding and native role reauthorization |
+| Linux/WSL with protected scope | Inherited inside cgroup | Scoped process handle plus advisory ancestry | Refused | Privileged claims require a verified process |
+| Linux/WSL without protected scope | Advisory | Advisory ancestry | Refused | Privileged claims require a verified process |
 
-The macOS bridge checks one-time proofs for operator requests. It binds each
-proof to the exact request digest and the Mach sender's process generation.
-Managed launchd hosting persists its daemon coalition before publishing the
-bridge. The scope covers dedicated hosted Codex backends. Existing shared
-backends remain advisory until their hosted sessions are restored to dedicated
-mode. Linux and WSL hosting is advisory until the administrator provisions it.
-Native role bindings persist by boot and process generation. The app's signed
-XPC queue provides consent for rebind and line-bearing grants through a
-dedicated Observe registry capability.
+The macOS bridge binds each operator proof to the exact request digest and
+Mach sender's process generation for five seconds and consumes it once.
+Managed launchd hosting persists its coalition before publishing the bridge.
+Existing shared Codex backends remain advisory until restored to dedicated mode.
 
 From an operator terminal in this worktree, with the signed fixture binaries
 built from the same revision, run:
@@ -88,25 +90,49 @@ backend survived closure of its publication pipe and removed both sockets
 on host-lease closure. Hosted restore checks that the new backend can load
 the existing thread before publishing it.
 
-## Signed app consent
+## Sensitive requests
 
-Both Observe lines policies and session rebind need one explicit app decision.
-The CLI waits while the app displays the immutable request. The queue has a
-short expiry and bounded capacity. A decision consumes the request once, and
-requester disconnect cancels it. The original connection receives the result.
-Client approval flags carry no authority. Routine permission answers, desk
-decisions, archive, metadata grants, list and revoke use the routine path.
+Permission answers, desk decisions, Observe grant creation and revocation,
+line publication and withdrawal, native-seat authorization, rebind, chair,
+secretary, role-alias and seat changes, committee archive and unarchive,
+remote-machine administration and pairing, card writes, and operator-only
+host stop, restore, pause, resume and replacement require a local decision.
 
-XPC checks each message against the local UID and the requirement
+The CLI waits while the pinned app shows the request and requester derived
+from kernel process data. LocalAuthentication uses a fresh context with the
+system's device-owner policy, which can use Touch ID, Apple Watch, or the
+login password. When the app is unavailable, the daemon launches its own
+pinned executable in a dedicated helper mode and sends the details over a
+private pipe. The helper verifies device-owner presence and reports success
+only to its parent. The queue binds consent to one immutable request and the
+same live IPC connection. Disconnect, timeout, cancellation and authentication
+failure abort the request. App buttons that initiate a sensitive action use
+the app's pinned identity and require no additional authentication prompt.
+Client confirmation flags carry no authority.
+
+The system mediates biometric and password authentication. An ordinary
+Accessibility click carries no biometric evidence and transfers no OS consent
+result to Senate. A tool with UI automation rights can still drive ordinary
+app buttons. Control of the trusted app, usable login credentials, and a
+person accepting a misleading request are outside this guarantee.
+
+Install or upgrade from the operator's terminal with
+`senate setup service install --yes --app /path/to/Senate.app`. The installer
+records the app and daemon code-directory hashes under the trusted Senate
+home. The daemon binary doubles as the signed helper. Every app reply checks
+its audit token against the recorded app hash and the requirement
 `anchor apple generic and identifier "dev.senate.app" and certificate leaf[subject.OU] = "TEAM_ID"`.
-The app pins `dev.senate.daemon` and the same team. The signed daemon's
-LaunchAgent registers the approval service using a hash of its canonical Senate
-home. Debug builds can use Apple Development with the same pinned
-`SENATE_PERSON_TEAM_ID` across the CLI, daemon and app core. An isolated signing
-fixture accepted Apple Development and refused an ad-hoc signature.
+The helper uses `dev.senate.daemon` and the same Apple-issued team requirement.
+The installation pin controls which binary can act when development and
+release builds share a signing key. Apple Development and Developer ID both
+work with the configured team. Developer ID and notarization are a future
+release option. This branch does not establish usability of any particular
+private signing key by a hosted agent. Doctor reports a missing, changed, or
+inactive app pin. Unsigned development appliances have no trusted presence
+path. The installed files and pin are part of the trusted-files assumption.
 
 XNU's Unix peer token resolves the socket's last PID when queried. Per-message
-Mach attestation is required for process generations and XPC sender identity.
+Mach attestation checks the process generation and app identity.
 
 ## Session claims
 
@@ -123,16 +149,21 @@ native record IDs.
 Native role commands use a session proof distinct from operator proof. A
 different process cannot refresh a live binding. A privileged native
 seat moving to a new verified process waits for operator authorization.
-Run `senate session authorize <native-session-id>` from a person terminal
-to accept the current proposal. Its ID is consumed once and the daemon
-rechecks the proposed process before committing it.
+Run `senate session authorize <native-session-id>` from a person terminal.
+It shows the executable, signing team, working directory, hosted status and
+start time. Type `yes` to request system authentication for that candidate.
+The daemon matches the runtime against its configured executable path, consumes
+the proposal once, and rechecks the process before committing it.
 
 ## Ablation
 
 - Without a protected lifetime label, reparenting removes the ancestry signal.
   Writable migration controls or clearing labels on host exit defeat it again.
-- Without an authenticated app and exact one-time binding, routine ancestry
-  gaps also affect sensitive acts, or one click could authorize multiple acts.
+- Remove the signed-origin check and separate launch jobs can qualify for
+  routine receipts. Remove OS authentication and any eligible terminal acting
+  for another process can request sensitive powers. Remove the code pin and an
+  alternative binary signed with the same key can respond to the queue. Remove
+  exact one-time binding and an approval can authorize a different action.
 - Without process-generation ownership, session IDs and aliases become usable
   as credentials. Path and record checks protect independent transcript inputs.
 
