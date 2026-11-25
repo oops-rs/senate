@@ -1332,6 +1332,43 @@ fn orientation(
     }
 }
 
+/// Threads named in [`owed_line`] before it says only how many more.
+const OWED_SHOWN: usize = 12;
+
+/// The line a starting session reads about the threads that wait on it,
+/// oldest first: their seqs, and the tools that show them. `None` with
+/// none.
+fn owed_line(committee: &CommitteeId, roots: &[Seq], locale: Locale) -> Option<String> {
+    if roots.is_empty() {
+        return None;
+    }
+    let n = roots.len();
+    let shown = roots
+        .iter()
+        .take(OWED_SHOWN)
+        .map(|seq| format!("seq {seq}"))
+        .collect::<Vec<_>>()
+        .join(locale.pick("、", ", "));
+    let more = n.saturating_sub(OWED_SHOWN);
+    Some(match (locale, more) {
+        (Locale::Zh, 0) => format!(
+            "[senate] `{committee}` 上有 {n} 个 thread 在等你：{shown}。mcp__senate__inbox 列出它们和各自的状态，mcp__senate__thread 读其中一个的全文。"
+        ),
+        (Locale::Zh, more) => format!(
+            "[senate] `{committee}` 上有 {n} 个 thread 在等你：{shown}，另有 {more} 个。mcp__senate__inbox 列出它们和各自的状态，mcp__senate__thread 读其中一个的全文。"
+        ),
+        (Locale::En, 0) => format!(
+            "[senate] {n} thread(s) on `{committee}` wait on you: {shown}. mcp__senate__inbox \
+             lists them with their state; mcp__senate__thread reads one in full."
+        ),
+        (Locale::En, more) => format!(
+            "[senate] {n} thread(s) on `{committee}` wait on you: {shown}, and {more} more. \
+             mcp__senate__inbox lists them with their state; mcp__senate__thread reads one in \
+             full."
+        ),
+    })
+}
+
 fn orientation_role(agent: &SenatorName, chair: Option<&SenatorName>, locale: Locale) -> String {
     if chair == Some(agent) {
         let tools = crate::mcp::CHAIR_TOOLS
@@ -4379,12 +4416,13 @@ impl Shared {
             self.committees_changed.notify_one();
         }
 
-        let (brief, chair) = match (context_event, session.committee()) {
+        let (brief, chair, owed) = match (context_event, session.committee()) {
             (HookEvent::SessionStart, Some(committee)) => tokio::join!(
                 self.hook_brief(committee),
                 self.hook_chair(committee, &session.agent),
+                self.hook_owed(committee, &session.agent),
             ),
-            _ => (None, None),
+            _ => (None, None, None),
         };
         let reminder = self
             .secretary_hook_reminder(&session)
@@ -4393,9 +4431,14 @@ impl Shared {
                 let text = secretary_work::reminder_text(self.locale, &reminder);
                 (reminder, text)
             });
+        let owed = owed.map(|text| {
+            let room = text.chars().count() + 2;
+            (text, room)
+        });
         let reserved = reminder
             .as_ref()
-            .map_or(0, |(_, text)| text.chars().count() + 2);
+            .map_or(0, |(_, text)| text.chars().count() + 2)
+            + owed.as_ref().map_or(0, |(_, room)| *room);
         self.refresh_display_aliases().await;
         let (mut context, delivered) = self.hook_context(
             &session,
@@ -4404,6 +4447,12 @@ impl Shared {
             chair.as_ref(),
             reserved,
         )?;
+        if let Some((owed, _)) = owed {
+            context = Some(match context {
+                Some(text) => format!("{text}\n\n{owed}"),
+                None => owed,
+            });
+        }
         if native
             && !changed_host_context
             && (source != AgentSource::Harness || hint.as_str() != report.runtime.as_str())
@@ -4515,6 +4564,28 @@ impl Shared {
                 None
             }
         }
+    }
+
+    /// What a starting session is told of the threads that wait on its
+    /// agent ([`owed_line`]), or `None` with none or when the server does
+    /// not say in time. A session restored after a stop has no memory of
+    /// what it was asked meanwhile, or of what it had left unfinished.
+    async fn hook_owed(&self, committee: &CommitteeId, agent: &SenatorName) -> Option<String> {
+        let threads = tokio::time::timeout(
+            HOOK_COMMITTEE_TIMEOUT,
+            self.api.threads(committee, Some(agent)),
+        )
+        .await
+        .ok()?
+        .ok()?
+        .threads;
+        let mut roots: Vec<Seq> = threads
+            .iter()
+            .filter(|t| t.is_for(agent) && t.waits() == Some(senate_core::WaitsOn::Agents))
+            .map(|t| t.root)
+            .collect();
+        roots.sort();
+        owed_line(committee, &roots, self.locale)
     }
 
     /// Report the starting session's presence before reading the chair.
@@ -7991,6 +8062,27 @@ mod tests {
             zh.contains("`senate ask`、`senate tell`、`senate reply`"),
             "{zh}"
         );
+    }
+
+    #[test]
+    fn a_starting_session_is_told_which_threads_wait_on_it() {
+        let c = CommitteeId::new("refund-v2").unwrap();
+        assert_eq!(owed_line(&c, &[], Locale::En), None);
+        assert_eq!(
+            owed_line(&c, &[Seq(27), Seq(31)], Locale::En).unwrap(),
+            "[senate] 2 thread(s) on `refund-v2` wait on you: seq 27, seq 31. \
+             mcp__senate__inbox lists them with their state; mcp__senate__thread reads one in \
+             full."
+        );
+        // A long list names the oldest and counts the rest.
+        let many: Vec<Seq> = (1..=20).map(Seq).collect();
+        let en = owed_line(&c, &many, Locale::En).unwrap();
+        assert!(en.contains("20 thread(s)"), "{en}");
+        assert!(en.contains("seq 12, and 8 more."), "{en}");
+        assert!(!en.contains("seq 13"), "{en}");
+        let zh = owed_line(&c, &many, Locale::Zh).unwrap();
+        assert!(zh.contains("有 20 个 thread 在等你"), "{zh}");
+        assert!(zh.contains("seq 12，另有 8 个。"), "{zh}");
     }
 
     #[test]
