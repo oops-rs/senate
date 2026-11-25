@@ -96,3 +96,54 @@ test("fetch follower uses Last-Event-ID and reloads state on a rejected resume",
     server.close();
   }
 });
+
+test("followers wait for Retry-After before retrying state and events", async () => {
+  const { createServer } = await import("node:http");
+  const { once } = await import("node:events");
+  const { observe } = await import("../src/index.js");
+  const initial = await fixture("state.json");
+  const patch = await fixture("unseat.sse.json");
+  const attempts = { state: [], events: [] };
+  const server = createServer((request, response) => {
+    const route = request.url.endsWith("/state") ? "state" : "events";
+    attempts[route].push(performance.now());
+    if (attempts[route].length === 1) {
+      response.writeHead(route === "state" ? 503 : 429, { "retry-after": "1" }).end();
+    } else if (route === "state") {
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(initial));
+    } else {
+      response.writeHead(200, { "content-type": "text/event-stream" }).end(patch);
+    }
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const controller = new AbortController();
+  const stream = observe({
+    endpoint: `http://127.0.0.1:${server.address().port}`,
+    token: "local-fixture",
+    signal: controller.signal,
+  });
+  try {
+    assert.equal((await stream.next()).value.state.senators.length, 2);
+    assert.equal((await stream.next()).value.state.senators.length, 1);
+    for (const attempt of Object.values(attempts)) assert.ok(attempt[1] - attempt[0] >= 990);
+  } finally {
+    controller.abort();
+    await stream.return();
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test("shipped demo recordings do not advertise or retain app links", async () => {
+  for (const filename of [
+    "crates/senate-observe/src/demo.ndjson",
+    "town/recordings/demo.ndjson", "town/recordings/demo-large.ndjson",
+    "apps/macos/Senate/Web/town/recordings/demo.ndjson",
+    "apps/macos/Senate/Web/town/recordings/demo-large.ndjson",
+  ]) {
+    const data = await readFile(new URL(`../../../${filename}`, import.meta.url), "utf8");
+    assert.ok(!data.includes("senate://"), filename);
+    assert.ok(!data.includes('"app_links"'), filename);
+  }
+});

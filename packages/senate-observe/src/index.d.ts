@@ -23,9 +23,10 @@ export interface Update {
 }
 
 export class ObserveError extends Error {
-  constructor(code: string, message: string, status?: number);
+  constructor(code: string, message: string, status?: number, retryAfterMs?: number);
   readonly code: string;
   readonly status: number;
+  readonly retryAfterMs?: number;
 }
 export function endpointUrl(endpoint: string | URL): URL;
 export function fetchSnapshot(options: ObserveOptions): Promise<Snapshot>;

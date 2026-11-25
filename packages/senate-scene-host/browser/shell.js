@@ -6,7 +6,44 @@ const mount = document.querySelector("main");
 const status = document.querySelector("output");
 const navigation = document.querySelector("#navigation");
 const encoder = new TextEncoder();
-const sceneCsp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'";
+const sceneCsp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; webrtc 'block'; require-trusted-types-for 'script'; trusted-types 'none'";
+const sceneAllow = "camera 'none'; microphone 'none'; display-capture 'none'; webrtc 'none'";
+
+// This function is installed as the first classic script in the iframe.
+// CSP guards fetch-backed APIs, but deployed browsers do not all enforce
+// a WebRTC-specific policy. Keep the native constructors out of the realm.
+function restrictSceneRealm() {
+  for (const name of [
+    "RTCPeerConnection", "webkitRTCPeerConnection", "mozRTCPeerConnection",
+    "RTCDataChannel", "RTCIceGatherer", "RTCIceTransport", "RTCDtlsTransport",
+    "RTCSctpTransport", "WebTransport", "WebSocket", "WebSocketStream",
+    "Worker", "SharedWorker",
+  ]) {
+    Object.defineProperty(window, name, { value: undefined, configurable: false, writable: false });
+  }
+  for (const name of ["sendBeacon", "serviceWorker"]) {
+    Object.defineProperty(Navigator.prototype, name, { value: undefined, configurable: false, writable: false });
+  }
+  // Resource hints can initiate a connection without a fetch. Scene
+  // stylesheets are inlined by the host, so scenes need no link elements.
+  // Trusted Types covers HTML insertion sinks where implemented.
+  for (const [method, nameIndex] of [["createElement", 0], ["createElementNS", 1]]) {
+    const create = Document.prototype[method];
+    Object.defineProperty(Document.prototype, method, {
+      value(...args) {
+        const name = String(args[nameIndex]);
+        if (name.split(":").at(-1).toLowerCase() === "link") {
+          throw new DOMException("Resource hints are disabled in scenes", "SecurityError");
+        }
+        args[nameIndex] = name;
+        return create.apply(this, args);
+      },
+      configurable: false,
+      writable: false,
+    });
+  }
+}
+
 let current;
 
 function folderPath(value) {
@@ -130,12 +167,23 @@ function launch(content, options) {
   const frame = document.createElement("iframe");
   frame.title = "Scene";
   frame.setAttribute("sandbox", "allow-scripts");
+  frame.allow = sceneAllow;
   frame.referrerPolicy = "no-referrer";
   const isolated = new DOMParser().parseFromString(content.html, "text/html");
+  const fragments = [isolated];
+  for (const fragment of fragments) {
+    for (const link of fragment.querySelectorAll("link")) link.remove();
+    for (const template of fragment.querySelectorAll("template")) fragments.push(template.content);
+  }
   const policy = isolated.createElement("meta");
   policy.httpEquiv = "Content-Security-Policy";
   policy.content = sceneCsp;
-  isolated.head.prepend(policy);
+  const dns = isolated.createElement("meta");
+  dns.httpEquiv = "x-dns-prefetch-control";
+  dns.content = "off";
+  const bootstrap = isolated.createElement("script");
+  bootstrap.textContent = `(${restrictSceneRealm.toString()})();`;
+  isolated.head.prepend(policy, dns, bootstrap);
   frame.srcdoc = `<!doctype html>${isolated.documentElement.outerHTML}`;
   const channel = new MessageChannel();
   const port = channel.port1;

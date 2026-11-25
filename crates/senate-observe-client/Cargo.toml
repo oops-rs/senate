@@ -11,6 +11,7 @@ description = "Rust client for the Senate Observe v1 HTTP and SSE API"
 bytes.workspace = true
 futures.workspace = true
 getrandom = "0.4"
+httpdate = "1"
 reqwest.workspace = true
 senate-observe-protocol.workspace = true
 serde_json.workspace = true

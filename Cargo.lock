@@ -2791,6 +2791,7 @@ dependencies = [
  "bytes",
  "futures",
  "getrandom 0.4.3",
+ "httpdate",
  "reqwest",
  "senate-observe-protocol",
  "serde_json",
