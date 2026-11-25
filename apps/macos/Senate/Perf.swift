@@ -8,7 +8,23 @@ import os
 /// `FAKE_THREADS`.
 enum Perf {
     nonisolated static let signposter = OSSignposter(subsystem: Log.subsystem, category: .pointsOfInterest)
-    nonisolated static let printing = ProcessInfo.processInfo.environment["SENATE_APP_PERF"] == "1"
+    /// `1`: print the measures, take the tour and quit. `watch`: print them
+    /// and stay, for a measure over a window of one's own choosing.
+    nonisolated static let mode = ProcessInfo.processInfo.environment["SENATE_APP_PERF"]
+    nonisolated static let printing = mode == "1" || mode == "watch"
+    /// When the app started, for the time to its first state online.
+    nonisolated static let launched = ContinuousClock.now
+    private static var saidOnline = false
+
+    /// With the measures printed: how long the app took to its first state
+    /// online, once.
+    static func online() {
+        guard printing, !saidOnline else { return }
+        saidOnline = true
+        let d = ContinuousClock.now - launched
+        let ms = d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000
+        report("first online state \(ms) ms after launch, at_ms=\(Int(Date().timeIntervalSince1970 * 1000))")
+    }
 
     static func measure<T>(_ name: StaticString, _ detail: @autoclosure () -> String = "", _ body: () throws -> T) rethrows -> T {
         let state = signposter.beginInterval(name)
@@ -42,6 +58,7 @@ extension Perf {
     /// runs, the worst every two seconds: rendering and layout included, so
     /// a stall anywhere on the main thread shows.
     static func watchMainThread() {
+        _ = launched
         guard printing else { return }
         Task { @MainActor in
             var worst: Duration = .zero
@@ -72,7 +89,7 @@ extension Perf {
     /// the first session
     /// for two seconds each, and quit. Any build, so Release can be measured.
     static func tour(_ store: CoreStore) {
-        guard printing else { return }
+        guard mode == "1" else { return }
         Task {
             for _ in 0..<50 where !store.state.online {
                 try? await Task.sleep(for: .milliseconds(200))

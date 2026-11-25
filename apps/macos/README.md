@@ -62,7 +62,9 @@ SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 build/Build/Products/Debug/Senate.app/Cont
 | `SENATE_APP_NOTIFICATIONS=0` | no notification permission prompt and no notifications |
 | `SENATE_APP_SNAPSHOT=<dir>` | Debug builds: write the inbox, a thread, approvals, a committee, sessions (at a prompt, scrolled up to older items, every tool call open, at work, unreadable), your profile, Settings and the status item's menu as PNGs of the app's own windows, then quit (how `docs/screenshots/` is made). `SENATE_APP_SNAPSHOT_APPEARANCE=light\|dark` picks the appearance whatever the system's is; `SENATE_APP_SNAPSHOT_PREFIX` goes before each file name (`zh-`) |
 | `SENATE_APP_PERF=1` | print state-apply and thread-read times and main-thread stalls, tour a thread, Inbox, Approvals and a session, quit (`SENATE_APP_PERF_THREAD=<root>` opens that thread) |
+| `SENATE_APP_PERF=watch` | print the same measures and stay, and the core prints once a second how many snapshots it built and pushed and what they cost; `scripts/perf-window.sh <pid> <stderr file>` sums a window of it with the app's CPU, stalls and memory. With it, `SENATE_APP_PERF_EVERY_CHANGE=1` pushes a snapshot on every change (the core before it shared them), to measure against |
 | `FAKE_THREADS=N` | the fake daemon: N more threads and a 5,000-event thread 990 |
+| `FAKE_SESSIONS_EVERY_MS=<ms>` | the fake daemon: that often a session did something and the daemon says `sessions`, as on every hook (50: twenty busy agents); `FAKE_INBOX_EVERY_MS` likewise for an `inbox` line |
 | `FAKE_TIMELINE_EVERY=<s>` | the fake daemon: how often a watched timeline grows (default 6; 0 never) |
 | `FAKE_SECRETARY=<state>` | the fake daemon: the default secretary already there (`running`, `paused`, `ended`, `stopped`, `elsewhere`); none by default |
 | `FAKE_STREAM=1` | the fake daemon: a session, `stream`, whose reply arrives a few characters every 20-40 ms while watched |

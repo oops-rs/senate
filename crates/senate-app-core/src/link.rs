@@ -31,6 +31,9 @@ use crate::model::{Action, Effects, Failure, Model, Notice, Offline, ReadOf, Ref
 /// How often `sessions` is read at most while the daemon keeps saying it
 /// changed.
 const SESSIONS_EVERY: Duration = Duration::from_millis(300);
+/// The least time between two snapshots handed to the sink while the model
+/// keeps changing: one frame in two or three, sooner than a person sees.
+pub const PUBLISH_EVERY: Duration = Duration::from_millis(40);
 /// How often the aliases are read again on a status sweep.
 const ALIASES_EVERY: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -312,7 +315,9 @@ impl WatchStream {
 
 /// Where the driver's changes go: the tray and the window, or a test.
 pub trait Sink: Send + Sync + 'static {
-    /// The model changed; re-render.
+    /// The model changed; re-render. Called with one model at a time, each
+    /// later than the one before; after any run of changes, with the model
+    /// as the last of them left it.
     fn changed(&self, model: &Model);
     /// A Codex approval is waiting (first sight only).
     fn approval_arrived(&self, _approval: &Approval) {}
@@ -357,6 +362,22 @@ pub struct Driver<S: Sink> {
     backoff: Backoff,
     /// A `sessions` read is scheduled ([`SESSIONS_EVERY`]).
     sessions_due: std::sync::atomic::AtomicBool,
+    /// The model changed since the sink was last handed it.
+    dirty: std::sync::atomic::AtomicBool,
+    /// Wakes the publisher ([`Driver::publisher`]) when it did.
+    publish: tokio::sync::Notify,
+    /// When the sink was last handed the model. Held while it is copied and
+    /// handed over, so the sink gets one model at a time, in order.
+    published: Mutex<Option<tokio::time::Instant>>,
+}
+
+/// Ends the publisher with the [`Driver::run`] that started it.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl<S: Sink> Driver<S> {
@@ -369,6 +390,9 @@ impl<S: Sink> Driver<S> {
             sink,
             backoff,
             sessions_due: std::sync::atomic::AtomicBool::new(false),
+            dirty: std::sync::atomic::AtomicBool::new(false),
+            publish: tokio::sync::Notify::new(),
+            published: Mutex::new(None),
         })
     }
 
@@ -394,15 +418,63 @@ impl<S: Sink> Driver<S> {
         self.wake.notify_one();
     }
 
-    /// Hand the current model to the sink.
+    /// The model changed: the sink is handed it soon, by the publisher of
+    /// a running [`Driver::run`]. At once when nothing was handed over in the
+    /// last [`PUBLISH_EVERY`], else when that has passed; changes made
+    /// meanwhile go in the same snapshot, so the daemon's bursts (a line
+    /// per hook of every session, the reads of a status sweep) cost one
+    /// snapshot per [`PUBLISH_EVERY`] and not one each.
     pub fn changed(&self) {
-        let model = self.model().clone();
+        use std::sync::atomic::Ordering;
+        crate::perf::CHANGED.fetch_add(1, Ordering::Relaxed);
+        self.dirty.store(true, Ordering::Release);
+        if crate::perf::every_change() {
+            // The baseline of the measure: every change its own snapshot.
+            self.publish_now();
+            return;
+        }
+        self.publish.notify_one();
+    }
+
+    /// Hand the model to the sink now, if it changed since it last was:
+    /// before a notice about what changed, and at the end of an action, so
+    /// both find the state they are about already there.
+    pub fn publish_now(&self) {
+        let mut published = self.published.lock().unwrap_or_else(|e| e.into_inner());
+        // Cleared before the copy: a change after it is in this snapshot or
+        // marks the next.
+        if !self.dirty.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        let model = crate::perf::CLONE.time(|| self.model().clone());
         self.sink.changed(&model);
+        *published = Some(tokio::time::Instant::now());
+    }
+
+    /// Hands the sink the model when it changed, no sooner than
+    /// [`PUBLISH_EVERY`] after the last time: the first change after a quiet
+    /// spell goes at once, and the last of a burst is never left out (it
+    /// wakes this again while the snapshot before it is still on its way).
+    async fn publisher(self: Arc<Self>) {
+        loop {
+            self.publish.notified().await;
+            let last = *self.published.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(wait) = last
+                .map(|at| PUBLISH_EVERY.saturating_sub(at.elapsed()))
+                .filter(|wait| !wait.is_zero())
+            {
+                tokio::time::sleep(wait).await;
+            }
+            self.publish_now();
+        }
     }
 
     /// Hold a `watch` stream for as long as the app runs, reconnecting with
     /// backoff while the daemon is down.
     pub async fn run(self: Arc<Self>) {
+        // Its own task: the stream is read while a snapshot is built.
+        let publisher = tokio::spawn(Arc::clone(&self).publisher());
+        let _publisher = AbortOnDrop(publisher.abort_handle());
         let mut delay = self.backoff.min;
         loop {
             match self.link.watch().await {
@@ -451,6 +523,11 @@ impl<S: Sink> Driver<S> {
     }
 
     fn effects(self: &Arc<Self>, fx: Effects) {
+        if !fx.notices.is_empty() {
+            // A notice comes after the state that holds what it is about,
+            // and as soon as it always did.
+            self.publish_now();
+        }
         for notice in fx.notices {
             match notice {
                 Notice::ApprovalArrived(a) => self.sink.approval_arrived(&a),
@@ -619,21 +696,25 @@ impl<S: Sink> Driver<S> {
         });
     }
 
-    /// Run one of the window's actions; returns the daemon's result.
+    /// Run one of the window's actions; returns the daemon's result. The
+    /// sink has what the action changed before this returns.
     pub async fn act(&self, action: Action) -> Result<Value, Failure> {
         let request = action.request()?;
         let result = match &action {
             Action::Inbox { agent, committee } => {
                 self.refresh_inbox(agent.clone(), committee.clone()).await;
                 self.changed();
+                self.publish_now();
                 return Ok(Value::Null);
             }
             Action::Approvals => {
                 self.refresh(Refresh::Approvals).await;
+                self.publish_now();
                 return Ok(Value::Null);
             }
             Action::Docket => {
                 self.refresh(Refresh::Docket).await;
+                self.publish_now();
                 return Ok(Value::Null);
             }
             Action::Approve { id, .. } => {
@@ -664,6 +745,7 @@ impl<S: Sink> Driver<S> {
         let result = result.map_err(|e| Failure::Daemon(message(&e)));
         self.model().last_error = result.as_ref().err().cloned();
         self.changed();
+        self.publish_now();
         result
     }
 }
