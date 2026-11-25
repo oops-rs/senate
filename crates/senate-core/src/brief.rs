@@ -27,12 +27,13 @@ use crate::continuity::{
     short_commit,
 };
 use crate::duty::DutyFold;
-use crate::event::{BindingAction, Event, Kind, Refs, meta};
+use crate::event::{BindingAction, Event, Kind, Refs, StatusState, meta};
 use crate::ids::{CommitteeId, Seq};
 use crate::locale::Locale;
 use crate::locator::{Locator, intended};
 use crate::memory::{Digest, MAX_BRIEF_POINTS, MemoryFold, MemoryPoint};
 use crate::senator::SenatorName;
+use crate::task::StatusPayload;
 
 /// Most recent decisions kept (in seq order).
 pub const MAX_DECISIONS: usize = 30;
@@ -178,6 +179,8 @@ pub struct BriefBuilder {
     superseded: Vec<Seq>,
     /// Question roots not yet answered, by seq.
     open: BTreeMap<Seq, BriefQuestion>,
+    /// Question roots whose thread was archived unanswered, by seq.
+    archived: BTreeMap<Seq, BriefQuestion>,
     groups: Vec<BriefGroup>,
     checkpoints: HashMap<SenatorName, BriefCheckpoint>,
     presence: PresenceBoard,
@@ -194,6 +197,7 @@ impl BriefBuilder {
             decisions: BTreeMap::new(),
             superseded: Vec::new(),
             open: BTreeMap::new(),
+            archived: BTreeMap::new(),
             groups: Vec::new(),
             checkpoints: HashMap::new(),
             presence: PresenceBoard::new(),
@@ -237,6 +241,22 @@ impl BriefBuilder {
             && (event.kind == Kind::Answer || is_seat_removed(event))
         {
             self.open.remove(&root);
+            self.archived.remove(&root);
+        }
+        // An archived thread waits on no one, as on the task board: a
+        // notice whose prompt was settled, a question its asker closed. A
+        // later status that is not archived opens it again.
+        if let Some(root) = event.thread
+            && event.kind == Kind::Status
+            && let Some(status) = StatusPayload::of(event)
+        {
+            if status.state == StatusState::Archived {
+                if let Some(question) = self.open.remove(&root) {
+                    self.archived.insert(root, question);
+                }
+            } else if let Some(question) = self.archived.remove(&root) {
+                self.open.insert(root, question);
+            }
         }
         // Handed to the seat that replaced the one it was put to: that seat
         // answers it now.
@@ -824,6 +844,48 @@ mod tests {
         let brief = Brief::from_events(c(), &log.0);
         let open: Vec<_> = brief.open_questions.iter().map(|q| q.seq).collect();
         assert_eq!(open, [kept]);
+    }
+
+    /// A permission-prompt notice is a question to the chair that nobody
+    /// answers: it is closed by an archived status once the prompt is
+    /// settled, and stayed in the brief for good.
+    #[test]
+    fn an_archived_thread_is_no_longer_an_open_question() {
+        let status = |root: Seq, state: StatusState| {
+            ev(Kind::Status, "senator::codex", "")
+                .in_thread(root)
+                .with_meta(meta::STATUS, StatusPayload::new(state).value())
+        };
+        let mut log = Log(Vec::new());
+        let notice = log.push(
+            ev(
+                Kind::Question,
+                "senator::codex",
+                "has a permission prompt waiting",
+            )
+            .to(addr("chair")),
+        );
+        let kept = log
+            .push(ev(Kind::Question, "senator::claude", "重试几次？").to(addr("senator::copilot")));
+        // Progress on a thread leaves it open.
+        log.push(status(kept, StatusState::Processing));
+        log.push(status(notice, StatusState::Archived));
+        let open = |log: &Log| -> Vec<Seq> {
+            Brief::from_events(c(), &log.0)
+                .open_questions
+                .iter()
+                .map(|q| q.seq)
+                .collect()
+        };
+        assert_eq!(open(&log), [kept]);
+
+        // Taken up again, it is open again; answered, it is closed for good.
+        log.push(status(notice, StatusState::Processing));
+        assert_eq!(open(&log), [notice, kept]);
+        log.push(status(notice, StatusState::Archived));
+        log.push(ev(Kind::Answer, "senator::claude", "allowed").in_thread(notice));
+        log.push(status(notice, StatusState::Active));
+        assert_eq!(open(&log), [kept]);
     }
 
     #[test]
