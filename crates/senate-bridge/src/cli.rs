@@ -277,7 +277,7 @@ enum Cmd {
     },
     /// Appoint session secretaries and manage their shared work.
     Secretary(cli_secretary::Secretary),
-    /// Operate a program in a scratch terminal: screen, type, keys, wait.
+    /// Operate a program in a scratch terminal: screen, keys, wait.
     ///
     /// Terminal use, for an agent that has to drive something interactive
     /// (a REPL, a debugger, an installer, a TUI under test) and for scripts.

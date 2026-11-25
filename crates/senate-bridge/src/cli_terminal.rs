@@ -44,8 +44,10 @@ enum Action {
   senate terminal open -- python3 -i
   senate terminal open --rows 40 --cols 120 --cwd ../app -- npm run dev")]
     Open {
+        /// The terminal's height.
         #[arg(long, default_value_t = 24)]
         rows: u16,
+        /// The terminal's width.
         #[arg(long, default_value_t = 80)]
         cols: u16,
         /// The program's directory. Defaults to this one.
@@ -59,9 +61,9 @@ enum Action {
     List,
     /// Print a terminal's screen as text.
     #[command(after_help = "Examples:
-  senate terminal screen 01J…                The screen, with its size and cursor
+  senate terminal screen 01J…            The screen, its size and cursor
   senate terminal screen 01J… --scrollback 100
-  senate terminal screen --of reviewer       A hosted session's screen: its committee's chair, or you")]
+  senate terminal screen --of reviewer   A hosted session's (its chair, or you)")]
     Screen {
         /// The scratch terminal.
         #[arg(required_unless_present = "of")]
@@ -78,6 +80,7 @@ enum Action {
     /// The text is typed as it is; a line end in it is Enter. Use `key` for
     /// Enter on its own and for every other key.
     Type {
+        /// The scratch terminal.
         id: EventId,
         /// The text; `-` reads it from stdin.
         #[arg(required = true)]
@@ -89,6 +92,7 @@ enum Action {
   senate terminal key 01J… down down enter
   senate terminal key 01J… ctrl-c")]
     Key {
+        /// The scratch terminal.
         id: EventId,
         /// enter, tab, esc, space, backspace, delete, up, down, left, right,
         /// home, end, pageup, pagedown, f1 to f12, or one character; with
@@ -102,6 +106,7 @@ enum Action {
     /// were last shown. Returns at once when the program exits. Exits with
     /// a failure when the time runs out.
     Wait {
+        /// The scratch terminal.
         id: EventId,
         /// Until the screen contains this.
         #[arg(long, conflicts_with = "still")]
@@ -114,15 +119,26 @@ enum Action {
         timeout: u64,
     },
     /// Set a scratch terminal's size, then print its screen.
-    Resize { id: EventId, rows: u16, cols: u16 },
+    Resize {
+        /// The scratch terminal.
+        id: EventId,
+        /// The new height.
+        rows: u16,
+        /// The new width.
+        cols: u16,
+    },
     /// End a scratch terminal's program and forget the terminal.
-    Close { id: EventId },
+    Close {
+        /// The scratch terminal.
+        id: EventId,
+    },
     /// Open a scratch terminal in this one: yours to type in until Ctrl-].
     ///
     /// For a person, from their own terminal. While you are attached, the
     /// session that opened the terminal can read it but not type into it.
     /// With --read-only nothing you type reaches it.
     Attach {
+        /// The scratch terminal.
         id: EventId,
         /// Look without typing.
         #[arg(long)]

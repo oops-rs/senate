@@ -784,8 +784,9 @@ fn mcp_binary_speaks_stdio_and_reports_a_missing_daemon() {
     // The everyday tools and secretary tools. The presiding
     // and chair tools are listed only for a session that holds those roles.
     let tools = tools["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 20);
+    assert_eq!(tools.len(), 21);
     assert!(tools.iter().any(|tool| tool["name"] == "card"));
+    assert!(tools.iter().any(|tool| tool["name"] == "terminal"));
     assert!(tools.iter().any(|tool| tool["name"] == "launch_profiles"));
     let call = rpc(json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
         "params": {"name": "catch_up", "arguments": {}}}));

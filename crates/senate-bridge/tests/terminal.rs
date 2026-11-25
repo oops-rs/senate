@@ -429,9 +429,13 @@ async fn a_scripted_tui_is_driven_end_to_end_through_the_tool() {
         "{no_open}"
     );
 
-    // Wait for the program to paint, rather than poll.
+    // Wait for the program to paint, rather than poll: for the whole menu
+    // (a text to wait for may span rows), then for it to have gone quiet.
+    let menu = "Pick one (size 10 40)\n> alpha\n  beta\n  gamma";
+    tool.ok(json!({"action": "wait", "id": id, "text": menu}))
+        .await;
     let first = tool
-        .ok(json!({"action": "wait", "id": id, "text": "Pick one"}))
+        .ok(json!({"action": "wait", "id": id, "still_ms": 200}))
         .await;
     assert!(
         first.starts_with(&format!(
@@ -460,7 +464,7 @@ async fn a_scripted_tui_is_driven_end_to_end_through_the_tool() {
     tool.ok(json!({"action": "key", "id": id, "keys": "up"}))
         .await;
     let back = tool
-        .ok(json!({"action": "wait", "id": id, "text": "> beta"}))
+        .ok(json!({"action": "wait", "id": id, "text": "> beta\n  gamma"}))
         .await;
     assert!(back.contains("  alpha\n> beta\n  gamma"), "{back}");
     let unknown = tool
@@ -481,12 +485,12 @@ async fn a_scripted_tui_is_driven_end_to_end_through_the_tool() {
     tool.ok(json!({"action": "key", "id": id, "keys": "r"}))
         .await;
     let repainted = tool
-        .ok(json!({"action": "wait", "id": id, "text": "size 12 50"}))
+        .ok(json!({
+            "action": "wait", "id": id,
+            "text": "Pick one (size 12 50)\n  alpha\n> beta\n  gamma",
+        }))
         .await;
-    assert!(
-        repainted.contains("Pick one (size 12 50)\n  alpha\n> beta"),
-        "{repainted}"
-    );
+    assert!(repainted.contains("12 rows × 50 columns"), "{repainted}");
 
     // Enter picks; the program then reads a line, which `type` gives it.
     tool.ok(json!({"action": "key", "id": id, "keys": "enter"}))
