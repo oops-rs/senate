@@ -168,6 +168,7 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
     let db = rusqlite::Connection::open(h.paths.state_db()).unwrap();
     let mut owners = Vec::new();
     let mut sockets = Vec::new();
+    let mut brokers = tokio::task::JoinSet::new();
     let mut primaries = Vec::new();
     let now = chrono::Utc::now().timestamp_millis();
     for i in 0..36 {
@@ -202,6 +203,21 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
         }
         if i < 3 {
             sockets.push(tokio::net::UnixListener::bind(dir.join("tty")).unwrap());
+            let control = tokio::net::UnixListener::bind(dir.join("ctl")).unwrap();
+            brokers.spawn(async move {
+                use tokio::io::AsyncBufReadExt as _;
+                loop {
+                    let (mut connection, _) = control.accept().await.unwrap();
+                    let mut frame = String::new();
+                    tokio::io::BufReader::new(&mut connection)
+                        .read_line(&mut frame)
+                        .await
+                        .unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                    assert_eq!(request["viewer"]["writable"], true);
+                    connection.write_u8(1).await.unwrap();
+                }
+            });
         }
         let alias = if i < 6 { path("main") } else { path("worker") };
         h.server
@@ -228,6 +244,7 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
     let healthy_task = tokio::spawn(async move {
         loop {
             let (mut stream, _) = healthy.accept().await.unwrap();
+            stream.read_exact(&mut [0; 32]).await.unwrap();
             stream.write_u8(3).await.unwrap();
             let mut size = [0; 5];
             stream.read_exact(&mut size).await.unwrap();
@@ -238,6 +255,7 @@ async fn attach_with_many_sessions_bounds_picker_and_host_startup() {
     });
     let no_screen_task = tokio::spawn(async move {
         let (mut stream, _) = no_screen.accept().await.unwrap();
+        stream.read_exact(&mut [0; 32]).await.unwrap();
         stream.write_u8(3).await.unwrap();
         let _ = stream.read_to_end(&mut Vec::new()).await;
     });

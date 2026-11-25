@@ -486,7 +486,9 @@ async fn stop_tool_enforces_authority_and_records_the_actor() {
     )
     .await
     .unwrap();
-    let mut viewer = tokio::net::UnixStream::connect(&terminal).await.unwrap();
+    let mut viewer = senate_bridge::host::open_fixture_viewer(&terminal, true)
+        .await
+        .unwrap();
     use tokio::io::AsyncReadExt as _;
     assert_eq!(viewer.read_u8().await.unwrap(), 3);
     viewer.write_all(b"\x01\0\x18\0\x50").await.unwrap();
