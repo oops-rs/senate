@@ -663,7 +663,7 @@ pub(crate) async fn open_viewer(socket: &Path, writable: bool) -> anyhow::Result
         &paths.socket(),
         &ipc::Request::OpenViewer { host, writable },
         Duration::from_secs(1),
-        crate::app_confirmation::LIFETIME + Duration::from_secs(5),
+        Duration::from_secs(20),
     )
     .await;
     match result {

@@ -41,7 +41,6 @@ mod queue {
     struct State {
         last_app_poll: Option<Instant>,
         waiting: BTreeMap<EventId, Pending>,
-        terminals: Vec<(Instant, crate::kernel_process::TerminalIdentity)>,
     }
 
     pub(crate) struct ConfirmedRequest(Request);
@@ -81,28 +80,6 @@ mod queue {
     }
 
     impl Queue {
-        pub(crate) fn terminal_ok(
-            &self,
-            terminal: &crate::kernel_process::TerminalIdentity,
-        ) -> bool {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            let now = Instant::now();
-            state.terminals.retain(|(expires, _)| *expires > now);
-            state.terminals.iter().any(|(_, known)| known == terminal)
-        }
-
-        pub(crate) fn trust_terminal(&self, terminal: crate::kernel_process::TerminalIdentity) {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            let now = Instant::now();
-            state
-                .terminals
-                .retain(|(expires, known)| *expires > now && known != &terminal);
-            if state.terminals.len() < 128 {
-                state
-                    .terminals
-                    .push((now + Duration::from_secs(12 * 60 * 60), terminal));
-            }
-        }
         pub(crate) fn accept_signed_app(&self, request: Request) -> ConfirmedRequest {
             ConfirmedRequest(request)
         }
@@ -334,17 +311,8 @@ pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> 
             )
         }
         Request::ObserveAdmin {
-            command: AdminRequest::Revoke { id },
-        } => format!("revoke Observe access for grant {id}"),
-        Request::ObserveAdmin {
             command: AdminRequest::Publish { committee, seq, .. },
         } => format!("Publish the preview of {committee} #{seq} to eligible observers"),
-        Request::ObserveAdmin {
-            command: AdminRequest::Withdraw { committee, seq },
-        } => format!("Withdraw the preview of {committee} #{seq}"),
-        Request::SessionForget { session_id } => {
-            format!("Forget stored session history for {session_id}")
-        }
         Request::Secretaries {
             action,
             for_,
@@ -361,14 +329,63 @@ pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> 
                 .unwrap_or_else(|| "the secretary".into());
             format!("{action:?} {secretary} as a secretary for {principal}")
         }
-        Request::Stop { senator, .. } => format!("Stop {senator}'s hosted terminal"),
-        Request::Restore { senator, .. } => format!("Restart {senator}'s hosted terminal"),
-        Request::Pause { senator, .. } => format!("Pause {senator}'s hosted terminal"),
-        Request::Resume { senator } => format!("Resume {senator}'s hosted terminal"),
-        Request::Replace { senator, .. } => format!("Replace {senator}'s hosted session"),
-        Request::RestartHost { senator, .. } => {
-            format!("Checkpoint and restart {senator}'s hosted terminal")
+        Request::SetSecretarySession {
+            target_session,
+            senator,
+            appointed,
+            ..
+        } => {
+            let verb = if *appointed { "Appoint" } else { "Dismiss" };
+            let who = senator
+                .as_ref()
+                .map(ToString::to_string)
+                .or_else(|| target_session.clone())
+                .unwrap_or_else(|| "the session".into());
+            format!("{verb} {who} on the secretary team")
         }
+        Request::EnsureSecretary => "Start or restore the default secretary".into(),
+        Request::Desk { set: Some(_) } => "Change the Speaker's desk workers".into(),
+        Request::DeskDecide { committee, seq, .. } => {
+            format!("Decide desk item {committee} #{seq}")
+        }
+        Request::Forward { committee, seq, .. } => {
+            format!("Forward desk item {committee} #{seq}")
+        }
+        Request::Refuse { committee, seq, .. } => {
+            format!("Refuse desk item {committee} #{seq}")
+        }
+        Request::DeskOpenCommittee { committee, .. } => {
+            format!("Open committee {committee} and start its chair")
+        }
+        Request::SetChair {
+            committee, senator, ..
+        } => match committee {
+            Some(committee) => format!("Appoint {senator} as chair of {committee}"),
+            None => format!("Appoint {senator} as chair"),
+        },
+        Request::Spawn {
+            committee,
+            chair,
+            secretary,
+            ..
+        } => {
+            let role = match (*chair, *secretary) {
+                (true, true) => "chair and secretary",
+                (true, false) => "chair",
+                (false, true) => "secretary",
+                (false, false) => "senator",
+            };
+            format!("Spawn a {role} on {committee}")
+        }
+        Request::SpeakerAlias {
+            committee,
+            senator,
+            alias,
+            ..
+        } => format!("Set alias {alias} for {senator} on {committee}"),
+        Request::SpeakerUnseat {
+            committee, senator, ..
+        } => format!("Unseat {senator} from {committee}"),
         Request::ArchiveCommittee {
             committee,
             archived,
@@ -377,6 +394,16 @@ pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> 
             let action = if *archived { "Archive" } else { "Unarchive" };
             format!("{action} committee {committee}")
         }
+        Request::RemoteControl { command } => match command {
+            crate::remote::Control::PrepareEnable { listen } => {
+                format!("Prepare remote machine access on {listen}")
+            }
+            crate::remote::Control::Pair { .. } => "Create a remote device pairing offer".into(),
+            crate::remote::Control::PrepareEnroll => {
+                "Prepare remote device enrollment for administrator approval".into()
+            }
+            _ => "Manage remote machine access".into(),
+        },
         other => serde_json::to_value(other)
             .ok()
             .and_then(|value| value["op"].as_str().map(|op| op.replace('_', " ")))
@@ -1164,22 +1191,20 @@ pub(crate) mod macos {
 /// Whether a bridge request may wait on local authorization.
 pub fn required(request: &crate::ipc::Request) -> bool {
     use crate::daemon::approval_guard::{RequestEffect, request_effect};
-    use crate::ipc::Request;
 
-    request_effect(request) == RequestEffect::Presence || matches!(request, Request::SetCard { .. })
+    request_effect(request) == RequestEffect::Presence
 }
 
 /// The unsigned, disposable integration fixtures exercise the existing
 /// operational handlers directly. Keep prior signed-consent tests gated.
 pub(crate) fn fixture_requires_confirmation(request: &crate::ipc::Request) -> bool {
     use crate::ipc::Request;
-    matches!(request, Request::RebindHost { .. })
-        || matches!(
-            request,
-            Request::ObserveAdmin {
-                command: senate_observe::AdminRequest::Create { grant },
-            } if grant.scope == senate_observe::Scope::Lines
-        )
+    matches!(
+        request,
+        Request::ObserveAdmin {
+            command: senate_observe::AdminRequest::Create { grant },
+        } if grant.scope == senate_observe::Scope::Lines
+    )
 }
 
 #[cfg(test)]
@@ -1200,9 +1225,32 @@ mod tests {
         assert!(required(&request));
         assert!(required(&Request::EnsureSecretary));
         assert!(required(&Request::ObserveAdmin {
+            command: AdminRequest::Publish {
+                committee: "senate".parse().unwrap(),
+                seq: senate_core::Seq(1),
+                reviewed: senate_observe::Preview {
+                    committee: "senate".parse().unwrap(),
+                    event_id: EventId::new(),
+                    line: "preview".into(),
+                },
+            },
+        }));
+        assert!(!required(&Request::ObserveAdmin {
             command: AdminRequest::Revoke {
                 id: "fixture".into()
             },
+        }));
+        assert!(!required(&Request::ObserveAdmin {
+            command: AdminRequest::Withdraw {
+                committee: "senate".parse().unwrap(),
+                seq: senate_core::Seq(1),
+            },
+        }));
+        assert!(required(&Request::DeskWorker {
+            command: senate_core::worker::Admin::Rotate { id: EventId::new() },
+        }));
+        assert!(!required(&Request::DeskWorker {
+            command: senate_core::worker::Admin::Revoke { id: EventId::new() },
         }));
         assert!(required(&Request::RemoteControl {
             command: crate::remote::Control::PrepareEnroll,
@@ -1212,6 +1260,19 @@ mod tests {
         }));
         assert!(!required(&Request::RemoteControl {
             command: crate::remote::Control::Devices
+        }));
+        assert!(!required(&Request::SetCard {
+            session: crate::ipc::SessionSelector::default(),
+            target: crate::ipc::CardTarget::Own,
+            document: "{}".into(),
+        }));
+        assert!(!required(&Request::SetCard {
+            session: crate::ipc::SessionSelector {
+                session_id: Some("session".into()),
+                claude_pid: None,
+            },
+            target: crate::ipc::CardTarget::Own,
+            document: "{}".into(),
         }));
         assert!(!required(&Request::Status));
         assert!(!required(&Request::Sessions));

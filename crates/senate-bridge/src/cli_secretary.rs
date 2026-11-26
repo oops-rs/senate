@@ -230,11 +230,17 @@ fn ask(paths: &Paths, text: String) -> anyhow::Result<()> {
     use crate::ipc::{DefaultSecretary, EnsureAction};
     let locale = crate::config::BridgeConfig::locale_at(&paths.config());
     runtime(false)?.block_on(async {
+        let request = Request::EnsureSecretary;
+        let timeout = if super::announce_authentication(&request) {
+            crate::host::REQUEST_TIMEOUT + crate::app_confirmation::LIFETIME
+        } else {
+            crate::host::REQUEST_TIMEOUT
+        };
         let secretary: DefaultSecretary = crate::ipc::request(
             &paths.socket(),
-            &Request::EnsureSecretary,
+            &request,
             std::time::Duration::from_secs(1),
-            crate::host::REQUEST_TIMEOUT,
+            timeout,
         )
         .await?;
         let who = secretary

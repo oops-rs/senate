@@ -1238,18 +1238,16 @@ mod tests {
             matches!(error, senate_bridge::ipc::ClientError::Remote(error)
                 if error.code == senate_bridge::ipc::codes::NOT_A_PERSON)
         };
-        assert!(
-            ipc.call::<()>(
-                &Request::SetCard {
-                    session: Default::default(),
-                    target: senate_bridge::ipc::CardTarget::Own,
-                    document: card.into(),
-                },
-                wait,
-            )
-            .await
-            .is_err_and(refused)
-        );
+        // Person card writes use terminal-origin proof without an auth prompt.
+        ipc.call::<()>(
+            &Request::SetCard {
+                session: Default::default(),
+                target: senate_bridge::ipc::CardTarget::Own,
+                document: card.into(),
+            },
+            wait,
+        )
+        .await?;
         let mut profile = issue("topology metadata");
         profile.topology = true;
         for policy in [None, Some(LinePolicy::Auto), Some(LinePolicy::Published)] {
@@ -1399,19 +1397,16 @@ mod tests {
                 .status(),
             401
         );
-        assert!(
-            ipc.call::<()>(
-                &Request::ObserveAdmin {
-                    command: AdminRequest::Revoke {
-                        id: issued.grant.id.clone()
-                    },
+        // Revoking an Observe grant reduces exposure: terminal-origin proof only.
+        ipc.call::<()>(
+            &Request::ObserveAdmin {
+                command: AdminRequest::Revoke {
+                    id: issued.grant.id.clone(),
                 },
-                wait,
-            )
-            .await
-            .is_err_and(refused)
-        );
-        registry.revoke(&issued.grant.id)?;
+            },
+            wait,
+        )
+        .await?;
         assert_eq!(
             http.get(&state)
                 .bearer_auth(&issued.token)

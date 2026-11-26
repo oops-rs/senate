@@ -698,6 +698,19 @@ impl DaemonHandle {
         .unwrap_or(false)
     }
 
+    /// Run the daemon's real process-tree caller check for `peer` and
+    /// `request` without the disposable-fixture shortcut (tests only).
+    #[doc(hidden)]
+    #[cfg(debug_assertions)]
+    pub async fn check_caller_for_test(
+        &self,
+        peer: Option<u32>,
+        request: &Request,
+    ) -> Result<(), IpcError> {
+        let guidance = approval_guard::agent_refusal_guidance(request);
+        self.front.refuse_agent_caller(peer, guidance).await
+    }
+
     /// SIGTERM's first step, for each Senate with `pause_on_shutdown`:
     /// pause every running hosted session, within
     /// [`Timing::shutdown_pause`]. A session not paused by then is recorded
@@ -7271,8 +7284,6 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                     Ok(request)
                         if crate::app_confirmation::required(&request)
                             && !approval_guard::advisory_host_action(&request)
-                            && !matches!(&request, Request::OpenViewer { host, .. }
-                                if crate::host::legacy_viewer(&Paths::new(&shared.primary().home), host))
                             && (!fixture
                                 || crate::app_confirmation::fixture_requires_confirmation(
                                     &request,
@@ -7299,7 +7310,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         let reply = match shared
                             .refuse_agent_caller(
                                 person_peer,
-                                "Manage remote device pairing from your own terminal",
+                                "Use your Senate MCP tools or ask the person to manage remote device pairing from their own terminal",
                             )
                             .await
                         {
@@ -7315,7 +7326,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                             shared
                                 .refuse_agent_caller(
                                     person_peer,
-                                    "Open the viewer from your own terminal",
+                                    "Use your Senate MCP tools or ask the person to open the viewer from their own terminal",
                                 )
                                 .await
                         };
@@ -7460,7 +7471,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         let reply = match shared
                             .refuse_agent_caller(
                                 person_peer,
-                                "Decide a desk request from your own terminal or the Senate app",
+                                "Use your Senate MCP tools or ask the person to decide a desk request from their own terminal or the Senate app",
                             )
                             .await
                         {
@@ -7526,7 +7537,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                             origin,
                             shared.guarded_dispatch(
                                 person_peer,
-                                "Run this command from your own terminal or the Senate app",
+                                "Use your Senate MCP tools or ask the person to run this command from their own terminal or the Senate app",
                                 request,
                             ),
                         ))

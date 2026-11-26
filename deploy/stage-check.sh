@@ -17,7 +17,7 @@
 # starts. Steps, each with PASS or FAIL and the reason:
 #
 #   1. a read-only operator request from this terminal
-#   2. a sensitive request (spawning a chair) that asks you to authenticate
+#   2. a Speaker-level request (spawning a chair) that asks you to authenticate
 #   3. the hosted session that started uses its Senate MCP tools
 #   4. that chair spawns a member through the MCP spawn tool
 #   5. a session from before the upgrade (0.12.3 state, no caller proofs)
@@ -252,15 +252,15 @@ else
 fi
 cli join stage >/dev/null
 
-# 2. A sensitive request: authenticate when macOS asks.
+# 2. A Speaker-level request: authenticate when macOS asks.
 echo "      Authenticate when macOS asks (Touch ID or your password): spawning a staged chair."
 out="$(cli spawn claude --committee stage --alias lead --chair --dir "$home/work")"
 chair=$?
 spawned=$chair
 if [[ $chair -eq 0 ]]; then
-  pass "2 sensitive request authenticated (staged chair spawned)"
+  pass "2 Speaker-level request authenticated (staged chair spawned)"
 else
-  fail "2 sensitive request authenticated" "$out"
+  fail "2 Speaker-level request authenticated" "$out"
 fi
 touch "$home/go"
 
