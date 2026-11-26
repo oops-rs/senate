@@ -481,10 +481,17 @@ impl Plan {
                 for seat in approved {
                     match now.iter().find(|s| s.senator == seat.senator) {
                         // As it is now: an alias given since is not freed,
-                        // and one gone already is not asked for.
+                        // and one gone already is not asked for. The same
+                        // for the seat and the queue: what the prompt did
+                        // not count is not done.
                         Some(now) => {
                             let mut now = now.clone();
                             now.aliases.retain(|alias| seat.aliases.contains(alias));
+                            now.seated &= seat.seated;
+                            now.followed &= seat.followed;
+                            if !now.followed {
+                                now.deliveries = 0;
+                            }
                             kept.push(now);
                         }
                         None => dropped.push(format!("{c}: {}", seat.shown)),
@@ -508,8 +515,10 @@ impl Plan {
                     dropped.push(format!("{c}: #{}", thread.root));
                 }
             }
-            new += now_seats.len() + now_roles.len() + now_threads.len();
-            new -= members.len() + roles.len() + threads.len();
+            // An approved plan that names a seat or a thread twice keeps
+            // more than `fresh` holds: count nothing new, rather than wrap.
+            new += (now_seats.len() + now_roles.len() + now_threads.len())
+                .saturating_sub(members.len() + roles.len() + threads.len());
             committees.push(CommitteePlan {
                 committee: c.clone(),
                 archived: approved.archived,
@@ -533,7 +542,7 @@ impl Plan {
                 dropped.push(format!("session {}", session.session_id));
             }
         }
-        new += fresh.sessions.len() - sessions.len();
+        new += fresh.sessions.len().saturating_sub(sessions.len());
         let agreed = Plan {
             scope: self.scope.clone(),
             senate: self.senate.clone(),
@@ -1508,6 +1517,34 @@ mod tests {
         let text = render_plan(&empty, Locale::En, false, now());
         assert!(text.contains("Nothing to clean up."), "{text}");
         assert!(!text.contains("ledger  ("), "{text}");
+    }
+
+    #[test]
+    fn a_run_does_no_more_to_a_seat_than_the_prompt_counted() {
+        // The prompt's counts come from the submitted plan: one that says a
+        // seat is already gone and its queue empty is shown as unseating
+        // and dropping nothing, so the run must do neither.
+        let mut shown = seat("claude-dead-1", &[]);
+        shown.seated = false;
+        let approved = plan(vec![shown.clone()], Vec::new(), &[]);
+        let mut held = seat("claude-dead-1", &[]);
+        held.followed = true;
+        held.deliveries = 7;
+        let fresh = plan(vec![held], Vec::new(), &[]);
+        let (agreed, dropped, new) = approved.agreed(&fresh);
+        assert_eq!(agreed.committees[0].seats, [shown]);
+        assert!(dropped.is_empty());
+        assert_eq!(new, 0);
+        assert_eq!(agreed.totals().seats, approved.totals().seats);
+        assert_eq!(agreed.totals().deliveries, approved.totals().deliveries);
+        // A plan that names a seat twice does not wrap the count of new.
+        let twice = plan(
+            vec![seat("claude-dead-1", &[]), seat("claude-dead-1", &[])],
+            Vec::new(),
+            &["s1", "s1"],
+        );
+        let once = plan(vec![seat("claude-dead-1", &[])], Vec::new(), &["s1"]);
+        assert_eq!(twice.agreed(&once).2, 0);
     }
 
     #[test]
