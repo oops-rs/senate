@@ -92,6 +92,7 @@ mod linux_scope;
 mod mac_scope;
 pub mod mcp;
 pub mod notify;
+pub mod parent;
 pub mod paths;
 pub mod person;
 pub mod preside;

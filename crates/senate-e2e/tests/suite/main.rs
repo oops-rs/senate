@@ -35,6 +35,7 @@ mod memory;
 mod nested;
 mod no_chat;
 mod parent_child;
+mod parent_memory;
 mod qualified;
 mod release_version;
 mod secretary_agents;

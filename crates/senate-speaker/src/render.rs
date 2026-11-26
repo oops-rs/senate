@@ -2449,6 +2449,7 @@ mod tests {
         let decisions: Vec<senate_core::brief::BriefDecision> = (1..=7)
             .map(|n| senate_core::brief::BriefDecision {
                 seq: Seq(100 + n),
+                id: None,
                 ts: Utc::now(),
                 by: Address::senior(&name("pm")),
                 body: format!("决策 {n}"),
@@ -3253,6 +3254,7 @@ mod tests {
 
         let decision = BriefDecision {
             seq: Seq(5),
+            id: None,
             ts: Utc::now(),
             by: sen("pm"),
             body: "cap is 90 days".into(),

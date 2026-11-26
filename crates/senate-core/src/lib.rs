@@ -134,7 +134,7 @@ pub use locale::{Locale, LocaleParseError};
 pub use locator::{Locator, LocatorParseError, Origin};
 pub use memory::{
     Digest, DigestPayload, DigestPoint, DigestTrigger, MemoryFold, MemoryHit, MemoryPayload,
-    MemoryPoint, Retired,
+    MemoryPoint, PointKind, Retired,
 };
 pub use mention::{Found, Mention, MentionParseError};
 pub use roster::{

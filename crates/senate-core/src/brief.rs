@@ -28,7 +28,7 @@ use crate::continuity::{
 };
 use crate::duty::DutyFold;
 use crate::event::{BindingAction, Event, Kind, Refs, StatusState, meta};
-use crate::ids::{CommitteeId, Seq};
+use crate::ids::{CommitteeId, EventId, Seq};
 use crate::locale::Locale;
 use crate::locator::{Locator, intended};
 use crate::memory::{Digest, MAX_BRIEF_POINTS, MemoryFold, MemoryPoint};
@@ -115,6 +115,10 @@ pub struct Brief {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BriefTop {
     pub seq: Seq,
+    /// The event's id, which names it across logs and epochs. Absent from
+    /// a server from before it was given (0.14.1 and older).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<EventId>,
     pub ts: DateTime<Utc>,
     pub body: String,
 }
@@ -122,6 +126,10 @@ pub struct BriefTop {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BriefDecision {
     pub seq: Seq,
+    /// The event's id, which names it across logs and epochs. Absent from
+    /// a server from before it was given (0.14.1 and older).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<EventId>,
     pub ts: DateTime<Utc>,
     /// Who decided: `on_behalf_of` when the Speaker recorded it for someone,
     /// else `from`.
@@ -308,6 +316,7 @@ impl BriefBuilder {
                         event.seq,
                         BriefDecision {
                             seq: event.seq,
+                            id: Some(event.id.clone()),
                             ts: event.ts,
                             by: principal(event),
                             body: event.body.clone(),
@@ -432,6 +441,7 @@ impl BriefBuilder {
             decision_notes,
             top: self.memory.focus().map(|p| BriefTop {
                 seq: p.seq,
+                id: p.id.clone(),
                 ts: p.ts,
                 body: p.text.clone(),
             }),

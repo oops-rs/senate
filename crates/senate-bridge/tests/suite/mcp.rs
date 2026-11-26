@@ -676,6 +676,7 @@ async fn ask_answer_and_catch_up_end_to_end() {
             "join",
             "launch_profiles",
             "memory_search",
+            "parent_context",
             "post",
             "propose_decision",
             "receipt",
