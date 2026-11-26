@@ -60,6 +60,7 @@ SENATE_HOME=/tmp/sh SENATE_APP_SHOW=1 build/Build/Products/Debug/Senate.app/Cont
 | `SENATE_HOME` | the Senate home; wins over the one chosen in Settings |
 | `SENATE_APP_SHOW=1` | open the window at launch |
 | `SENATE_APP_NOTIFICATIONS=0` | no notification permission prompt and no notifications |
+| `SENATE_APP_HEADLESS=1` | a run that only connects, beside the installed app (`deploy/stage-check.sh`): no Dock icon, no notifications, and an empty scene folder of its own instead of the installed app's (its menu bar icon still shows) |
 | `SENATE_APP_SNAPSHOT=<dir>` | Debug builds: write the inbox, a thread, approvals, a committee, sessions (at a prompt, scrolled up to older items, every tool call open, at work, unreadable), your profile, Settings and the status item's menu as PNGs of the app's own windows, then quit (how `docs/screenshots/` is made). `SENATE_APP_SNAPSHOT_APPEARANCE=light\|dark` picks the appearance whatever the system's is; `SENATE_APP_SNAPSHOT_PREFIX` goes before each file name (`zh-`) |
 | `SENATE_APP_PERF=1` | print state-apply and thread-read times and main-thread stalls, tour a thread, Inbox, Approvals and a session, quit (`SENATE_APP_PERF_THREAD=<root>` opens that thread) |
 | `SENATE_APP_PERF=watch` | print the same measures and stay, and the core prints once a second how many snapshots it built and pushed and what they cost; `scripts/perf-window.sh <pid> <stderr file>` sums a window of it with the app's CPU, stalls and memory. With it, `SENATE_APP_PERF_EVERY_CHANGE=1` pushes a snapshot on every change (the core before it shared them), to measure against |
@@ -373,8 +374,8 @@ lacks either language.
 
 The app and the core log under the subsystem `dev.senate.app` (categories
 `app`, `notifications`, `diagnostics`, `core`): Console.app, or
-`log stream --info --predicate 'subsystem == "dev.senate.app"'` (Settings ›
-Advanced opens it). MetricKit's crash and hang reports are written there
+`/usr/bin/log stream --info --predicate 'subsystem == "dev.senate.app"'`
+(Settings › Advanced opens it; in zsh a bare `log` is a builtin). MetricKit's crash and hang reports are written there
 when they arrive; the system's own stay in `~/Library/Logs/DiagnosticReports`.
 Nothing leaves the machine.
 

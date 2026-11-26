@@ -77,8 +77,14 @@ It starts the signed daemon as a disposable launchd job with its own label
 and home under /tmp, next to the live daemon, and never touches `~/.senate`.
 It checks an operator request, a sensitive request that asks you to
 authenticate, a staged hosted session's MCP tools, that chair spawning a
-member through MCP, and a 0.12.3-shaped session's hook and tools (with the
-old client when given). It cleans up by label and recorded PIDs and ends
+member through MCP, a 0.12.3-shaped session's hook and tools (with the
+old client when given), the release's Senate.app watching the staged
+daemon, and `senate session watch` from your terminal. The app is pinned
+in the staged home and runs as its own launchd job with
+`SENATE_APP_HEADLESS=1` (no window, Dock icon, notification or scene
+change; its menu bar icon shows for a moment): macOS then holds it
+responsible for itself, as when it is opened from Finder, so only the app
+pin admits it. It cleans up by label and recorded PIDs and ends
 with `READY TO INSTALL` or `NOT READY: <step>`.
 
 Build the launcher as a normal user with

@@ -208,9 +208,17 @@ final class CoreStore {
         connect()
     }
 
-    /// The person's scenes; under test, an empty folder of the test's own.
+    /// Set to `1` for a run that only connects to its daemon
+    /// (deploy/stage-check.sh runs the release's app beside the installed
+    /// one so): no Dock icon, no notifications, and an empty scene folder of
+    /// its own, so it changes nothing of the installed app's.
+    nonisolated static let headlessEnv = "SENATE_APP_HEADLESS"
+    nonisolated static var headless: Bool { ProcessInfo.processInfo.environment[headlessEnv] == "1" }
+
+    /// The person's scenes; under test or headless, an empty folder of the
+    /// run's own.
     static func defaultScenes() -> SceneLibrary {
-        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil || headless {
             let dir = FileManager.default.temporaryDirectory.appendingPathComponent("senate-scenes-\(UUID().uuidString)", isDirectory: true)
             return SceneLibrary(root: dir, development: nil)
         }
@@ -244,7 +252,7 @@ final class CoreStore {
         if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
             return CoreStore(makeCore: { throw CoreError.Setup(message: "testing") }, notifications: false)
         }
-        return CoreStore()
+        return CoreStore(notifications: !headless)
     }
 
     /// The real core. The Senate home: `$SENATE_HOME` when set (development
@@ -274,9 +282,10 @@ final class CoreStore {
         connect()
     }
 
-    /// The app's and the core's unified log, live, in Terminal.
+    /// The app's and the core's unified log, live, in Terminal. By its path:
+    /// in zsh, the default shell, `log` is a builtin.
     func openLogStream() {
-        let line = "log stream --info --predicate 'subsystem == \"\(Log.subsystem)\"'"
+        let line = "/usr/bin/log stream --info --predicate 'subsystem == \"\(Log.subsystem)\"'"
         do {
             try Terminal.run(shell: line)
         } catch {

@@ -117,8 +117,8 @@ notes (the README's "Remote machines" says why).
 
 Installing the new version on a machine that is in use is its own step, and
 is not part of releasing. Before it, the person runs the staged check from
-their own terminal, against the signed binaries `scripts/release.sh` left in
-`apps/macos/build/release/`:
+their own terminal, against the signed binaries and Senate.app
+`scripts/release.sh` left in `apps/macos/build/release/`:
 
 ```sh
 deploy/stage-check.sh apps/macos/build/release ~/.senate/bin/senate

@@ -4,7 +4,7 @@
 #
 #   deploy/stage-check.sh <signed release dir> [0.12.3 senate binary]
 #
-# <signed release dir> holds the signed `senate` and `senated`
+# <signed release dir> holds the signed `senate`, `senated` and Senate.app
 # (apps/macos/scripts/release.sh leaves them in build/release/). The
 # optional second argument is an old `senate` (for example
 # ~/.senate/bin/senate while 0.12.3 is installed): it is only executed, with
@@ -22,8 +22,13 @@
 #   4. that chair spawns a member through the MCP spawn tool
 #   5. a session from before the upgrade (0.12.3 state, no caller proofs)
 #      keeps its hook and MCP tools
+#   6. the release's Senate.app, pinned in the staged home, watches the
+#      staged daemon (its own launchd job and headless: no window, Dock
+#      icon or notification; its menu bar icon shows for a moment)
+#   7. `senate session watch` from this terminal shows a staged hosted
+#      terminal (one frame, in a pseudo-terminal)
 #
-# It cleans up by the exact launchd label and the recorded process IDs, and
+# It cleans up by the exact launchd labels and the recorded process IDs, and
 # ends with one line: READY TO INSTALL, or NOT READY with the failing step.
 
 set -u
@@ -35,8 +40,10 @@ die() { echo "stage-check: $*" >&2; exit 2; }
 rel="$(cd "$1" 2>/dev/null && pwd -P)" || die "no such directory: $1"
 senate="$rel/senate"
 senated="$rel/senated"
+app="$rel/Senate.app"
+app_exe="$app/Contents/MacOS/Senate"
 old="${2:-}"
-[[ -x "$senate" && -x "$senated" ]] || die "$rel must hold senate and senated"
+[[ -x "$senate" && -x "$senated" && -x "$app_exe" ]] || die "$rel must hold senate, senated and Senate.app"
 [[ -z "$old" || -x "$old" ]] || die "not an executable: $old"
 repo="$(cd "$(dirname "$0")/.." && pwd -P)"
 schema="$repo/crates/senate-bridge/tests/fixtures/state-v0.12.3.sql"
@@ -54,9 +61,16 @@ fail() {
 
 team="$(codesign -dv "$senated" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
 # SENATE_STAGE_UNSIGNED=1 runs the staging itself with an unsigned build,
-# to check this script; such a run never says READY.
+# to check this script; such a run never says READY. A debug daemon then
+# serves the staged home as a test fixture (no caller checks), so every
+# step's own mechanics run.
+unsigned=""
+app_pin=(--app "$app")
 if [[ "${SENATE_STAGE_UNSIGNED:-}" == 1 ]]; then
   failed="0 unsigned self-test (no person proofs exist without a signing team)"
+  unsigned=1
+  # An unsigned build records no pins, and refuses to pin an app.
+  app_pin=()
 elif [[ -z "$team" || "$team" == "not set" ]]; then
   echo "FAIL  0 signed release: $senated is not signed with a team"
   echo "NOT READY: 0 signed release"
@@ -70,16 +84,20 @@ home="$(cd "$home" && pwd -P)"
 label="dev.senate.stage-check.$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-')"
 domain="gui/$(id -u)"
 service="dev.senate.senated.person-approval.$(printf %s "$home" | shasum -a 256 | cut -c1-24)"
+app_label="$label.app"
 mkdir -p "$home/bin" "$home/work"
 legacy_pid=""
+app_pid=""
+watch_pid=""
 
 cleanup() {
+  launchctl bootout "$domain/$app_label" >/dev/null 2>&1
   launchctl bootout "$domain/$label" >/dev/null 2>&1
   # The staged hosts and the stand-in sessions, by the IDs they recorded.
   local pid
   for pid in $(cat "$home"/fake.pids 2>/dev/null) \
     $(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$home"/hosts/*/host-process 2>/dev/null) \
-    $legacy_pid; do
+    $legacy_pid $app_pid $watch_pid; do
     kill "$pid" 2>/dev/null
   done
   if [[ -n "$failed" ]]; then
@@ -140,6 +158,8 @@ echo $$ >>"$home/fake.pids"
 export SENATE_HOME="$home" CLAUDE_CODE_SESSION_ID="$sid" CLAUDE_PID=$$
 printf '{"session_id":"%s","cwd":"%s","transcript_path":"/tmp/%s.jsonl","hook_event_name":"SessionStart","source":"startup"}' \
   "$sid" "$PWD" "$sid" | "$senate" hook session-start >"$home/hook-$sid.out" 2>&1
+# On its terminal's screen, for step 7's viewer to find.
+echo "stage-check hosted terminal"
 while [ ! -e "$home/go" ]; do sleep 0.2; done
 if mkdir "$home/chair.lock" 2>/dev/null; then
   "$home/bin/mcp-call" "$senate" inbox '{}' "$home/chair-inbox.out"
@@ -186,9 +206,12 @@ sqlite3 "$home/state.db" "PRAGMA user_version = 1;
     'live', $now_ms, $now_ms, 'claude', 'claude-stage-legacy', 'harness');" \
   || die "cannot seed the 0.12.3 session"
 
-# The code pins install would record, in the staged home only.
-SENATE_HOME="$home" "$senate" setup service pin --senated "$senated" >/dev/null \
+# The code pins install would record, the daemon's and the app's, in the
+# staged home only.
+SENATE_HOME="$home" "$senate" setup service pin --senated "$senated" ${app_pin[@]+"${app_pin[@]}"} >/dev/null \
   || die "cannot record the code pins in $home"
+confine=""
+[[ -z "$unsigned" ]] || confine="<key>SENATE_CONFINE_TO</key><string>$home</string>"
 
 cat > "$home/job.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -202,6 +225,7 @@ cat > "$home/job.plist" <<EOF
     <key>SENATE_HOME</key><string>$home</string>
     <key>HOME</key><string>$home</string>
     <key>PATH</key><string>$home/bin:/usr/bin:/bin</string>
+    $confine
   </dict>
   <key>MachServices</key><dict>
     <key>$service</key><true/>
@@ -232,6 +256,7 @@ cli join stage >/dev/null
 echo "      Authenticate when macOS asks (Touch ID or your password): spawning a staged chair."
 out="$(cli spawn claude --committee stage --alias lead --chair --dir "$home/work")"
 chair=$?
+spawned=$chair
 if [[ $chair -eq 0 ]]; then
   pass "2 sensitive request authenticated (staged chair spawned)"
 else
@@ -271,6 +296,85 @@ if [[ -n "${after:-}" && "${after:-}" != "${before:-}" ]] && tool_ok "$home/lega
   pass "5 pre-upgrade session keeps its hook and MCP tools ($([[ -n "$old" ]] && echo "old client: $("$old" --version 2>&1)" || echo "this release's client"))"
 else
   fail "5 pre-upgrade session keeps its hook and MCP tools" "hook: last seen ${before:-?} -> ${after:-?} | mcp: $(cat "$home/legacy-inbox.out" "$home/legacy-inbox.out.part.log" 2>/dev/null)"
+fi
+
+# 6. The release's app watches the staged daemon, as the person's app
+# watches theirs. It is its own launchd job, as when opened from Finder:
+# macOS then holds it responsible for itself, so only the app pin can admit
+# it (started from this shell it would be served as this terminal). Its
+# core says what came of the watch on stderr, in the staged home.
+# (A Debug build keeps its code in a dylib beside the executable.)
+if ! grep -aqsF SENATE_APP_HEADLESS "$app_exe" "$app_exe.debug.dylib"; then
+  fail "6 the app watches the staged daemon" "$app predates SENATE_APP_HEADLESS (it would show in the Dock and could update the installed app's scenes): check a release built from this checkout"
+else
+  cat > "$home/app.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$app_label</string>
+  <key>ProgramArguments</key><array><string>$app_exe</string></array>
+  <key>EnvironmentVariables</key><dict>
+    <key>SENATE_HOME</key><string>$home</string>
+    <key>SENATE_APP_HEADLESS</key><string>1</string>
+  </dict>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$home/app.log</string>
+  <key>StandardErrorPath</key><string>$home/app.log</string>
+</dict></plist>
+EOF
+  watching="watching the daemon on $home/bridge.sock"
+  if launchctl bootstrap "$domain" "$home/app.plist"; then
+    # Until the core has watched or given up once, or the app is gone
+    # (30 s at most).
+    for _ in $(seq 300); do
+      [[ -n "$app_pid" ]] || app_pid="$(launchctl print "$domain/$app_label" 2>/dev/null | sed -n 's/^[[:space:]]*pid = \([0-9]*\)$/\1/p' | head -1)"
+      grep -aqF -e "$watching" -e "daemon unreachable:" "$home/app.log" 2>/dev/null && break
+      [[ -z "$app_pid" ]] || kill -0 "$app_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+  if grep -aqF "$watching" "$home/app.log" 2>/dev/null; then
+    pass "6 the app watches the staged daemon ($(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null), pid ${app_pid:-?})"
+  else
+    fail "6 the app watches the staged daemon" "$( (grep -aF "daemon unreachable:" "$home/app.log" || tail -5 "$home/app.log") 2>/dev/null | head -3)"
+  fi
+  launchctl bootout "$domain/$app_label" >/dev/null 2>&1
+  [[ -z "$app_pid" ]] || kill "$app_pid" 2>/dev/null
+  # Ended: cleanup must not signal whatever reuses the ID.
+  app_pid=""
+fi
+
+# 7. `senate session watch` from this terminal: a person-only watch, with
+# read-only viewers of the staged hosted terminals. One frame, in a
+# pseudo-terminal of its own, then q.
+if [[ $spawned -ne 0 ]]; then
+  fail "7 session watch from this terminal" "no staged hosted terminal to watch (step 2)"
+else
+  # The viewer's keys come down a pipe (script(1) refuses a FIFO): q once a
+  # tile shows the stand-in's line or why it could not watch, or the viewer
+  # is gone (30 s at most).
+  {
+    for _ in $(seq 300); do
+      grep -aqF -e "stage-check hosted terminal" -e "which process sent this request" "$home/watch.out" 2>/dev/null && break
+      [[ ! -e "$home/watch.done" ]] || break
+      sleep 0.1
+    done
+    printf q
+  } | (cd "$home/work" && SENATE_HOME="$home" exec script -q -F "$home/watch.out" \
+    /bin/sh -c 'stty rows 30 cols 160; exec "$0" session watch' "$senate") >/dev/null 2>&1 &
+  watch_pid=$!
+  for _ in $(seq 350); do kill -0 "$watch_pid" 2>/dev/null || break; sleep 0.1; done
+  touch "$home/watch.done"
+  kill "$watch_pid" 2>/dev/null
+  watch_pid=""
+  if grep -aqF "stage-check hosted terminal" "$home/watch.out" 2>/dev/null; then
+    pass "7 session watch from this terminal"
+  else
+    # The screen without its escape sequences.
+    fail "7 session watch from this terminal" "$(perl -pe 's/\e\[[0-?]*[ -\/]*[@-~]//g; s/\e[()=>].?//g; s/[^[:print:]\n]+/ /g; s/ {2,}/ /g' "$home/watch.out" 2>/dev/null | grep -v '^ *$' | head -5)"
+  fi
 fi
 
 if [[ -n "$failed" ]]; then

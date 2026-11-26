@@ -527,6 +527,20 @@ async fn hosted_sessions_show_their_waiting_prompt_and_stop_and_restore() {
         ]
     );
     assert_eq!(core.watch_terminal().argv, ["senate", "session", "watch"]);
+    // Once the service install has put its `senate` beside the daemon, that
+    // signed copy runs, not whatever `senate` the PATH finds first.
+    let installed = dir.path().join("bin").join("senate");
+    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+    std::fs::write(&installed, b"").unwrap();
+    let installed = installed.display().to_string();
+    assert_eq!(
+        core.watch_terminal().argv,
+        [installed.as_str(), "session", "watch"]
+    );
+    assert_eq!(
+        core.attach_terminal(lead.label.clone()).unwrap().argv,
+        [installed.as_str(), "attach", "refund-v2::lead"]
+    );
 
     // The prompt is a permission prompt: the app may answer it, as the
     // person, through the daemon.

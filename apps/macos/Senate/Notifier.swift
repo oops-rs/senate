@@ -37,7 +37,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// Where actions go; set by the store.
     var handle: ((NotificationAction) async -> Void)?
 
-    private let enabled = ProcessInfo.processInfo.environment[Notifier.env] != "0"
+    private let enabled = ProcessInfo.processInfo.environment[Notifier.env] != "0" && !CoreStore.headless
     private let log = Logger(subsystem: Log.subsystem, category: "notifications")
     private var asked = false
 

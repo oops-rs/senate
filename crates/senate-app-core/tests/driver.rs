@@ -663,3 +663,41 @@ async fn a_burst_of_sessions_lines_is_one_read() {
     .await;
     assert!(!s.groups.is_empty());
 }
+
+/// 0.13.1's app wrote its watch request to the socket by hand, without the
+/// caller proof `ipc::request_line` attaches, and a signed daemon refused
+/// it: the app said "service offline" on the first Mac it was installed on.
+/// The fake daemon refuses such a line as a signed daemon does (every test
+/// here runs against that), and this checks it does and that each of the
+/// app's own connections carries its proof.
+#[tokio::test]
+async fn a_request_without_its_caller_proof_is_refused_as_a_signed_daemon_refuses_it() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (_dir, socket, world) = setup();
+    world.lock().unwrap().sessions = common::hosted_sessions();
+    let _daemon = FakeDaemon::start(&socket, Arc::clone(&world));
+
+    // By hand, as 0.13.1's `Link::watch` wrote it.
+    let mut raw = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let mut line = serde_json::to_vec(&Request::Watch { app: true }).unwrap();
+    line.push(b'\n');
+    raw.write_all(&line).await.unwrap();
+    let mut reply = String::new();
+    BufReader::new(raw).read_line(&mut reply).await.unwrap();
+    // Only macOS has caller proofs; elsewhere the line is what
+    // `request_line` makes too.
+    let refused = usize::from(cfg!(target_os = "macos"));
+    assert_eq!(reply.contains("not_a_person"), refused == 1, "{reply}");
+    assert_eq!(world.lock().unwrap().unproven.len(), refused);
+
+    // The app's own connections: the watch, a session's timeline, a call.
+    let link = Link::new(&socket);
+    let mut watch = link.watch().await.expect("the app's watch is served");
+    assert!(watch.next().await.unwrap().is_some());
+    let session = world.lock().unwrap().sessions.rows[0].session_id.clone();
+    let _ = link.timeline_watch(&session, 0).await;
+    let _: senate_bridge::ipc::SessionsReply = link.call(&Request::Sessions).await.unwrap();
+    let unproven = world.lock().unwrap().unproven.clone();
+    assert_eq!(unproven.len(), refused, "refused: {unproven:?}");
+}
