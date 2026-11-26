@@ -1849,8 +1849,15 @@ async fn forward_keys(
         if let Some(human_at) = classify.observe(keys, at, &mut queries) {
             viewer.input(human_at);
         }
-        // Terminal reports are escape sequences, which the draft passes over.
-        viewer.draft.observe(keys);
+        // A single selection key answering an on-screen choice/modal prompt
+        // when no draft is present is not text left in the composer.
+        let answering_modal = !viewer.draft.pending()
+            && input::is_modal_choice_key(keys)
+            && prompt::looks_like_prompt(&tty.screen.rows());
+        if !answering_modal {
+            // Terminal reports are escape sequences, which the draft passes over.
+            viewer.draft.observe(keys);
+        }
     }
     if let Some(scheme) = classify.take_viewer_scheme() {
         tty.emulation().viewer_scheme(scheme);

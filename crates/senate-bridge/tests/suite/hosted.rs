@@ -5604,6 +5604,102 @@ async fn an_idle_hosted_agy_is_woken_after_a_daemon_restart() {
     h.stop().await;
 }
 
+/// Hosted agy delivery-stall coverage:
+/// 1. Control: normal idle delivery wakes and delivers once.
+/// 2. False positives / stale drafts: X10 mouse reports, Kitty Enter after
+///    typing, and backspacing all typed characters to empty never stall
+///    subsequent idle delivery.
+/// 3. True draft protection & recovery: a real unsent draft blocks wake,
+///    stays intact, emits an actionable notice, and once cleared resumes
+///    delivery automatically and exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_agy_draft_guard_avoids_false_positives_protects_real_drafts_and_recovers() {
+    let (mut h, seat, project) = idle_hosted_agy("drafty").await;
+    let read = |name: &str| std::fs::read_to_string(project.join(name)).unwrap_or_default();
+    let count_in_prompts = |needle: &str| read(".fixture-prompts").matches(needle).count();
+
+    // 1. Control: normal idle delivery works cleanly and once.
+    note_to(&h, &seat, "control idle delivery");
+    eventually("control idle delivery", CHECKED, || {
+        (count_in_prompts("control idle delivery") == 1).then_some(())
+    })
+    .await;
+    assert!(h.delivery_notes("stuck").is_empty());
+
+    // 2a. X10 mouse report while attached must not set a false draft.
+    attach(&h, "drafty", b"\x1b[M !\"\x1d").await;
+    note_to(&h, &seat, "after x10 mouse");
+    eventually("delivery after x10 mouse", CHECKED, || {
+        (count_in_prompts("after x10 mouse") == 1).then_some(())
+    })
+    .await;
+    assert!(h.delivery_notes("stuck").is_empty());
+
+    // 2b. Kitty keyboard Enter (\x1b[13u) after typing clears the draft.
+    attach(&h, "drafty", b"kitty-submit\x1b[13u\x1d").await;
+    note_to(&h, &seat, "after kitty enter");
+    eventually("delivery after kitty enter", CHECKED, || {
+        (count_in_prompts("after kitty enter") == 1).then_some(())
+    })
+    .await;
+    assert!(h.delivery_notes("stuck").is_empty());
+
+    // 2c. Plain text backspaced all the way back to empty clears the draft.
+    attach(&h, "drafty", b"abc\x7f\x7f\x7f\x1d").await;
+    note_to(&h, &seat, "after backspace clear");
+    eventually("delivery after backspace clear", CHECKED, || {
+        (count_in_prompts("after backspace clear") == 1).then_some(())
+    })
+    .await;
+    assert!(h.delivery_notes("stuck").is_empty());
+
+    // 3. A real human draft stays protected, emits an actionable notice, and
+    // resumes exactly-once delivery automatically once cleared.
+    let typed_before_draft = read(".fixture-typed").lines().count();
+    attach(&h, "drafty", b"keep-my-draft\x1d").await;
+    let blocked = note_to(&h, &seat, "behind real draft");
+    let told = eventually("actionable draft notice", CHECKED, || {
+        h.delivery_notes("stuck").into_iter().next()
+    })
+    .await;
+    assert_eq!(told.thread, Some(blocked.seq));
+    assert!(
+        told.body.contains("left text unsent in its input") && told.body.contains("senate attach"),
+        "{}",
+        told.body
+    );
+    assert_eq!(
+        read(".fixture-typed").lines().count(),
+        typed_before_draft,
+        "must never type over or submit a real draft: {}",
+        read(".fixture-typed")
+    );
+    assert_eq!(count_in_prompts("behind real draft"), 0);
+
+    // Clear the draft (Ctrl-U): delivery resumes automatically and exactly once,
+    // without submitting the human's draft text.
+    attach_typing(&h, "drafty", false, b"\x15\x1d").await;
+    eventually("post-clear recovery delivery", CHECKED, || {
+        (count_in_prompts("behind real draft") == 1).then_some(())
+    })
+    .await;
+    eventually("recovery notice posted", CHECKED, || {
+        (h.delivery_notes("through").len() == 1).then_some(())
+    })
+    .await;
+    assert_eq!(
+        count_in_prompts("behind real draft"),
+        1,
+        "pending delivery must be delivered exactly once"
+    );
+    assert!(
+        !read(".fixture-typed").contains("keep-my-draft"),
+        "real draft must never be submitted: {}",
+        read(".fixture-typed")
+    );
+    h.stop().await;
+}
+
 /// A session whose TUI keeps writing is in a turn: nothing is typed into
 /// it, and it is not reported as stuck. Only work without a pause past the
 /// long bound is told, as busy. When the turn ends, the wake comes.
