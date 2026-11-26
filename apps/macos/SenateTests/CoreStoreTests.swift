@@ -377,6 +377,70 @@ import SenateCore
         #expect(store.timeline?.sessionId == "s-codex")
     }
 
+    @Test func theSecretaryPageReadsItsTimelineFollowsItAndParksAcrossNavigation() async throws {
+        let store = store()
+        let sid = "01a216b1-b0ed-7db1-903e-c2bb26c6da70"
+        let senator = "codex-\(sid)"
+        let secretaryLine = SessionLine(
+            sessionId: sid, displayName: "secretary", mention: "[senator::\(senator)]",
+            committee: "office", chair: true, runtime: "codex", model: "gpt-5.4",
+            dir: "/work", branch: nil, title: nil, status: .idle, statusLabel: "idle",
+            working: false, unread: 0, lastActivity: .now, active: true, hosted: nil, readable: true)
+        core.secretary = SecretaryView(
+            committee: "office", alias: "secretary", senator: senator, state: .running, action: nil)
+        core.timelines[sid] = TimelinePage(
+            sessionId: sid, available: true, unavailable: nil,
+            items: [
+                entry(1, "check release status", user: true),
+                TimelineEntry(
+                    seq: 2, at: nil, truncated: false,
+                    body: .senate(message: SenateLine(
+                        committee: "office", seq: 17, thread: 17,
+                        from: "[senator::senate]", kind: "note", kindLabel: "note",
+                        text: "v0.14.1 published"))),
+                entry(3, "Everything is verified."),
+            ],
+            hasOlder: true, firstSeq: 1, lastSeq: 3, working: false)
+
+        // Open Secretary before the first state push and before defaultSecretary() finishes:
+        // once both arrive, syncTimeline() must read and follow the running Codex secretary.
+        store.select(.secretary)
+        #expect(store.timeline == nil)
+        var state = online()
+        state.groups = groups([secretaryLine])
+        core.push(state)
+        try await until(store) { $0.secretary?.state == .running && $0.timeline?.loading == false }
+        #expect(store.selectedSession?.sessionId == sid)
+        #expect(store.timeline?.sessionId == sid)
+        #expect(store.timeline?.committee == "office")
+        #expect(store.timeline?.items.map(\.seq) == [1, 2, 3])
+        #expect(core.calls.contains("timeline \(sid) tail"))
+        #expect(core.calls.contains("watch \(sid) 3"))
+
+        // Live deltas update the secretary conversation in place.
+        core.timelineListener?.onDelta(delta: TimelineDelta(
+            items: [entry(4, "follow-up reply")], working: false, reset: false))
+        try await until(store) { $0.timeline?.items.count == 4 }
+
+        // Navigating to a pushed page parks the secretary timeline; Back restores and follows it.
+        store.place = .committee("office")
+        #expect(store.timeline == nil)
+        #expect(core.calls.contains("unwatch \(sid)"))
+        #expect(store.parked[sid]?.items.map(\.seq) == [1, 2, 3, 4])
+        #expect(store.back())
+        #expect(store.place == .secretary)
+        #expect(store.timeline?.sessionId == sid)
+        #expect(store.timeline?.items.map(\.seq) == [1, 2, 3, 4])
+        #expect(core.calls.contains("watch \(sid) 4"))
+
+        // If the secretary stops, its timeline is released cleanly.
+        core.secretary = SecretaryView(
+            committee: "office", alias: "secretary", senator: senator, state: .stopped, action: nil)
+        await store.refreshSecretary()
+        #expect(store.timeline == nil)
+        #expect(store.selectedSession == nil)
+    }
+
     @Test func theComposerSaysANoteToTheSessionAndClearsItsDraft() async throws {
         let store = store()
         let lead = sessionLine("lead")
