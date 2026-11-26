@@ -1,4 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// The fake is a `#!/bin/sh` script, which Windows cannot run.
+#![cfg(unix)]
 
 //! DockerRunner end to end with a fake `docker` (a shell script) and a
 //! local bare repository as origin: real git, no Docker, no model, no network.

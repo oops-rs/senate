@@ -1,6 +1,5 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -98,12 +97,13 @@ impl Audit {
         {
             return;
         }
-        if let Ok(mut file) = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .open(&self.path)
-        {
+        let mut options = OpenOptions::new();
+        options.append(true).create(true);
+        // Owner-only on Unix. On Windows the file inherits the data
+        // directory's ACL, which is the person's own.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        if let Ok(mut file) = options.open(&self.path) {
             let _ = file.write_all(line.as_bytes());
         }
     }

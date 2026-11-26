@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::net::{IpAddr, SocketAddr};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail, ensure};
@@ -191,7 +190,7 @@ impl Store {
 
     #[doc(hidden)]
     pub fn isolated(root: &Path) -> Self {
-        let uid = current_uid();
+        let uid = os::current_uid();
         Self {
             dir: root.join("authorization"),
             uid,
@@ -238,7 +237,7 @@ impl Store {
     fn read_at(&self, dir: &Path) -> anyhow::Result<Profile> {
         let file = match OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .no_follow()
             .open(self.profile_path(dir))
         {
             Ok(file) => file,
@@ -269,8 +268,8 @@ impl Store {
             .truncate(false)
             .read(true)
             .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .private()
+            .no_follow()
             .open(dir.join(format!("{}.lock", self.uid)))?;
         verify_node(&lock.metadata()?, self.owner, false)?;
         lock.lock()?;
@@ -292,10 +291,9 @@ impl Store {
         );
         let mut file = tempfile::NamedTempFile::new_in(&dir)?;
         if let Some(gid) = self.gid {
-            set_profile_group(file.as_file(), gid)?;
+            os::set_group(file.as_file(), gid)?;
         }
-        file.as_file()
-            .set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o640))?;
+        os::set_mode(file.as_file(), 0o640)?;
         file.write_all(&bytes)?;
         file.as_file().sync_all()?;
         file.persist(self.profile_path(&dir))?;
@@ -331,8 +329,10 @@ fn missing(error: &anyhow::Error) -> bool {
 }
 
 fn create_dir(path: &Path, mode: u32) -> io::Result<()> {
-    match DirBuilder::new().mode(mode).create(path) {
-        Ok(()) => fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)),
+    let mut builder = DirBuilder::new();
+    os::dir_mode(&mut builder, mode);
+    match builder.create(path) {
+        Ok(()) => os::set_path_mode(path, mode),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(error),
     }
@@ -340,12 +340,16 @@ fn create_dir(path: &Path, mode: u32) -> io::Result<()> {
 
 fn verify_node(meta: &fs::Metadata, uid: u32, directory: bool) -> anyhow::Result<()> {
     ensure!(
+        os::SUPPORTED,
+        "remote authority needs a root-owned store and sudo, which this platform does not have"
+    );
+    ensure!(
         (if directory {
             meta.is_dir()
         } else {
             meta.is_file()
-        }) && meta.uid() == uid
-            && meta.mode() & 0o022 == 0,
+        }) && os::owner(meta) == Some(uid)
+            && os::mode(meta) & 0o022 == 0,
         "remote authority requires trusted ownership and no group or other write access"
     );
     Ok(())
@@ -650,7 +654,7 @@ trait Terminal: Write {
 
 impl Terminal for File {
     fn answer(&mut self) -> io::Result<String> {
-        flush_input(self)?;
+        os::flush_input(self)?;
         let mut answer = String::new();
         BufReader::new(self).take(256).read_line(&mut answer)?;
         Ok(answer)
@@ -737,61 +741,8 @@ fn authorize(
     }
 }
 
-#[allow(unsafe_code)]
-fn set_profile_group(file: &File, gid: u32) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-    // SAFETY: the descriptor refers to the new root-owned temporary profile.
-    if unsafe { libc::fchown(file.as_raw_fd(), !0, gid) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[allow(unsafe_code)]
-fn check_sudo() -> anyhow::Result<(u32, u32)> {
-    // SAFETY: geteuid is scalar. getpwuid returns a pointer to libc-owned
-    // storage. This process is single-threaded and copies pw_gid before
-    // making another account lookup.
-    ensure!(
-        unsafe { libc::geteuid() } == 0,
-        "run the installed helper through sudo"
-    );
-    let uid: u32 = std::env::var("SUDO_UID")
-        .context("missing sudo identity")?
-        .parse()?;
-    let account = unsafe { libc::getpwuid(uid).as_ref() };
-    let account = account
-        .filter(|_| uid != 0)
-        .context("sudo must name a real non-root user")?;
-    Ok((uid, account.pw_gid))
-}
-
-#[allow(unsafe_code)]
-fn set_private_umask() {
-    // SAFETY: this runs once in the single-threaded administrator binary.
-    unsafe { libc::umask(0o077) };
-}
-
-#[allow(unsafe_code)]
-fn flush_input(tty: &File) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-    // SAFETY: the live descriptor refers to the controlling terminal.
-    if unsafe { libc::tcflush(tty.as_raw_fd(), libc::TCIFLUSH) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[allow(unsafe_code)]
-fn current_uid() -> u32 {
-    // SAFETY: getuid has no arguments and touches no caller memory.
-    unsafe { libc::getuid() }
-}
-
 pub fn run() -> anyhow::Result<()> {
-    let (uid, gid) = check_sudo()?;
+    let (uid, gid) = os::check_sudo()?;
     verify_helper()?;
     // The sudoers timeout is command-specific. A copy at a different path
     // is not covered by that rule.
@@ -808,7 +759,7 @@ pub fn run() -> anyhow::Result<()> {
         "invoke the protected helper directly through sudo"
     );
     verify_sudoers_drop_in()?;
-    set_private_umask();
+    os::set_private_umask();
     let args = std::env::args_os()
         .skip(1)
         .map(|arg| {
@@ -838,14 +789,11 @@ pub fn verify_sudoers_drop_in() -> anyhow::Result<()> {
     let etc = Path::new("/etc").canonicalize()?;
     let path = etc.join("sudoers.d/99-senate-remote-admin");
     verify_system_chain(&path, false).context("verify the helper's sudoers drop-in")?;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
+    let file = OpenOptions::new().read(true).no_follow().open(path)?;
     let meta = file.metadata()?;
     verify_node(&meta, 0, false)?;
     ensure!(
-        meta.mode() & 0o7777 == 0o440,
+        os::mode(&meta) & 0o7777 == 0o440,
         "helper sudoers drop-in mode must be 0440"
     );
     let mut contents = String::new();
@@ -860,7 +808,7 @@ pub fn verify_sudoers_drop_in() -> anyhow::Result<()> {
 fn verify_helper() -> anyhow::Result<()> {
     verify_system_chain(Path::new(HELPER), false)?;
     ensure!(
-        fs::metadata(HELPER)?.mode() & 0o7777 == 0o755,
+        os::mode(&fs::metadata(HELPER)?) & 0o7777 == 0o755,
         "helper mode must be 0755"
     );
     Ok(())
@@ -881,7 +829,7 @@ pub fn installed_helper_hash() -> anyhow::Result<String> {
 }
 
 pub fn check_store() -> anyhow::Result<()> {
-    let store = Store::system(current_uid());
+    let store = Store::system(os::current_uid());
     store.read_at(&store.directory(false)?)?;
     Ok(())
 }
@@ -916,6 +864,172 @@ pub fn test_authorize(store: Store, args: &[String], answer: &str) -> anyhow::Re
     };
     store.transaction(parse(args.iter().cloned())?, &mut console)?;
     Ok(String::from_utf8(console.output)?)
+}
+
+/// Opening the store's files: never through a link, never blocking on a
+/// FIFO planted in their place; created owner-only.
+trait OpenExt {
+    fn no_follow(&mut self) -> &mut Self;
+    fn private(&mut self) -> &mut Self;
+}
+
+impl OpenExt for OpenOptions {
+    fn no_follow(&mut self) -> &mut Self {
+        os::no_follow(self);
+        self
+    }
+
+    fn private(&mut self) -> &mut Self {
+        os::private(self);
+        self
+    }
+}
+
+/// Remote authority rests on root-owned files, Unix modes and sudo.
+#[cfg(unix)]
+mod os {
+    use std::fs::{self, DirBuilder, File, OpenOptions};
+    use std::io;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::path::Path;
+
+    use anyhow::{Context, ensure};
+
+    pub(super) const SUPPORTED: bool = true;
+
+    pub(super) fn no_follow(options: &mut OpenOptions) {
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+
+    pub(super) fn private(options: &mut OpenOptions) {
+        options.mode(0o600);
+    }
+
+    pub(super) fn dir_mode(builder: &mut DirBuilder, mode: u32) {
+        builder.mode(mode);
+    }
+
+    pub(super) fn set_path_mode(path: &Path, mode: u32) -> io::Result<()> {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    }
+
+    pub(super) fn set_mode(file: &File, mode: u32) -> io::Result<()> {
+        file.set_permissions(fs::Permissions::from_mode(mode))
+    }
+
+    pub(super) fn owner(meta: &fs::Metadata) -> Option<u32> {
+        Some(meta.uid())
+    }
+
+    pub(super) fn mode(meta: &fs::Metadata) -> u32 {
+        meta.mode()
+    }
+
+    #[allow(unsafe_code)]
+    pub(super) fn set_group(file: &File, gid: u32) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the descriptor refers to the new root-owned temporary profile.
+        if unsafe { libc::fchown(file.as_raw_fd(), !0, gid) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[allow(unsafe_code)]
+    pub(super) fn check_sudo() -> anyhow::Result<(u32, u32)> {
+        // SAFETY: geteuid is scalar. getpwuid returns a pointer to libc-owned
+        // storage. This process is single-threaded and copies pw_gid before
+        // making another account lookup.
+        ensure!(
+            unsafe { libc::geteuid() } == 0,
+            "run the installed helper through sudo"
+        );
+        let uid: u32 = std::env::var("SUDO_UID")
+            .context("missing sudo identity")?
+            .parse()?;
+        let account = unsafe { libc::getpwuid(uid).as_ref() };
+        let account = account
+            .filter(|_| uid != 0)
+            .context("sudo must name a real non-root user")?;
+        Ok((uid, account.pw_gid))
+    }
+
+    #[allow(unsafe_code)]
+    pub(super) fn set_private_umask() {
+        // SAFETY: this runs once in the single-threaded administrator binary.
+        unsafe { libc::umask(0o077) };
+    }
+
+    #[allow(unsafe_code)]
+    pub(super) fn flush_input(tty: &File) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the live descriptor refers to the controlling terminal.
+        if unsafe { libc::tcflush(tty.as_raw_fd(), libc::TCIFLUSH) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[allow(unsafe_code)]
+    pub(super) fn current_uid() -> u32 {
+        // SAFETY: getuid has no arguments and touches no caller memory.
+        unsafe { libc::getuid() }
+    }
+}
+
+/// No root-owned store and no sudo: every check fails closed, so no remote
+/// device is ever authorized and the administrator command refuses to run.
+#[cfg(not(unix))]
+mod os {
+    use std::fs::{self, DirBuilder, File, OpenOptions};
+    use std::io;
+    use std::path::Path;
+
+    const UNSUPPORTED: &str = "remote authority is not supported on this platform";
+
+    pub(super) const SUPPORTED: bool = false;
+
+    pub(super) fn no_follow(_: &mut OpenOptions) {}
+
+    pub(super) fn private(_: &mut OpenOptions) {}
+
+    pub(super) fn dir_mode(_: &mut DirBuilder, _: u32) {}
+
+    pub(super) fn set_path_mode(_: &Path, _: u32) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, UNSUPPORTED))
+    }
+
+    pub(super) fn set_mode(_: &File, _: u32) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, UNSUPPORTED))
+    }
+
+    pub(super) fn owner(_: &fs::Metadata) -> Option<u32> {
+        None
+    }
+
+    pub(super) fn mode(_: &fs::Metadata) -> u32 {
+        0o7777
+    }
+
+    pub(super) fn set_group(_: &File, _: u32) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, UNSUPPORTED))
+    }
+
+    pub(super) fn check_sudo() -> anyhow::Result<(u32, u32)> {
+        anyhow::bail!(UNSUPPORTED)
+    }
+
+    pub(super) fn set_private_umask() {}
+
+    pub(super) fn flush_input(_: &File) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, UNSUPPORTED))
+    }
+
+    pub(super) fn current_uid() -> u32 {
+        u32::MAX
+    }
 }
 
 #[cfg(test)]
@@ -970,6 +1084,19 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn remote_authority_fails_closed_without_unix_ownership() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = Store::isolated(root.path());
+        assert!(store.directory(true).is_err());
+        assert!(store.read().is_err());
+        assert!(os::check_sudo().is_err());
+        assert!(run().is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
     #[test]
     fn symlinked_authority_directory_and_profile_are_refused() -> anyhow::Result<()> {
         use std::os::unix::fs::symlink;
@@ -994,6 +1121,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_changed_generation_requires_confirmation_again() -> anyhow::Result<()> {
         struct ChangingConsole {
@@ -1029,6 +1157,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn administrator_transaction_requires_confirmation_and_removes_grants() -> anyhow::Result<()> {
         let root = tempfile::tempdir()?;
@@ -1104,6 +1233,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn three_wrong_confirmations_are_audited_and_require_a_new_offer() -> anyhow::Result<()> {
         let root = tempfile::tempdir()?;
@@ -1149,6 +1279,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn authority_rejects_untrusted_modes_and_expiry() -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt as _;

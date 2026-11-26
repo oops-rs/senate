@@ -10,10 +10,17 @@
 //! before a byte of it is unpacked.
 
 mod archive;
+// Reading a bundle without following any link, at any level, rests on
+// `openat` with `O_NOFOLLOW` and on hard-link counts: Unix only for now.
+// Windows has the manifest and archive rules, not the folder checks.
+#[cfg(unix)]
 mod bundle;
 mod manifest;
 
-pub use archive::{ArchiveEntry, entries, pack, unpack};
+#[cfg(unix)]
+pub use archive::pack;
+pub use archive::{ArchiveEntry, entries, unpack};
+#[cfg(unix)]
 pub use bundle::{Bundle, BundleFile, ReadError, read};
 pub use manifest::Manifest;
 

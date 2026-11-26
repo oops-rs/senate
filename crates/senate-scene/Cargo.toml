@@ -10,10 +10,14 @@ description = "The rules a Senate scene bundle must satisfy: its manifest, its f
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+# Reading and digesting a bundle without following links (`openat`,
+# `O_NOFOLLOW`): Unix only for now, see src/lib.rs.
+[target.'cfg(unix)'.dependencies]
 hex = { workspace = true }
 rustix = { workspace = true }
-thiserror = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

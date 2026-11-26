@@ -488,7 +488,10 @@ fn show_names_the_source_of_each_model_key_and_hides_the_key() {
 
     for l in Locale::ALL {
         let text = shown.render(l);
-        assert!(!text.contains(&secret), "the key's value is shown:\n{text}");
+        // The fixture's own paths may lie under HOME (on Windows the temp
+        // dir is C:\Users\<name>\AppData\…): only the rest must not show it.
+        let outside = text.replace(&home.path().display().to_string(), "");
+        assert!(!outside.contains(&secret), "the key's value is shown:\n{text}");
         assert!(text.contains("[senator::secretary]"), "{text}");
         assert!(text.contains("[refund-v2]"), "{text}");
         assert!(text.contains("refund-v2.secretary.toml"), "{text}");

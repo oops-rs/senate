@@ -795,8 +795,6 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use super::*;
 
     fn request() -> CreateGrant {
@@ -820,7 +818,11 @@ mod tests {
         let registry = Registry::open(directory.path(), address)?;
         let issued = registry.create(request(), BTreeSet::from(["senate".parse()?]))?;
         let path = directory.path().join("observe-grants.json");
-        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&path)?.permissions()) & 0o777,
+            0o600
+        );
         assert!(!fs::read_to_string(&path)?.contains(&issued.token));
         drop(registry);
         let registry = Registry::open(directory.path(), address)?;
