@@ -235,6 +235,326 @@ async fn an_agent_peer_is_refused_even_when_its_person_is_speaker() {
     h.stop().await;
 }
 
+#[tokio::test]
+async fn hosted_session_caller_is_refused_for_speaker_and_prompt_free_requests() {
+    use senate_core::alias::AliasName;
+    use senate_core::{CommitteeSeatAction, Seq};
+    use senate_observe::{AdminRequest, CreateGrant, Preview, Scope};
+
+    let mut h = Harness::new().await;
+    h.start().await;
+    let mut agent = tokio::process::Command::new("/bin/sleep")
+        .arg("60")
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let agent_pid = agent.id();
+    h.store()
+        .upsert_session(&SessionUpsert {
+            session_id: "hosted-guard-peer".into(),
+            cwd: h.dir.path().into(),
+            git_root: None,
+            branch: None,
+            inferred_committee: None,
+            socket: None,
+            token: None,
+            claude_pid: agent_pid,
+            transcript_path: None,
+            ancestor_pids: Vec::new(),
+            runtime: Runtime::Claude,
+            agent: path("claude-hosted"),
+            agent_source: AgentSource::Session,
+        })
+        .unwrap();
+
+    let committee = CommitteeId::new("refund-v2").unwrap();
+    let senator = path("codex-1");
+    let alias = path("reviewer");
+    let bare = AliasName::bare(senator.clone());
+    let person = ipc::SessionSelector::default();
+    let hosted_session = ipc::SessionSelector {
+        session_id: Some("hosted-guard-peer".into()),
+        claude_pid: None,
+    };
+
+    let requests: Vec<Request> = vec![
+        // Speaker-level requests
+        Request::DeskDecide {
+            committee: committee.clone(),
+            seq: Seq(1),
+            item_id: EventId::new(),
+            id: EventId::new(),
+            decision: DeskDecision::Forward,
+        },
+        Request::Forward {
+            session: person.clone(),
+            committee: committee.clone(),
+            seq: Seq(1),
+            id: None,
+        },
+        Request::Refuse {
+            session: person.clone(),
+            committee: committee.clone(),
+            seq: Seq(1),
+            reason: "no".into(),
+            id: None,
+        },
+        Request::Desk {
+            set: Some(vec![senator.clone()]),
+        },
+        Request::Secretaries {
+            session: person.clone(),
+            action: ipc::SecretaryOp::Add,
+            for_: None,
+            secretary: Some(senator.clone()),
+        },
+        Request::SetSecretarySession {
+            target_session: Some("s".into()),
+            senator: None,
+            principal: None,
+            appointed: true,
+        },
+        Request::EnsureSecretary,
+        Request::SetChair {
+            session: person.clone(),
+            committee: Some(committee.clone()),
+            senator: senator.clone(),
+        },
+        Request::Spawn {
+            attempt_id: None,
+            session: person.clone(),
+            runtime: Some(ipc::HostedRuntime::Claude),
+            profile: None,
+            committee: committee.clone(),
+            chair: true,
+            secretary: false,
+            alias: None,
+            cwd: h.dir.path().into(),
+            prompt: None,
+            model: ipc::HostedModel::default(),
+        },
+        Request::Spawn {
+            attempt_id: None,
+            session: hosted_session,
+            runtime: Some(ipc::HostedRuntime::Claude),
+            profile: None,
+            committee: committee.clone(),
+            chair: false,
+            secretary: true,
+            alias: None,
+            cwd: h.dir.path().into(),
+            prompt: None,
+            model: ipc::HostedModel::default(),
+        },
+        Request::DeskOpenCommittee {
+            session: person.clone(),
+            committee: committee.clone(),
+            cwd: h.dir.path().into(),
+            runtime: None,
+            profile: None,
+            alias: None,
+            prompt: None,
+        },
+        Request::SpeakerAlias {
+            session: person.clone(),
+            committee: committee.clone(),
+            senator: senator.clone(),
+            alias: alias.clone(),
+        },
+        Request::SpeakerUnseat {
+            session: person.clone(),
+            committee: committee.clone(),
+            senator: senator.clone(),
+            id: None,
+        },
+        Request::ArchiveCommittee {
+            committee: committee.clone(),
+            archived: true,
+            id: None,
+        },
+        Request::DeskWorker {
+            command: senate_core::worker::Admin::Issue {
+                worker: "bot".parse().unwrap(),
+                committees: [committee.clone()].into_iter().collect(),
+                desk_inbox: None,
+            },
+        },
+        Request::DeskWorker {
+            command: senate_core::worker::Admin::Rotate { id: EventId::new() },
+        },
+        Request::AuthorizeNativeAuthority {
+            session_id: "native-1".into(),
+            approval: EventId::new(),
+        },
+        Request::Approve {
+            id: "approval-1".into(),
+            decision: senate_bridge::approvals::Decision::Allow,
+        },
+        Request::ApproveSession {
+            senator: bare.clone(),
+            decision: senate_bridge::approvals::Decision::Allow,
+        },
+        Request::RemoteControl {
+            command: senate_bridge::remote::Control::PrepareEnable {
+                listen: "127.0.0.1:9000".parse().unwrap(),
+            },
+        },
+        Request::RemoteControl {
+            command: senate_bridge::remote::Control::Pair {
+                scopes: senate_bridge::remote::Scopes {
+                    watch: true,
+                    attach: false,
+                },
+                valid_secs: 60,
+            },
+        },
+        Request::RemoteControl {
+            command: senate_bridge::remote::Control::PrepareEnroll,
+        },
+        Request::ObserveAdmin {
+            command: AdminRequest::Create {
+                grant: CreateGrant {
+                    name: "scene".into(),
+                    committees: Some(vec![committee.clone()]),
+                    all_committees: false,
+                    scope: Scope::Metadata,
+                    lines: None,
+                    origins: Vec::new(),
+                    topology: false,
+                    expires_in_days: None,
+                },
+            },
+        },
+        Request::ObserveAdmin {
+            command: AdminRequest::Publish {
+                committee: committee.clone(),
+                seq: Seq(1),
+                reviewed: Preview {
+                    committee: committee.clone(),
+                    event_id: EventId::new(),
+                    line: "line".into(),
+                },
+            },
+        },
+        // Newly prompt-free requests
+        Request::Attach {
+            senator: bare.clone(),
+        },
+        Request::OpenViewer {
+            host: EventId::new(),
+            writable: false,
+        },
+        Request::OpenViewer {
+            host: EventId::new(),
+            writable: true,
+        },
+        Request::Stop {
+            session: person.clone(),
+            senator: bare.clone(),
+            force: false,
+        },
+        Request::Restore {
+            session: person.clone(),
+            senator: bare.clone(),
+            model: ipc::HostedModel::default(),
+        },
+        Request::Replace {
+            senator: bare.clone(),
+            prompt: None,
+            model: ipc::HostedModel::default(),
+        },
+        Request::Pause {
+            senator: bare.clone(),
+            force: false,
+            timeout_secs: None,
+        },
+        Request::Resume {
+            senator: bare.clone(),
+        },
+        Request::RestartHost {
+            senator: bare.clone(),
+            host: EventId::new(),
+            force: false,
+        },
+        Request::PruneHosts,
+        Request::SessionForget {
+            session_id: "s-1".into(),
+        },
+        Request::RebindHost {
+            host: EventId::new().to_string(),
+            to: bare.clone(),
+        },
+        Request::SetAlias {
+            senator: bare.clone(),
+            alias: alias.clone(),
+            committee: Some(committee.clone()),
+        },
+        Request::RemoveAlias {
+            primary: senator.clone(),
+            alias: alias.clone(),
+            committee: Some(committee.clone()),
+        },
+        Request::SetCommitteeSeat {
+            committee: committee.clone(),
+            request: senate_core::api::SetCommitteeSeat {
+                senator: senator.clone(),
+                action: CommitteeSeatAction::Unseat,
+                id: Default::default(),
+                acted_by: None,
+            },
+        },
+        Request::SetCard {
+            session: person.clone(),
+            target: ipc::CardTarget::Own,
+            document: "{}".into(),
+        },
+        Request::DeskWorker {
+            command: senate_core::worker::Admin::Revoke { id: EventId::new() },
+        },
+        Request::ObserveAdmin {
+            command: AdminRequest::Revoke {
+                id: "grant-1".into(),
+            },
+        },
+        Request::ObserveAdmin {
+            command: AdminRequest::Withdraw {
+                committee: committee.clone(),
+                seq: Seq(1),
+            },
+        },
+        Request::Secretaries {
+            session: person,
+            action: ipc::SecretaryOp::Remove,
+            for_: None,
+            secretary: Some(senator),
+        },
+    ];
+
+    let daemon = h.daemon.as_ref().unwrap();
+    for request in &requests {
+        let error = daemon
+            .check_caller_for_test(agent_pid, request)
+            .await
+            .expect_err(&format!("hosted session must be refused for {request:?}"));
+        assert_eq!(error.code, ipc::codes::NOT_A_PERSON, "{request:?}");
+        assert!(
+            error.message.contains("senator::claude-hosted"),
+            "refusal should name the hosted session for {request:?}: {}",
+            error.message
+        );
+        let lower = error.message.to_ascii_lowercase();
+        assert!(
+            lower.contains("mcp") && lower.contains("ask the person"),
+            "refusal must direct the agent to MCP tools or the person for {request:?}: {}",
+            error.message
+        );
+    }
+
+    let _ = agent.kill().await;
+    let _ = agent.wait().await;
+    h.stop().await;
+}
+
 /// alice's daemon with alice in the Speaker's seat (unless `speaker` says
 /// otherwise), and roots put on her desk, each waiting as `awaiting` says.
 async fn desk(

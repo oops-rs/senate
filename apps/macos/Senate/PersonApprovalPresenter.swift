@@ -24,22 +24,17 @@ enum PersonApprovalPresenter {
                 }
                 let prompts = await Task.detached(priority: .utility) {
                     personApprovalPrompts(home: home).map {
-                        (id: $0.id, display: $0.display, reason: $0.reason, age: $0.ageSeconds)
+                        (id: $0.id, reason: $0.reason)
                     }
                 }.value
                 shown.formIntersection(prompts.map(\.id))
                 if !Task.isCancelled, let prompt = prompts.first(where: { !shown.contains($0.id) }) {
                     shown.insert(prompt.id)
-                    var allowed = false
-                    let queue = "Requested \(prompt.age)s ago. \(max(0, prompts.count - 1)) other requests waiting."
-                    let origin = "The foreground terminal could not be verified. Match the requester below to the command you ran."
-                    if confirm(details: "\(queue)\n\(origin)\n\n\(prompt.display)") && !Task.isCancelled {
-                        let context = LAContext()
-                        context.touchIDAuthenticationAllowableReuseDuration = 0
-                        allowed = (try? await context.evaluatePolicy(
-                            .deviceOwnerAuthentication, localizedReason: prompt.reason
-                        )) == true
-                    }
+                    let context = LAContext()
+                    context.touchIDAuthenticationAllowableReuseDuration = 0
+                    let allowed = (try? await context.evaluatePolicy(
+                        .deviceOwnerAuthentication, localizedReason: prompt.reason
+                    )) == true
                     let approved = allowed && !Task.isCancelled
                     _ = await Task.detached(priority: .utility) {
                         resolvePersonApproval(home: home, id: prompt.id, approved: approved)
@@ -48,27 +43,5 @@ enum PersonApprovalPresenter {
             }
             try? await Task.sleep(for: .seconds(1))
         }
-    }
-
-    private static func confirm(details: String) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = L("approvals.person_confirmation")
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: L("approvals.deny"))
-        let allow = alert.addButton(withTitle: L("approvals.allow"))
-        allow.keyEquivalent = ""
-
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 450, height: 240))
-        let text = NSTextView(frame: scroll.bounds)
-        text.isEditable = false
-        text.isHorizontallyResizable = false
-        text.isVerticallyResizable = true
-        text.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        text.string = details
-        scroll.documentView = text
-        scroll.hasVerticalScroller = true
-        alert.accessoryView = scroll
-        NSApp.activate()
-        return alert.runModal() == .alertSecondButtonReturn
     }
 }

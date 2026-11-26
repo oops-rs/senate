@@ -2,7 +2,7 @@
 
 A Unix peer UID identifies an account. A coding agent running under that
 account can change its name, terminal, and process parent. Senate checks hosted lineage and operator origin, requires local user
-authentication for sensitive CLI requests, and binds session claims to a
+authentication for Speaker-level CLI requests, and binds session claims to a
 verified process. A signed, pinned desktop app can submit its own explicit
 UI actions. Trusted files, protected Keychain
 items, trusted UI control, debugger access, and administrator access are outside
@@ -39,11 +39,13 @@ verified system SSH process, or the pinned Senate app. This removes generic
 launch jobs from the eligible set. An eligible terminal or multiplexer may
 still act on input from another process. Native agents and shared app servers
 are also advisory at this layer. The signed user-presence path is the control
-for the sensitive IPC operations in the table. User-writable transcript files
-retain their filesystem access policy. Routine IPC reads, including timelines,
-history, search, and committee threads, still use the operator proof.
+for Speaker-level operations. User-writable transcript files
+retain their filesystem access policy. Routine IPC reads and routine person
+commands—including timelines, history, search, committee threads, session
+lifecycle, aliases, seats, and local attach—use the terminal-origin proof
+without an authentication prompt.
 
-| Policy target | Hosted lineage | Routine caller checks | Sensitive requests | Hooks |
+| Policy target | Hosted lineage | Routine caller checks | Speaker-level requests | Hooks |
 | --- | --- | --- | --- | --- |
 | macOS GUI login | Inherited across reparenting | Signed origin plus ancestry. Person-owned deputies remain possible. | LocalAuthentication or explicit action by the pinned app | Verified process binding and native role reauthorization |
 | macOS SSH or headless | Inherited across reparenting | Known system SSH remains eligible for reads | Refused without an interactive local path | Verified process binding and native role reauthorization |
@@ -111,41 +113,66 @@ backend survived closure of its publication pipe and removed both sockets
 on host-lease closure. Hosted restore checks that the new backend can load
 the existing thread before publishing it.
 
-## Sensitive requests
+## Speaker-level requests
 
-IPC permission answers, desk decisions, Observe grant creation and revocation,
-line publication and withdrawal, native-seat authorization, rebind, chair,
-secretary, role-alias and seat changes, committee archive and unarchive,
-remote-machine administration and pairing, card writes, and operator-only
-host stop, restore, pause, resume and replacement require a local decision.
-History deletion and opening a writable terminal viewer also require local
-authorization. `senate cleanup` asks once for a whole run: the request
-carries the plan the person was shown, the proof is bound to that request,
-and the daemon does only what a fresh plan still holds. Reading the plan is
-person-only too, without a prompt. Routine CLI speech uses the operator proof without a presence
-prompt. A verified session selector grants the authority of that session.
-An explicit person byline, memory correction or deletion, and thread takeover
-require operator proof even when a session is named. The daemon checks the
-final author before posting. As the person, adding or removing a secretary,
-changing roles or seats, and stopping or restoring a hosted terminal require
-presence, and creating an ordinary hosted seat requires operator proof.
-A role holder's act within its role is not the person's: a chair spawning,
-restoring or stopping its committee's members, and the Speaker's office's
-desk tools (forward, refuse, alias, unseat, naming a chair, opening a
-committee) run on the verified session's proof and the handlers' role and
-scope checks. Appointing a desk secretary still requires presence.
+A command from the person's own terminal (a shell under Terminal, Ghostty or
+iTerm2 outside any Senate-hosted coalition) needs no authentication prompt and
+no in-app confirmation unless it is Speaker-level.
+
+Speaker-level operations keep the local authentication prompt: acting with the
+authority of the Speaker's office or changing who holds authority—deciding,
+forwarding or refusing desk items (`DeskDecide`, `Forward`, `Refuse`,
+`Desk { set }`), adding a secretary or appointing/dismissing a secretary
+session (`Secretaries { Add }`, `SetSecretarySession`, `EnsureSecretary`),
+appointing a chair (`SetChair`, `Spawn` with `--chair` or `--secretary`),
+`DeskOpenCommittee`, `SpeakerAlias`, `SpeakerUnseat`, `ArchiveCommittee`,
+issuing or rotating desk-worker credentials (`DeskWorker` `Issue`/`Rotate`),
+creating Observe grants or publishing reviewed lines (`ObserveAdmin`
+`Create`/`Publish`), preparing or pairing remote-machine access
+(`RemoteControl` `PrepareEnable`/`Pair`/`PrepareEnroll`), reauthorizing a
+privileged native seat (`AuthorizeNativeAuthority`), answering an agent's
+permission prompt without attaching (`Approve`, `ApproveSession`), and
+confirming code-pin or trust-record changes.
+
+Everything else from the person's own terminal uses the terminal-origin proof
+alone, with no authentication prompt: `Attach` and `OpenViewer` (both read-only
+and writable), `Stop`, `Restore`, `Replace`, `Pause`, `Resume`, `RestartHost`,
+`PruneHosts`, `SessionForget`, `RebindHost`, `SetAlias`, `RemoveAlias`,
+`SetCommitteeSeat`, `SetCard`, revoking credentials or Observe exposure
+(`DeskWorker` `Revoke`, `ObserveAdmin` `Revoke`/`Withdraw`,
+`Secretaries` `Remove`), ordinary `Spawn`, and routine person writes (`Say`,
+`Answer`, `Duty`, `Task`, `Ask`, `Post`, `Send`, `ChatSend`, `Take`,
+`MemoryEdit`). A Senate-hosted agent session can never run a Speaker-level
+command or any person-only command from its shell: both the macOS coalition
+proof (`hosted_agent`) and the daemon's process-tree check
+(`refuse_agent_caller`) refuse it and direct the agent to use its Senate MCP
+tools or ask the person.
+
+A verified session selector grants the authority of that session. An explicit
+person byline, memory correction or deletion, and thread takeover require
+operator proof even when a session is named. The daemon checks the final author
+before posting. A role holder's act within its role is not the person's: a
+chair spawning, restoring or stopping its committee's members, and the
+Speaker's office's desk tools (forward, refuse, alias, unseat, naming a chair,
+opening a committee) run on the verified session's proof and the handlers' role
+and scope checks. Appointing a desk secretary still requires presence.
+
+**Accepted residual.** An agent the person starts by hand in their own terminal
+(not Senate-hosted) is indistinguishable from the person for prompt-free
+commands, including a writable attach to another session; the authentication
+prompt remains the only barrier for Speaker-level operations.
+
+`senate cleanup` asks once for a whole run: the request carries the plan the
+person was shown, the proof is bound to that request, and the daemon does
+only what a fresh plan still holds. Reading the plan is person-only too,
+without a prompt.
 
 New terminal hosts admit daemon control commands by process instance and
 check one-use viewer tickets with a five-second lifetime. The ticket binds
 the viewer's process generation and the read or write mode. The daemon
-issues read-only tickets after verifying the operator. A locally authenticated
-writable viewer can reuse the authorization within the same controlling
-TTY and live session-leader instance for at most 12 hours. Missing kernel
-identity or a background requester disables reuse. Programs sharing that same
-TTY share the scope, including automation in an already authorized pane.
-Detaching from tmux can leave the pane, its kernel TTY, and its authorization
-alive. An authorized interactive viewer can still type directly into a
-terminal prompt.
+issues both read-only and local writable tickets after verifying the operator's
+terminal-origin proof. An authorized interactive viewer can still type directly
+into a terminal prompt.
 Writable attach from a paired device requires fresh local authentication
 on the hosting Mac. The host binds it to the requested hosted terminal and
 names the paired device. A watch still uses the device's read-only scope.
@@ -196,17 +223,18 @@ listens on authenticated loopback WebSocket. Its bearer stays in the
 supervisor, and the app-server receives only the bearer digest. Dedicated
 mode requires a Codex build with authenticated WebSocket support.
 
-The CLI waits while the pinned app shows the request and requester derived
-from kernel process data. LocalAuthentication uses a fresh context with the
-system's device-owner policy, which can use Touch ID, Apple Watch, or the
-login password. When the app is unavailable, the daemon launches its own
-pinned executable in a dedicated helper mode and sends the details over a
-private pipe. The helper verifies device-owner presence and reports success
-only to its parent. The queue binds consent to one immutable request and the
-same live IPC connection. Disconnect, timeout, cancellation and authentication
-failure abort the request. App buttons that initiate a sensitive action use
-the app's pinned identity and require no additional authentication prompt.
-Client confirmation flags carry no authority.
+The CLI waits while the pinned app goes straight to macOS LocalAuthentication
+with the requested action and requester derived from kernel process data (with
+no separate in-app confirmation modal before it). LocalAuthentication uses a
+fresh context with the system's device-owner policy, which can use Touch ID,
+Apple Watch, or the login password. When the app is unavailable, the daemon
+launches its own pinned executable in a dedicated helper mode and sends the
+details over a private pipe. The helper verifies device-owner presence and
+reports success only to its parent. The queue binds consent to one immutable
+request and the same live IPC connection. Disconnect, timeout, cancellation
+and authentication failure abort the request. App buttons that initiate a
+Speaker-level action use the app's pinned identity and require no additional
+authentication prompt. Client confirmation flags carry no authority.
 
 The system mediates biometric and password authentication. An ordinary
 Accessibility click carries no biometric evidence and transfers no OS consent

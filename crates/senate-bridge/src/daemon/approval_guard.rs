@@ -11,13 +11,13 @@
 //! can pass routine checks. Linux and WSL advertise an
 //! advisory guard when protected scopes are unavailable.
 //!
-//! Sensitive mutations require a decision from the pinned Mac app or an
+//! Speaker-level operations require a decision from the pinned Mac app or an
 //! OS user-authentication result in a trusted component. A decision applies
-//! once to the exact request. Sensitive operations are refused in unsupported
-//! environments. Writable terminal viewers can reuse device-owner approval
-//! only on the same controlling terminal and live session leader. Session
-//! selectors are checked against the calling runtime instance. See
-//! `docs/person-guard.md` for platform and hook policy.
+//! once to the exact request. Speaker-level CLI operations are refused in
+//! unsupported environments. Routine person commands (including session
+//! lifecycle, aliases, seats, and local writable attach) use the terminal-origin
+//! proof alone. Session selectors are checked against the calling runtime
+//! instance. See `docs/person-guard.md` for platform and hook policy.
 
 use std::collections::BTreeMap;
 
@@ -131,7 +131,21 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
     match request {
         Request::Take { .. } | Request::MemoryEdit { .. } | Request::Say { .. } => PersonWrite,
 
-        Request::OpenCommittee { .. } | Request::Seen { .. } | Request::Watch { .. } => Operator,
+        Request::OpenCommittee { .. }
+        | Request::Seen { .. }
+        | Request::Watch { .. }
+        | Request::Attach { .. }
+        | Request::OpenViewer { .. }
+        | Request::Replace { .. }
+        | Request::Pause { .. }
+        | Request::Resume { .. }
+        | Request::RestartHost { .. }
+        | Request::PruneHosts
+        | Request::SessionForget { .. }
+        | Request::RebindHost { .. }
+        | Request::SetAlias { .. }
+        | Request::RemoveAlias { .. }
+        | Request::SetCommitteeSeat { .. } => Operator,
 
         // A role holder's act within its role: a chair spawning, restoring
         // or stopping its committee's members; the Speaker's office (its
@@ -156,24 +170,17 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
             SessionOrRead
         }
 
-        Request::DeskWorker { .. }
-        | Request::AuthorizeNativeAuthority { .. }
-        | Request::RebindHost { .. }
-        | Request::Restore { .. }
-        | Request::Replace { .. }
-        | Request::Stop { .. }
-        | Request::Pause { .. }
-        | Request::Resume { .. }
-        | Request::SessionForget { .. }
-        | Request::PruneHosts
+        // Person-level session lifecycle (without a session selector):
+        // terminal-origin proof only.
+        Request::Restore { .. } | Request::Stop { .. } => Operator,
+
+        // Speaker-level operations: acting with the authority of the Speaker's
+        // office, changing who holds authority, or answering an agent's
+        // permission prompt without attaching.
+        Request::AuthorizeNativeAuthority { .. }
         | Request::CleanupApply { .. }
-        | Request::RestartHost { .. }
-        | Request::Attach { .. }
         | Request::ArchiveCommittee { .. }
         | Request::EnsureSecretary
-        | Request::SetAlias { .. }
-        | Request::RemoveAlias { .. }
-        | Request::SetCommitteeSeat { .. }
         | Request::DeskDecide { .. }
         | Request::SpeakerAlias { .. }
         | Request::SpeakerUnseat { .. }
@@ -185,13 +192,17 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
         | Request::Approve { .. }
         | Request::ApproveSession { .. } => Presence,
 
-        Request::Secretaries { action, .. } => {
-            if *action == ipc::SecretaryOp::List {
-                SessionOrRead
-            } else {
-                Presence
-            }
-        }
+        Request::DeskWorker { command } => match command {
+            senate_core::worker::Admin::Issue { .. }
+            | senate_core::worker::Admin::Rotate { .. } => Presence,
+            senate_core::worker::Admin::Revoke { .. } => Operator,
+        },
+        Request::Secretaries { action, .. } => match action {
+            ipc::SecretaryOp::List => SessionOrRead,
+            ipc::SecretaryOp::Add => Presence,
+            // Removal only shrinks the list and never appoints a successor.
+            ipc::SecretaryOp::Remove => Operator,
+        },
         Request::Desk { set } => {
             if set.is_some() {
                 Presence
@@ -254,10 +265,7 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
             use senate_observe::AdminRequest;
             if matches!(
                 command,
-                AdminRequest::Create { .. }
-                    | AdminRequest::Revoke { .. }
-                    | AdminRequest::Publish { .. }
-                    | AdminRequest::Withdraw { .. }
+                AdminRequest::Create { .. } | AdminRequest::Publish { .. }
             ) {
                 Presence
             } else {
@@ -266,16 +274,9 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
         }
         Request::SetCard { session, .. } => {
             if session == &SessionSelector::default() {
-                Presence
+                Operator
             } else {
                 SessionOrRead
-            }
-        }
-        Request::OpenViewer { writable, .. } => {
-            if *writable {
-                Presence
-            } else {
-                Operator
             }
         }
         // A session acts on its own scratch terminals (the daemon checks
@@ -350,8 +351,20 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
 }
 
 fn routine_operator_action(request: &Request) -> bool {
-    // Observe exercises the actual caller check in disposable fixtures too.
-    if matches!(request, Request::ObserveAdmin { .. }) {
+    // Observe, cards, history deletion, host repair/restart, aliases, seats and
+    // desk-worker admin exercise the actual caller check in disposable fixtures too.
+    if matches!(
+        request,
+        Request::ObserveAdmin { .. }
+            | Request::DeskWorker { .. }
+            | Request::SetCard { .. }
+            | Request::SessionForget { .. }
+            | Request::RestartHost { .. }
+            | Request::RebindHost { .. }
+            | Request::SetAlias { .. }
+            | Request::RemoveAlias { .. }
+            | Request::SetCommitteeSeat { .. }
+    ) {
         return false;
     }
     if matches!(
@@ -360,67 +373,66 @@ fn routine_operator_action(request: &Request) -> bool {
     ) {
         return true;
     }
-    matches!(
-        request,
-        Request::FindSession { .. } | Request::OpenViewer { .. }
-    ) || matches!(request,
-        Request::Escalate { session, .. }
-        | Request::Checkpoint { session, .. }
-        | Request::Join { session, .. }
-        | Request::JoinAs { session, .. }
-        | Request::Inbox { session, .. }
-        | Request::CatchUp { session, .. }
-        if session == &SessionSelector::default()
-    )
+    matches!(request, Request::FindSession { .. })
+        || matches!(request,
+            Request::Escalate { session, .. }
+            | Request::Checkpoint { session, .. }
+            | Request::Join { session, .. }
+            | Request::JoinAs { session, .. }
+            | Request::Inbox { session, .. }
+            | Request::CatchUp { session, .. }
+            if session == &SessionSelector::default()
+        )
 }
 
 /// What only the person does, and what to tell an agent that asks: `None`
 /// for any other request.
 pub(crate) fn person_only(request: &Request) -> Option<&'static str> {
     Some(match request {
-        request if routine_operator_action(request) => {
-            "Run this operator command from your own terminal or the Senate app"
-        }
         Request::SetCard { session, .. } if session == &SessionSelector::default() => {
-            "Manage your profile card from your own terminal or the Senate app"
+            "Use the `card` MCP tool for your own seat or ask the person to manage profile cards from their own terminal or the Senate app"
         }
         Request::DeskWorker { .. } => {
-            "Manage desk-worker credentials from your own terminal or the Senate app"
+            "Use your Senate MCP tools or ask the person to manage desk-worker credentials from their own terminal or the Senate app"
         }
         Request::ObserveAdmin { .. } => {
-            "Manage Observe grants from your own terminal or the Senate app"
+            "Manage Observe grants from your own terminal or the Senate app (use your Senate MCP tools or ask the person)"
         }
         Request::NativeAuthorityCandidate { .. } | Request::AuthorizeNativeAuthority { .. } => {
-            "Authorize a native seat from your own terminal or the Senate app"
+            "Use your Senate MCP tools or ask the person to authorize a native seat from their own terminal or the Senate app"
         }
-        Request::RestartHost { .. } => "Restart hosted sessions from your own terminal",
-        Request::RebindHost { .. } => "Run `senate session rebind` from your own terminal",
+        Request::RestartHost { .. } => {
+            "Use your Senate MCP tools or ask the person to restart hosted sessions from their own terminal"
+        }
+        Request::RebindHost { .. } => {
+            "Use your Senate MCP tools or ask the person to run `senate session rebind` from their own terminal"
+        }
         Request::Timeline { .. }
         | Request::SessionHistory { .. }
         | Request::Stats { .. }
         | Request::SessionSearch { .. }
         | Request::SessionForget { .. } => {
-            "Read session transcripts from your own terminal or the Senate app"
+            "Use your Senate MCP tools or ask the person to manage session transcripts from their own terminal or the Senate app"
         }
         Request::CommitteeThreads { .. } => {
-            "Read committee threads from your own terminal or the Senate app"
+            "Use your Senate MCP tools or ask the person to read committee threads from their own terminal or the Senate app"
         }
         // As the person (no session). With a session it is the Speaker's
         // office's, checked by the front and the server.
         Request::SetChair { session, .. }
             if session.session_id.is_none() && session.claude_pid.is_none() =>
         {
-            "Naming a chair as the person is the person's to do: run `senate senator chair` from your own terminal"
+            "Naming a chair as the person is the person's to do: use the Senate MCP tools if you work the Speaker's desk, or ask the person to run `senate senator chair` from their own terminal"
         }
         // An agent names its own session with `join`, and the desk acts for
         // the office with its own tools.
         Request::SetAlias { .. }
         | Request::RemoveAlias { .. }
         | Request::SetCommitteeSeat { .. } => {
-            "Aliases and seats set as the person are the person's to change: run the command from your own terminal (a session names itself with `join`; the Speaker's desk has speaker_alias and speaker_unseat)"
+            "Aliases and seats set as the person are the person's to change: use the Senate MCP tools (`join`, `speaker_alias`, `speaker_unseat`) or ask the person to run the command from their own terminal"
         }
         Request::ArchiveCommittee { .. } => {
-            "Archiving a committee is the Speaker's own act: run `senate committees archive` from your own terminal"
+            "Archiving a committee is the Speaker's own act: use your Senate MCP tools or ask the person to run `senate committees archive` from their own terminal"
         }
         // The plan is a read, and the person's: it names every committee's
         // senators and open threads.
@@ -428,12 +440,27 @@ pub(crate) fn person_only(request: &Request) -> Option<&'static str> {
             "Cleaning up the Senate is the person's to do: run `senate cleanup` from your own terminal"
         }
         Request::EnsureSecretary => {
-            "Only the person starts the default secretary: ask it from your own terminal or the Senate app"
+            "Only the person starts the default secretary: use your Senate MCP tools or ask the person to run it from their own terminal or the Senate app"
         }
         request if answers_a_prompt(request) => {
-            "A permission prompt is a person's decision: answer it from your own terminal or the Senate app"
+            "A permission prompt is a person's decision: use your Senate MCP tools to escalate or ask the person to answer it from their own terminal or the Senate app"
+        }
+        request if routine_operator_action(request) => {
+            "Use your Senate MCP tools or ask the person to run this operator command from their own terminal or the Senate app"
         }
         _ => return None,
+    })
+}
+
+/// Guidance shown when refusing a hosted-session caller for a person-only or
+/// Speaker-level request.
+pub(crate) fn agent_refusal_guidance(request: &Request) -> &'static str {
+    person_only(request).unwrap_or_else(|| {
+        if request_effect(request) == RequestEffect::Presence {
+            "Use your Senate MCP tools or ask the person to run this Speaker-level command from their own terminal or the Senate app"
+        } else {
+            "Use your Senate MCP tools or ask the person to run this command from their own terminal or the Senate app"
+        }
     })
 }
 
@@ -685,10 +712,8 @@ impl Front {
         let requester_pid = if session_action {
             peer.session
         } else {
-            if let Err(error) = self
-                .refuse_agent_caller(peer.operator, APP_CONFIRMATION)
-                .await
-            {
+            let guidance = agent_refusal_guidance(&request);
+            if let Err(error) = self.refuse_agent_caller(peer.operator, guidance).await {
                 return Reply::err(error);
             }
             peer.operator
@@ -699,9 +724,6 @@ impl Front {
         let require_touch = answers_a_prompt(&request)
             && crate::app_confirmation::macos::approvals_require_touch(home);
         if peer.signed_app && !session_action && pin_change.is_none() && !require_touch {
-            if let Request::OpenViewer { host, writable } = &request {
-                return self.broker_viewer(host, *writable, peer.operator).await;
-            }
             return self
                 .dispatch_app_confirmation(
                     self.app_confirmations.accept_signed_app(request),
@@ -719,22 +741,6 @@ impl Front {
                 "refused a confirmation: the requester is behind SSH or unreadable"
             );
             return Reply::err(refusal(APP_CONFIRMATION));
-        }
-        let view = match &request {
-            Request::OpenViewer {
-                host,
-                writable: true,
-            } => Some(host.clone()),
-            _ => None,
-        };
-        let terminal = view
-            .as_ref()
-            .and_then(|_| requester_pid.and_then(kernel_process::terminal_identity));
-        if let (Some(host), Some(terminal)) = (&view, &terminal)
-            && pin_change.is_none()
-            && self.app_confirmations.terminal_ok(terminal)
-        {
-            return self.broker_viewer(host, true, requester_pid).await;
         }
         let requester = requester_pid.map_or_else(
             || "unidentified process".to_owned(),
@@ -773,15 +779,6 @@ impl Front {
             },
         );
         let mut reason = crate::app_confirmation::request_reason(&request, &requester);
-        if let Some(host) = &view
-            && let Ok(Some(session_id)) = self.primary().store.session_for_host(host)
-        {
-            let alias = self.primary().shown_session_name(&session_id);
-            reason = format!(
-                "Open a writable terminal for {:?} — requested by {requester}",
-                alias
-            );
-        }
         let relay_prompt = if let Request::Approve { id, decision } = &request {
             let Some(approval) = self
                 .primary()
@@ -921,17 +918,6 @@ impl Front {
             && let Err(error) = crate::app_confirmation::macos::accept_change(home, change)
         {
             return Reply::err(IpcError::bad_request(error.to_string()));
-        }
-        if let Some(host) = view {
-            if let Some(terminal) = terminal
-                && requester_pid
-                    .and_then(kernel_process::terminal_identity)
-                    .as_ref()
-                    == Some(&terminal)
-            {
-                self.app_confirmations.trust_terminal(terminal);
-            }
-            return self.broker_viewer(&host, true, requester_pid).await;
         }
         if let Some(expected) = relay_prompt {
             let Request::Approve { id, decision } = approved.into_request() else {
@@ -1231,16 +1217,376 @@ mod tests {
             }),
             Some("runtime")
         );
-        assert!(crate::app_confirmation::required(&Request::SessionForget {
-            session_id: "runtime".into()
-        }));
+        assert!(!crate::app_confirmation::required(
+            &Request::SessionForget {
+                session_id: "runtime".into()
+            }
+        ));
+        assert_eq!(
+            request_effect(&Request::SessionForget {
+                session_id: "runtime".into()
+            }),
+            RequestEffect::Operator
+        );
         for writable in [false, true] {
             let request = Request::OpenViewer {
                 host: EventId::new(),
                 writable,
             };
             assert!(person_only(&request).is_some());
-            assert_eq!(crate::app_confirmation::required(&request), writable);
+            assert_eq!(request_effect(&request), RequestEffect::Operator);
+            assert!(!crate::app_confirmation::required(&request));
+        }
+    }
+
+    #[test]
+    fn speaker_level_and_prompt_free_requests_match_policy_and_refuse_hosted_callers() {
+        use senate_core::CommitteeSeatAction;
+        use senate_core::alias::AliasName;
+        use senate_observe::{AdminRequest, CreateGrant, Preview, Scope};
+
+        let committee = senate_core::CommitteeId::new("senate").unwrap();
+        let senator: SenatorName = "codex-1".parse().unwrap();
+        let alias: SenatorName = "reviewer".parse().unwrap();
+        let bare = AliasName::bare(senator.clone());
+        let person = SessionSelector::default();
+        let hosted_session = SessionSelector {
+            session_id: Some("hosted-1".into()),
+            claude_pid: None,
+        };
+
+        let speaker_level: Vec<Request> = vec![
+            Request::DeskDecide {
+                committee: committee.clone(),
+                seq: senate_core::Seq(1),
+                item_id: EventId::new(),
+                id: EventId::new(),
+                decision: ipc::DeskDecision::Forward,
+            },
+            Request::Forward {
+                session: person.clone(),
+                committee: committee.clone(),
+                seq: senate_core::Seq(1),
+                id: None,
+            },
+            Request::Refuse {
+                session: person.clone(),
+                committee: committee.clone(),
+                seq: senate_core::Seq(1),
+                reason: "no".into(),
+                id: None,
+            },
+            Request::Desk {
+                set: Some(vec![senator.clone()]),
+            },
+            Request::Secretaries {
+                session: person.clone(),
+                action: ipc::SecretaryOp::Add,
+                for_: None,
+                secretary: Some(senator.clone()),
+            },
+            Request::SetSecretarySession {
+                target_session: Some("s".into()),
+                senator: None,
+                principal: None,
+                appointed: true,
+            },
+            Request::EnsureSecretary,
+            Request::SetChair {
+                session: person.clone(),
+                committee: Some(committee.clone()),
+                senator: senator.clone(),
+            },
+            Request::Spawn {
+                attempt_id: None,
+                session: person.clone(),
+                runtime: Some(ipc::HostedRuntime::Claude),
+                profile: None,
+                committee: committee.clone(),
+                chair: true,
+                secretary: false,
+                alias: None,
+                cwd: PathBuf::from("/tmp"),
+                prompt: None,
+                model: ipc::HostedModel::default(),
+            },
+            Request::Spawn {
+                attempt_id: None,
+                session: hosted_session.clone(),
+                runtime: Some(ipc::HostedRuntime::Claude),
+                profile: None,
+                committee: committee.clone(),
+                chair: false,
+                secretary: true,
+                alias: None,
+                cwd: PathBuf::from("/tmp"),
+                prompt: None,
+                model: ipc::HostedModel::default(),
+            },
+            Request::DeskOpenCommittee {
+                session: person.clone(),
+                committee: committee.clone(),
+                cwd: PathBuf::from("/tmp"),
+                runtime: None,
+                profile: None,
+                alias: None,
+                prompt: None,
+            },
+            Request::SpeakerAlias {
+                session: person.clone(),
+                committee: committee.clone(),
+                senator: senator.clone(),
+                alias: alias.clone(),
+            },
+            Request::SpeakerUnseat {
+                session: person.clone(),
+                committee: committee.clone(),
+                senator: senator.clone(),
+                id: None,
+            },
+            Request::ArchiveCommittee {
+                committee: committee.clone(),
+                archived: true,
+                id: None,
+            },
+            Request::DeskWorker {
+                command: senate_core::worker::Admin::Issue {
+                    worker: "bot".parse().unwrap(),
+                    committees: [committee.clone()].into_iter().collect(),
+                    desk_inbox: None,
+                },
+            },
+            Request::DeskWorker {
+                command: senate_core::worker::Admin::Rotate { id: EventId::new() },
+            },
+            Request::AuthorizeNativeAuthority {
+                session_id: "native-1".into(),
+                approval: EventId::new(),
+            },
+            Request::Approve {
+                id: "approval-1".into(),
+                decision: crate::approvals::Decision::Allow,
+            },
+            Request::ApproveSession {
+                senator: bare.clone(),
+                decision: crate::approvals::Decision::Allow,
+            },
+            Request::RemoteControl {
+                command: crate::remote::Control::PrepareEnable {
+                    listen: "127.0.0.1:9000".parse().unwrap(),
+                },
+            },
+            Request::RemoteControl {
+                command: crate::remote::Control::Pair {
+                    scopes: crate::remote::Scopes {
+                        watch: true,
+                        attach: false,
+                    },
+                    valid_secs: 60,
+                },
+            },
+            Request::RemoteControl {
+                command: crate::remote::Control::PrepareEnroll,
+            },
+            Request::ObserveAdmin {
+                command: AdminRequest::Create {
+                    grant: CreateGrant {
+                        name: "scene".into(),
+                        committees: Some(vec![committee.clone()]),
+                        all_committees: false,
+                        scope: Scope::Metadata,
+                        lines: None,
+                        origins: Vec::new(),
+                        topology: false,
+                        expires_in_days: None,
+                    },
+                },
+            },
+            Request::ObserveAdmin {
+                command: AdminRequest::Publish {
+                    committee: committee.clone(),
+                    seq: senate_core::Seq(1),
+                    reviewed: Preview {
+                        committee: committee.clone(),
+                        event_id: EventId::new(),
+                        line: "line".into(),
+                    },
+                },
+            },
+        ];
+
+        let newly_prompt_free: Vec<Request> = vec![
+            Request::Attach {
+                senator: bare.clone(),
+            },
+            Request::OpenViewer {
+                host: EventId::new(),
+                writable: false,
+            },
+            Request::OpenViewer {
+                host: EventId::new(),
+                writable: true,
+            },
+            Request::Stop {
+                session: person.clone(),
+                senator: bare.clone(),
+                force: false,
+            },
+            Request::Restore {
+                session: person.clone(),
+                senator: bare.clone(),
+                model: ipc::HostedModel::default(),
+            },
+            Request::Replace {
+                senator: bare.clone(),
+                prompt: None,
+                model: ipc::HostedModel::default(),
+            },
+            Request::Pause {
+                senator: bare.clone(),
+                force: false,
+                timeout_secs: None,
+            },
+            Request::Resume {
+                senator: bare.clone(),
+            },
+            Request::RestartHost {
+                senator: bare.clone(),
+                host: EventId::new(),
+                force: false,
+            },
+            Request::PruneHosts,
+            Request::SessionForget {
+                session_id: "s-1".into(),
+            },
+            Request::RebindHost {
+                host: EventId::new().to_string(),
+                to: bare.clone(),
+            },
+            Request::SetAlias {
+                senator: bare.clone(),
+                alias: alias.clone(),
+                committee: Some(committee.clone()),
+            },
+            Request::RemoveAlias {
+                primary: senator.clone(),
+                alias: alias.clone(),
+                committee: Some(committee.clone()),
+            },
+            Request::SetCommitteeSeat {
+                committee: committee.clone(),
+                request: senate_core::api::SetCommitteeSeat {
+                    senator: senator.clone(),
+                    action: CommitteeSeatAction::Unseat,
+                    id: Default::default(),
+                    acted_by: None,
+                },
+            },
+            Request::SetCard {
+                session: person.clone(),
+                target: ipc::CardTarget::Own,
+                document: "{}".into(),
+            },
+            Request::DeskWorker {
+                command: senate_core::worker::Admin::Revoke { id: EventId::new() },
+            },
+            Request::ObserveAdmin {
+                command: AdminRequest::Revoke {
+                    id: "grant-1".into(),
+                },
+            },
+            Request::ObserveAdmin {
+                command: AdminRequest::Withdraw {
+                    committee: committee.clone(),
+                    seq: senate_core::Seq(1),
+                },
+            },
+            Request::Secretaries {
+                session: person.clone(),
+                action: ipc::SecretaryOp::Remove,
+                for_: None,
+                secretary: Some(senator.clone()),
+            },
+        ];
+
+        let check_refusal_text = |guidance: &str, request: &Request| {
+            let lower = guidance.to_ascii_lowercase();
+            assert!(
+                lower.contains("mcp") || lower.contains("ask the person"),
+                "refusal guidance for {request:?} must direct the agent to MCP tools or the person: {guidance:?}"
+            );
+            assert!(
+                lower.contains("ask the person"),
+                "refusal guidance for {request:?} must tell the agent to ask the person: {guidance:?}"
+            );
+        };
+
+        for request in &speaker_level {
+            assert_eq!(
+                request_effect(request),
+                RequestEffect::Presence,
+                "expected Presence for {request:?}"
+            );
+            assert!(
+                crate::app_confirmation::required(request),
+                "expected app_confirmation::required for {request:?}"
+            );
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                ipc::proof_kind(request),
+                Some((crate::mac_scope::ProofKind::Operator, true)),
+                "expected required Operator proof for {request:?}"
+            );
+            let guidance = agent_refusal_guidance(request);
+            check_refusal_text(guidance, request);
+        }
+
+        for request in &newly_prompt_free {
+            assert_eq!(
+                request_effect(request),
+                RequestEffect::Operator,
+                "expected Operator for {request:?}"
+            );
+            assert!(
+                !crate::app_confirmation::required(request),
+                "expected prompt-free (not app_confirmation::required) for {request:?}"
+            );
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                ipc::proof_kind(request),
+                Some((crate::mac_scope::ProofKind::Operator, true)),
+                "expected required Operator proof for {request:?}"
+            );
+            let guidance = person_only(request)
+                .unwrap_or_else(|| panic!("expected person_only guidance for {request:?}"));
+            check_refusal_text(guidance, request);
+        }
+
+        // Session-owned card writes stay SessionOrRead and prompt-free.
+        let session_card = Request::SetCard {
+            session: hosted_session,
+            target: ipc::CardTarget::Own,
+            document: "{}".into(),
+        };
+        assert_eq!(request_effect(&session_card), RequestEffect::SessionOrRead);
+        assert!(!crate::app_confirmation::required(&session_card));
+        assert_eq!(person_only(&session_card), None);
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            ipc::proof_kind(&session_card),
+            Some((crate::mac_scope::ProofKind::Session, false))
+        );
+
+        #[cfg(target_os = "macos")]
+        {
+            let hosted_sentence =
+                crate::mac_scope::ProofFailure::Refused(crate::mac_scope::Refusal::HostedAgent)
+                    .sentence("dev.senate.senated.person-approval.test.scope");
+            let lower = hosted_sentence.to_ascii_lowercase();
+            assert!(
+                lower.contains("mcp") && lower.contains("ask the person"),
+                "hosted_agent refusal must mention MCP tools and asking the person: {hosted_sentence:?}"
+            );
         }
     }
 

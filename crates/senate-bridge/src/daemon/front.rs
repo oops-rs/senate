@@ -734,9 +734,6 @@ impl Front {
         session_peer: Option<u32>,
     ) -> Reply {
         match request.into_request() {
-            Request::RebindHost { host, to } => {
-                wrap(self.primary().repair_agy_binding(&host, &to).await)
-            }
             Request::ObserveAdmin {
                 command: senate_observe::AdminRequest::Create { grant },
             } if grant.scope == senate_observe::Scope::Lines => {
@@ -760,24 +757,6 @@ impl Front {
                     }
                     Err(error) => Reply::err(IpcError::internal(error)),
                 }
-            }
-            Request::SetCard {
-                session,
-                target,
-                document,
-            } if session != SessionSelector::default() => {
-                let _binding = self.primary().session_bindings.read().await;
-                let session = match self.primary().resolve_with_activity(&session, false) {
-                    Ok(session) => session,
-                    Err(error) => return Reply::err(error),
-                };
-                if let Err(error) = self.verify_session_instance(session_peer, &session) {
-                    return Reply::err(error);
-                }
-                wrap(
-                    self.set_observer_card(Some(session), target, &document)
-                        .await,
-                )
             }
             request => {
                 if !approval_guard::request_effect(&request).requires_operator()

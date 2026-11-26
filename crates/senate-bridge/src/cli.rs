@@ -897,7 +897,7 @@ enum ServiceCmd {
         /// on PATH).
         #[arg(long, value_name = "PATH")]
         senated: Option<PathBuf>,
-        /// The installed macOS app whose code may answer presence requests.
+        /// The installed macOS app whose code may answer Speaker-level authentication requests.
         #[arg(long, value_name = "PATH")]
         app: Option<PathBuf>,
     },
@@ -1915,12 +1915,24 @@ fn watch_leaves_out_paused_and_stopped_sessions_unless_all() {
     assert!(all[1].dim && all[1].title.ends_with("paused"));
 }
 
+fn will_prompt_authentication(request: &Request) -> bool {
+    cfg!(target_os = "macos") && crate::app_confirmation::required(request)
+}
+
+pub(super) fn announce_authentication(request: &Request) -> bool {
+    if will_prompt_authentication(request) {
+        eprintln!("Authenticate this command on the hosting Mac.");
+        true
+    } else {
+        false
+    }
+}
+
 async fn daemon_call<T: serde::de::DeserializeOwned>(
     paths: &Paths,
     request: &Request,
 ) -> anyhow::Result<T> {
-    let timeout = if cfg!(target_os = "macos") && crate::app_confirmation::required(request) {
-        eprintln!("Authenticate this command on the hosting Mac.");
+    let timeout = if announce_authentication(request) {
         crate::app_confirmation::LIFETIME + Duration::from_secs(5)
     } else {
         Duration::from_secs(20)
@@ -2392,7 +2404,7 @@ async fn restart_hosts(
             &paths.socket(),
             &request,
             Duration::from_secs(1),
-            REPLACE_TIMEOUT + crate::app_confirmation::LIFETIME,
+            REPLACE_TIMEOUT,
         )
         .await
         {
@@ -3113,11 +3125,12 @@ fn choose_alias(
 fn launch(request: &Request, output: Output, attach: bool) -> anyhow::Result<()> {
     let reply: SpawnReply = if matches!(request, Request::Spawn { .. }) {
         let paths = Paths::from_env()?;
-        runtime(false)?.block_on(ipc::request_spawn(
-            &paths.socket(),
-            request,
-            crate::host::REQUEST_TIMEOUT,
-        ))?
+        let timeout = if announce_authentication(request) {
+            crate::host::REQUEST_TIMEOUT + crate::app_confirmation::LIFETIME
+        } else {
+            crate::host::REQUEST_TIMEOUT
+        };
+        runtime(false)?.block_on(ipc::request_spawn(&paths.socket(), request, timeout))?
     } else {
         host_call(request)?
     };
@@ -4923,11 +4936,17 @@ fn run_session(command: SessionCmd, output: Output) -> anyhow::Result<()> {
             } else {
                 Decision::Allow
             };
+            let request = Request::ApproveSession { senator, decision };
+            let timeout = if announce_authentication(&request) {
+                crate::host::REQUEST_TIMEOUT + crate::app_confirmation::LIFETIME
+            } else {
+                crate::host::REQUEST_TIMEOUT
+            };
             let reply: crate::ipc::ApproveSessionReply = runtime(false)?.block_on(ipc::request(
                 &paths.socket(),
-                &Request::ApproveSession { senator, decision },
+                &request,
                 Duration::from_secs(1),
-                crate::host::REQUEST_TIMEOUT,
+                timeout,
             ))?;
             let who = senate_core::Address::senator(&reply.senator).in_text();
             let verb = match (decision, locale) {
@@ -5772,4 +5791,145 @@ fn find_says_which_terminal_rings_or_that_none_holds_it() {
         render_found(&found(false, None), Locale::En),
         "senate::main is not attached in any terminal; `senate attach senate::main` opens it here."
     );
+}
+
+#[cfg(test)]
+#[test]
+fn cli_only_announces_authentication_for_speaker_level_commands() {
+    let committee = CommitteeId::new("senate").unwrap();
+    let senator: SenatorName = "codex-1".parse().unwrap();
+    let bare = AliasName::bare(senator.clone());
+    let prompt_free = [
+        Request::Attach {
+            senator: bare.clone(),
+        },
+        Request::OpenViewer {
+            host: EventId::new(),
+            writable: true,
+        },
+        Request::Stop {
+            session: SessionSelector::default(),
+            senator: bare.clone(),
+            force: false,
+        },
+        Request::Restore {
+            session: SessionSelector::default(),
+            senator: bare.clone(),
+            model: ipc::HostedModel::default(),
+        },
+        Request::Replace {
+            senator: bare.clone(),
+            prompt: None,
+            model: ipc::HostedModel::default(),
+        },
+        Request::Pause {
+            senator: bare.clone(),
+            force: false,
+            timeout_secs: None,
+        },
+        Request::Resume {
+            senator: bare.clone(),
+        },
+        Request::RestartHost {
+            senator: bare.clone(),
+            host: EventId::new(),
+            force: false,
+        },
+        Request::PruneHosts,
+        Request::SessionForget {
+            session_id: "s-1".into(),
+        },
+        Request::RebindHost {
+            host: EventId::new().to_string(),
+            to: bare.clone(),
+        },
+        Request::SetAlias {
+            senator: bare.clone(),
+            alias: "main".parse().unwrap(),
+            committee: Some(committee.clone()),
+        },
+        Request::RemoveAlias {
+            primary: senator.clone(),
+            alias: "main".parse().unwrap(),
+            committee: Some(committee.clone()),
+        },
+        Request::SetCommitteeSeat {
+            committee: committee.clone(),
+            request: senate_core::api::SetCommitteeSeat {
+                senator: senator.clone(),
+                action: senate_core::CommitteeSeatAction::Unseat,
+                id: Default::default(),
+                acted_by: None,
+            },
+        },
+        Request::SetCard {
+            session: SessionSelector::default(),
+            target: ipc::CardTarget::Own,
+            document: "{}".into(),
+        },
+        Request::DeskWorker {
+            command: senate_core::worker::Admin::Revoke { id: EventId::new() },
+        },
+        Request::ObserveAdmin {
+            command: senate_observe::AdminRequest::Revoke {
+                id: "grant-1".into(),
+            },
+        },
+        Request::ObserveAdmin {
+            command: senate_observe::AdminRequest::Withdraw {
+                committee: committee.clone(),
+                seq: Seq(1),
+            },
+        },
+        Request::Secretaries {
+            session: SessionSelector::default(),
+            action: ipc::SecretaryOp::Remove,
+            for_: None,
+            secretary: Some(senator.clone()),
+        },
+    ];
+    for request in &prompt_free {
+        assert!(
+            !will_prompt_authentication(request),
+            "CLI must not print authentication notice for {request:?}"
+        );
+    }
+
+    let speaker_level = [
+        Request::EnsureSecretary,
+        Request::SetChair {
+            session: SessionSelector::default(),
+            committee: Some(committee.clone()),
+            senator: senator.clone(),
+        },
+        Request::Spawn {
+            attempt_id: None,
+            session: SessionSelector::default(),
+            runtime: Some(ipc::HostedRuntime::Claude),
+            profile: None,
+            committee: committee.clone(),
+            chair: true,
+            secretary: false,
+            alias: None,
+            cwd: PathBuf::from("/tmp"),
+            prompt: None,
+            model: ipc::HostedModel::default(),
+        },
+        Request::ArchiveCommittee {
+            committee,
+            archived: true,
+            id: None,
+        },
+        Request::ApproveSession {
+            senator: bare,
+            decision: crate::approvals::Decision::Allow,
+        },
+    ];
+    for request in &speaker_level {
+        assert_eq!(
+            will_prompt_authentication(request),
+            cfg!(target_os = "macos"),
+            "CLI authentication notice mismatch for {request:?}"
+        );
+    }
 }

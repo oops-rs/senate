@@ -498,7 +498,7 @@ impl ProofFailure {
             }
             Self::Call(failure) => format!("the daemon's proof service failed ({failure:?})"),
             Self::Refused(Refusal::HostedAgent) => {
-                "this command runs inside a Senate-hosted agent session, and an agent cannot act as the person: ask the person to run it from their own terminal or the Senate app"
+                "this command runs inside a Senate-hosted agent session, and an agent cannot act as the person: use your Senate MCP tools or ask the person to run it from their own terminal or the Senate app"
                     .to_owned()
             }
             Self::Refused(Refusal::NoTrustedOrigin { detail }) => {
@@ -585,6 +585,12 @@ mod tests {
         assert_eq!(
             hosted.issue(audit, request, ProofKind::Operator),
             Err(Refusal::HostedAgent)
+        );
+        let hosted_msg =
+            ProofFailure::Refused(Refusal::HostedAgent).sentence("dev.senate.test.scope");
+        assert!(
+            hosted_msg.contains("MCP tools") && hosted_msg.contains("ask the person"),
+            "{hosted_msg}"
         );
 
         audit[7] ^= 1;
