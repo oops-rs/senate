@@ -474,8 +474,12 @@ final class CoreStore {
 
     /// The open session, while this machine has it.
     var selectedSession: SessionLine? {
-        guard case let .session(id) = place else { return nil }
-        return session(id)
+        switch place {
+        case let .session(id): session(id)
+        case .secretary:
+            secretary?.state == .running && !secretaryStarting ? secretarySession : nil
+        default: nil
+        }
     }
 
     func session(_ id: String) -> SessionLine? {
@@ -534,6 +538,7 @@ final class CoreStore {
             secretarySeat = seat
             Task { await refreshSecretary() }
         }
+        if case .secretary = place { syncTimeline() }
     }
 
     // MARK: The default secretary
@@ -568,7 +573,10 @@ final class CoreStore {
 
     func refreshSecretary() async {
         guard let core, state.online else { return }
-        if let read = try? await core.defaultSecretary() { secretary = read }
+        if let read = try? await core.defaultSecretary() {
+            secretary = read
+            syncTimeline()
+        }
     }
 
     /// Ask the secretary what the person wrote: start it first when it does
@@ -584,7 +592,10 @@ final class CoreStore {
         secretaryError = nil
         if secretary?.state != .running || secretarySession == nil {
             secretaryStarting = true
-            defer { secretaryStarting = false }
+            defer {
+                secretaryStarting = false
+                syncTimeline()
+            }
             do {
                 secretary = try await core.ensureSecretary()
             } catch {

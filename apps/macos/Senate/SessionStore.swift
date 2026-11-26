@@ -93,13 +93,20 @@ extension CoreStore {
     /// How many items a page reads.
     static let timelinePage: UInt32 = 60
 
+    /// The session id whose conversation `place` shows, when any.
+    private func timelineSessionId(for place: Place) -> String? {
+        switch place {
+        case let .session(id), let .past(id): id
+        case .secretary:
+            secretary?.state == .running && !secretaryStarting ? secretarySession?.sessionId : nil
+        default: nil
+        }
+    }
+
     /// Read and follow the open session's conversation; let go of one no
     /// longer open. Called whenever the place changes.
     func syncTimeline() {
-        let open: String? = switch place {
-        case let .session(id), let .past(id): id
-        default: nil
-        }
+        let open = timelineSessionId(for: place)
         guard timeline?.sessionId != open else { return }
         if let old = timeline {
             core?.stopTimeline(sessionId: old.sessionId)
@@ -108,11 +115,7 @@ extension CoreStore {
             parked[old.sessionId] = old
         }
         // Only what the stack can go back to.
-        let onStack = Set(([root] + path).compactMap { p -> String? in
-            if case let .session(id) = p { return id }
-            if case let .past(id) = p { return id }
-            return nil
-        })
+        let onStack = Set(([root] + path).compactMap(timelineSessionId(for:)))
         parked = parked.filter { onStack.contains($0.key) }
         guard let open else {
             timeline = nil
