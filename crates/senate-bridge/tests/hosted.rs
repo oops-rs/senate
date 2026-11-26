@@ -1102,7 +1102,12 @@ async fn codex_native_end_during_or_after_restore_does_not_leave_a_live_row() {
         h.dir = tempfile::tempdir_in("/tmp").unwrap();
         h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
         h.paths.ensure_home().unwrap();
-        let project = h.workdir("codex", None);
+        // The row below says its committee came from the worktree's file,
+        // so the file is there: the daemon's first look at a live session
+        // reads it again, and a session whose file is gone has no committee.
+        // (That look used to wait on two `git` processes, which let Restore
+        // read the row first.)
+        let project = h.workdir("codex", Some(committee().as_str()));
         let program = h.dir.path().join("fixture");
         std::fs::write(
             &program,
