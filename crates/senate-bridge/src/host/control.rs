@@ -308,6 +308,14 @@ pub(crate) async fn grant_viewer(
     })
 }
 
+/// Whether the screen shows something a typed Enter would answer: a
+/// prompt or choice as [`prompt::looks_like_prompt`] sees it, or a choice
+/// whose options are spread out by long descriptions.
+fn prompt_on_screen(tty: &Tty) -> bool {
+    let rows = tty.screen.rows();
+    prompt::looks_like_prompt(&rows) || prompt::may_be_choice(&rows)
+}
+
 /// Type the wake line into the TUI, and only into one that sits idle at
 /// its own prompt. It is never typed onto a line a viewer left unsubmitted,
 /// into a prompt or a choice on the screen (the key would answer it),
@@ -334,7 +342,7 @@ async fn wake_once(
         let _ = stream.write_u8(DRAFT_PENDING).await;
         return;
     }
-    if prompt::looks_like_prompt(&tty.screen.rows()) {
+    if prompt_on_screen(tty) {
         drop(write);
         let _ = stream.write_u8(PROMPT_SHOWN).await;
         return;
@@ -359,16 +367,25 @@ async fn wake_once(
         let _ = stream.write_all(&reply).await;
         return;
     }
+    // A dialog may come up while the line waits for its Enter (a
+    // background task asking permission): look again, and leave the
+    // Enter out if one did, since it would pick the dialog's first option.
     let typed = async {
         write.write_all(WAKE_LINE.as_bytes()).await?;
         tokio::time::sleep(WAKE_ENTER_DELAY).await;
-        write.write_all(b"\r").await
+        if prompt_on_screen(tty) {
+            return Ok(false);
+        }
+        write.write_all(b"\r").await.map(|()| true)
     }
     .await;
     drop(write);
     match typed {
-        Ok(()) => {
+        Ok(true) => {
             let _ = stream.write_u8(NUDGED).await;
+        }
+        Ok(false) => {
+            let _ = stream.write_u8(PROMPT_SHOWN).await;
         }
         Err(error) => {
             tracing::warn!(%error, "typing the wake line into the coding TUI");
@@ -735,6 +752,92 @@ mod tests {
         wake_once(&mut server, &viewer, &tty, quiet, || now).await;
         assert_eq!(reply(&mut client).await?, (NUDGED, None));
         assert!(typed(&mut slave) > 0);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wake_is_not_typed_into_a_question_with_spread_out_options() -> anyhow::Result<()> {
+        let (pty, pts) = pty_process::open()?;
+        let mut slave = std::fs::File::from(rustix::io::dup(&pts)?);
+        let flags = rustix::fs::fcntl_getfl(&slave)?;
+        rustix::fs::fcntl_setfl(&slave, flags | rustix::fs::OFlags::NONBLOCK)?;
+        let (_, write) = pty.into_split();
+        let tty = Tty::new(write, Scheme::Light, 24, 80);
+        let viewer = Mutex::new(Viewer {
+            path: PathBuf::new(),
+            activity: ViewerActivity::default(),
+            dirty: false,
+            draft: input::Draft::default(),
+        });
+        let (mut server, mut client) = UnixStream::pair()?;
+        let now = 100_000_000_000;
+        // Each option carries four rows of description, as a question an
+        // agent asks may: the Enter would pick option 1.
+        tty.screen.output(
+            "Which approach?\r\n\u{276f} 1. Rewrite\r\n   a\r\n   b\r\n   c\r\n   d\r\n  2. Patch\r\n"
+                .as_bytes(),
+        );
+        tty.screen.set_last_output(now - 60_000_000_000);
+        wake_once(&mut server, &viewer, &tty, Duration::from_secs(10), || now).await;
+        assert_eq!(reply(&mut client).await?, (PROMPT_SHOWN, None));
+        let mut bytes = [0; 64];
+        assert_eq!(
+            slave.read(&mut bytes).unwrap_or(0),
+            0,
+            "typed into a question"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_that_comes_up_before_enter_keeps_the_enter() -> anyhow::Result<()> {
+        let (pty, pts) = pty_process::open()?;
+        let mut slave = std::fs::File::from(rustix::io::dup(&pts)?);
+        let mut raw = rustix::termios::tcgetattr(&slave)?;
+        raw.make_raw();
+        rustix::termios::tcsetattr(&slave, rustix::termios::OptionalActions::Now, &raw)?;
+        let flags = rustix::fs::fcntl_getfl(&slave)?;
+        rustix::fs::fcntl_setfl(&slave, flags | rustix::fs::OFlags::NONBLOCK)?;
+        let (_, write) = pty.into_split();
+        let tty = Tty::new(write, Scheme::Light, 24, 80);
+        let viewer = Mutex::new(Viewer {
+            path: PathBuf::new(),
+            activity: ViewerActivity::default(),
+            dirty: false,
+            draft: input::Draft::default(),
+        });
+        let (mut server, mut client) = UnixStream::pair()?;
+        let mut nudge = std::pin::pin!(wake_once(
+            &mut server,
+            &viewer,
+            &tty,
+            Duration::ZERO,
+            observed_at
+        ));
+        let mut prefix = [0; WAKE_LINE.len()];
+        let mut read = 0;
+        while read < prefix.len() {
+            assert!(futures::poll!(nudge.as_mut()).is_pending());
+            match slave.read(&mut prefix[read..]) {
+                Ok(0) => anyhow::bail!("PTY closed before the wake line arrived"),
+                Ok(n) => read += n,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    tokio::task::yield_now().await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        assert_eq!(prefix, WAKE_LINE.as_bytes());
+        // A permission dialog comes up while the line waits for its Enter.
+        tty.screen
+            .output(b"Allow this command?\r\n\xe2\x9d\xaf 1. Yes\r\n  2. No\r\n");
+        nudge.await;
+        assert_eq!(client.read_u8().await?, PROMPT_SHOWN);
+        let mut tail = [0; 8];
+        match slave.read(&mut tail) {
+            Ok(n) => assert_eq!(n, 0, "typed {:?} after the dialog came up", &tail[..n]),
+            Err(error) => assert_eq!(error.kind(), io::ErrorKind::WouldBlock),
+        }
         Ok(())
     }
 

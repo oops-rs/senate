@@ -107,6 +107,30 @@ pub(crate) fn looks_like_choice(rows: &[String]) -> bool {
     false
 }
 
+/// Whether the bottom of the screen may be a choice menu whose options sit
+/// further apart than [`OPTION_GAP`]: a selected option and an option
+/// numbered next to it, however many rows lie between them. A question
+/// whose options carry long descriptions draws that way. This is wider
+/// than [`looks_like_choice`] and only holds typing back, where a false
+/// alarm costs a delay and a miss answers the question.
+pub(super) fn may_be_choice(rows: &[String]) -> bool {
+    let end = rows
+        .iter()
+        .rposition(|row| !row.trim().is_empty())
+        .map_or(0, |last| last + 1);
+    let start = end.saturating_sub(BOTTOM_ROWS);
+    let options: Vec<(u32, bool)> = rows[start..end]
+        .iter()
+        .filter_map(|row| option(row))
+        .collect();
+    options.iter().any(|&(n, selected)| {
+        selected
+            && options
+                .iter()
+                .any(|&(m, _)| m == n + 1 || m.checked_add(1) == Some(n))
+    })
+}
+
 /// A modal can also end with a standalone dismissal hint inside a box.
 pub(super) fn looks_like_prompt(rows: &[String]) -> bool {
     let footer = rows
@@ -263,6 +287,32 @@ mod tests {
         let mut screen = vec![String::new(); 24 - rows.len().min(24)];
         screen.extend(rows.iter().map(|r| (*r).to_owned()));
         screen
+    }
+
+    #[test]
+    fn a_question_with_long_descriptions_may_be_a_choice() {
+        // Options spread out by descriptions an agent wrote: too far apart
+        // for a menu, near enough to hold a typed Enter back.
+        let rows = screen(&[
+            "Which approach should I take?",
+            "❯ 1. Rewrite the parser",
+            "     Replace the hand-written parser with a generated one,",
+            "     which touches every caller of the tokenizer and needs",
+            "     a migration of the stored fixtures, plus a review of",
+            "     the error messages users see today.",
+            "  2. Patch the bug",
+            "Enter to select · Esc to cancel",
+        ]);
+        assert!(!looks_like_choice(&rows));
+        assert!(may_be_choice(&rows));
+        // A person's earlier message that starts with a number is not one.
+        assert!(!may_be_choice(&screen(&[
+            "> 1. fix the build first",
+            "",
+            "Done. The build passes now.",
+            "",
+            "❯ ",
+        ])));
     }
 
     #[test]
