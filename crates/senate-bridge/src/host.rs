@@ -16,6 +16,7 @@ mod scroll;
 mod terminal;
 pub(crate) mod title;
 pub mod view;
+mod vt;
 pub(crate) mod watch;
 
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};

@@ -22,7 +22,7 @@
 //! The session's TUI paints its screen once and then changes parts of it,
 //! so the bytes it writes mean nothing to someone who was not there from
 //! the start. The host therefore keeps the screen itself: every byte the
-//! TUI writes goes through a terminal emulator ([`vt100`]) held at the
+//! TUI writes goes through a terminal emulator ([`Vt`]) held at the
 //! PTY's size, retaining a bounded number of main-screen history rows.
 //!
 //! A watcher is first told the size and sent the screen as it is, then
@@ -67,6 +67,7 @@ use tokio::sync::{Notify, broadcast};
 use tokio::task::JoinSet;
 
 use super::IO_CHUNK;
+use super::vt::Vt;
 
 /// The host's greeting on the watch socket.
 const WATCHING: u8 = 1;
@@ -110,7 +111,7 @@ struct Fit {
 
 /// The session's screen as the host keeps it, and those watching it.
 pub(super) struct Screen {
-    parser: Mutex<vt100::Parser>,
+    parser: Mutex<Vt>,
     changes: broadcast::Sender<Change>,
     fit: Mutex<Option<Fit>>,
     /// A new fit was asked for, or the viewer left: the latest applies.
@@ -125,11 +126,7 @@ pub(super) struct Screen {
 impl Screen {
     pub(super) fn new(rows: u16, cols: u16) -> Self {
         Self {
-            parser: Mutex::new(vt100::Parser::new(
-                dimension(rows),
-                dimension(cols),
-                HISTORY,
-            )),
+            parser: Mutex::new(Vt::new(dimension(rows), dimension(cols), HISTORY)),
             changes: broadcast::channel(BACKLOG).0,
             fit: Mutex::new(None),
             fit_due: Notify::new(),
@@ -183,7 +180,7 @@ impl Screen {
         }
     }
 
-    fn parser(&self) -> MutexGuard<'_, vt100::Parser> {
+    fn parser(&self) -> MutexGuard<'_, Vt> {
         self.parser
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -241,8 +238,9 @@ impl Screen {
     /// The screen as it is, and every change after it.
     pub(super) fn join(&self) -> (Mirror, broadcast::Receiver<Change>) {
         let parser = self.parser();
-        let mut mirror = Mirror::default();
-        *mirror.parser.screen_mut() = parser.screen().clone();
+        let mirror = Mirror {
+            vt: Vt::from_screen(parser.screen().clone(), parser.autowrap()),
+        };
         (mirror, self.changes.subscribe())
     }
 }
@@ -398,7 +396,7 @@ impl SyncFrames {
         if self.held.is_empty() {
             return false;
         }
-        mirror.parser.process(&self.held);
+        mirror.vt.process(&self.held);
         self.held.clear();
         true
     }
@@ -465,27 +463,27 @@ impl SyncFrames {
             return false;
         }
         self.finish(mirror);
-        mirror.parser.process(bytes);
+        mirror.vt.process(bytes);
         true
     }
 }
 
 /// A watcher's copy of a session's screen, at the session's own size.
 pub(crate) struct Mirror {
-    parser: vt100::Parser,
+    vt: Vt,
 }
 
 impl Default for Mirror {
     fn default() -> Self {
         Self {
-            parser: vt100::Parser::new(dimension(24), dimension(80), HISTORY),
+            vt: Vt::new(dimension(24), dimension(80), HISTORY),
         }
     }
 }
 
 impl Mirror {
     pub(crate) fn screen(&self) -> &vt100::Screen {
-        self.parser.screen()
+        self.vt.screen()
     }
 
     pub(super) fn live(&mut self) -> bool {
@@ -493,17 +491,26 @@ impl Mirror {
     }
 
     pub(super) fn scroll(&mut self, rows: isize) -> bool {
-        let screen = self.parser.screen_mut();
+        let screen = self.vt.screen_mut();
         !screen.alternate_screen() && super::scroll::move_by(screen, rows)
     }
 
     pub(super) fn resize(&mut self, rows: u16, cols: u16) {
-        self.parser.set_size(dimension(rows), dimension(cols));
+        self.vt.set_size(dimension(rows), dimension(cols));
     }
 
     pub(super) fn output(&mut self, bytes: &[u8]) {
         self.live();
-        self.parser.process(bytes);
+        self.vt.process(bytes);
+    }
+
+    /// The main screen of `screen`, to be read or replayed from.
+    fn primary(screen: &vt100::Screen) -> Vt {
+        let mut primary = Vt::from_screen(screen.clone(), true);
+        if screen.alternate_screen() {
+            primary.process(b"\x1b[?47l");
+        }
+        primary
     }
 
     /// Paint a real terminal once. Lines go through the terminal's main
@@ -511,13 +518,9 @@ impl Mirror {
     /// currently shows its alternate screen.
     pub(super) fn attach_snapshot(&self) -> Vec<u8> {
         let screen = self.screen();
-        let mut primary = Self::default();
-        *primary.parser.screen_mut() = screen.clone();
-        if screen.alternate_screen() {
-            primary.parser.process(b"\x1b[?47l");
-        }
+        let mut primary = Self::primary(screen);
         let live = primary.screen().contents_formatted();
-        let history = primary.parser.screen_mut();
+        let history = primary.screen_mut();
         let (rows, cols) = history.size();
         let mut output = b"\x1b[0m\x1b[9999;1H".to_vec();
         let mut offset = history.scrollback_len();
@@ -562,19 +565,29 @@ impl Mirror {
             vt100::CursorStyle::SteadyVerticalBar => 6,
         };
         output.extend_from_slice(format!("\x1b[{style} q").as_bytes());
+        output.extend_from_slice(self.vt.modes_formatted());
         output
     }
 
+    /// The screen as escape codes, and the modes [`Vt`] keeps beyond it.
     fn snapshot(&self) -> Vec<u8> {
+        let mut bytes = self.screen_snapshot();
+        bytes.extend_from_slice(self.vt.modes_formatted());
+        bytes
+    }
+
+    fn screen_snapshot(&self) -> Vec<u8> {
+        // Room for the modes after the screen.
+        const MAX: usize = MAX_SCREEN - 16;
         let screen = self.screen();
         let state = screen.state_formatted();
         if screen.alternate_screen() {
-            let mut primary = Self::default();
-            *primary.parser.screen_mut() = screen.clone();
-            primary.parser.process(b"\x1b[?47l");
-            let mut bytes = primary.snapshot();
+            let primary = Self {
+                vt: Self::primary(screen),
+            };
+            let mut bytes = primary.screen_snapshot();
             let alternate = [b"\x1b[?1049h", state.as_bytes()].concat();
-            if bytes.len() + alternate.len() <= MAX_SCREEN {
+            if bytes.len() + alternate.len() <= MAX {
                 bytes.extend_from_slice(&alternate);
                 return bytes;
             }
@@ -590,7 +603,7 @@ impl Mirror {
                 vt100::capture::BasicFormattedCaptureRange::Full(&mut Default::default()),
             );
             let mut bytes = capture.replace('\n', "\r\n").into_bytes();
-            if bytes.len() + state.len() <= MAX_SCREEN {
+            if bytes.len() + state.len() <= MAX {
                 bytes.extend_from_slice(state.as_bytes());
                 return bytes;
             }
@@ -601,7 +614,7 @@ impl Mirror {
     /// The session's size, rows then columns.
     #[cfg(test)]
     pub(crate) fn size(&self) -> (u16, u16) {
-        let (rows, cols) = self.parser.screen().size();
+        let (rows, cols) = self.vt.screen().size();
         (rows.get(), cols.get())
     }
 
@@ -611,9 +624,9 @@ impl Mirror {
             Frame::Size(rows, cols) => self.resize(*rows, *cols),
             Frame::Screen(state) => {
                 // Forget what was shown: the screen starts from this.
-                let (rows, cols) = self.parser.screen().size();
-                self.parser = vt100::Parser::new(rows, cols, HISTORY);
-                self.parser.process(state);
+                let (rows, cols) = self.vt.screen().size();
+                self.vt = Vt::new(rows, cols, HISTORY);
+                self.vt.process(state);
             }
             Frame::Output(bytes) => self.output(bytes),
         }
@@ -822,7 +835,7 @@ mod tests {
     #[test]
     fn watched_synchronized_frames_publish_only_on_completion_or_timeout() {
         let mut mirror = Mirror::default();
-        mirror.parser.process(b"initial");
+        mirror.vt.process(b"initial");
         let mut sync = SyncFrames::default();
         assert!(!sync.apply(&mut mirror, &Frame::Output(b"\x1b[?20".to_vec())));
         assert!(!sync.apply(&mut mirror, &Frame::Output(b"26h\rpartial".to_vec())));
@@ -984,5 +997,116 @@ mod tests {
         assert_eq!(mirror.screen().contents(), last);
         drop(watcher);
         serving.await.unwrap().unwrap();
+    }
+
+    fn screen_rows(screen: &vt100::Screen) -> Vec<String> {
+        let (_, cols) = screen.size();
+        screen.rows(0, cols.get()).collect()
+    }
+
+    /// Read frames until the mirror shows what the host does.
+    async fn caught_up(from: &mut UnixStream, mirror: &mut Mirror, screen: &Screen) {
+        let wait = async {
+            while screen_rows(mirror.screen()) != screen_rows(screen.parser().screen()) {
+                let frame = read_frame(from).await.unwrap().expect("the host left");
+                mirror.apply(&frame);
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), wait)
+            .await
+            .expect("the watcher never caught up");
+    }
+
+    /// A frame the way agy draws one: autowrap off around each line, each
+    /// line written over with `EL`, a row it holds blank stepped over
+    /// with a bare line feed.
+    fn agy_frame(lines: &[&str]) -> String {
+        let mut frame = String::new();
+        for (n, line) in lines.iter().enumerate() {
+            if n > 0 {
+                frame.push_str(if line.is_empty() { "\n" } else { "\r\n" });
+            }
+            if !line.is_empty() {
+                frame.push_str(&format!("\x1b[?7l\x1b[K{line}\x1b[?7h"));
+            }
+        }
+        frame
+    }
+
+    /// agy redraws the rows it believes changed and steps over the rest.
+    /// One line it draws past the right margin, with autowrap off, must
+    /// overwrite the last column as on a real terminal: wrapped onto a row
+    /// agy never drew, it moved everything after it a row down, and every
+    /// row stepped over kept the line above it: `H H`, `B1 B1`, until agy
+    /// next repainted the whole screen.
+    #[tokio::test]
+    async fn a_line_drawn_past_the_margin_with_autowrap_off_repeats_no_rows() {
+        let lines = [
+            "  S summary",
+            "",
+            "  H heading",
+            "",
+            "  B1 first",
+            "  B2 same",
+            "  B2 same",
+            "> ",
+        ];
+        let screen = Screen::new(8, 20);
+        screen.output(format!("\x1b[H\x1b[2J{}", agy_frame(&lines)).as_bytes());
+        let (host, mut watcher) = UnixStream::pair().unwrap();
+        let check = async {
+            assert_eq!(watcher.read_u8().await.unwrap(), WATCHING);
+            let mut mirror = Mirror::default();
+            until(&mut watcher, &mut mirror, "B1 first").await;
+            // The summary grew one column past a 20-column screen.
+            let mut redraw = lines;
+            redraw[0] = "  S summary is longer";
+            screen.output(
+                format!("\x1b[?2026h\r\x1b[7A{}\x1b[?2026l", agy_frame(&redraw)).as_bytes(),
+            );
+            caught_up(&mut watcher, &mut mirror, &screen).await;
+            let mut expected = lines.map(str::to_owned);
+            expected[0] = "  S summary is longr".to_owned();
+            assert_eq!(screen_rows(screen.parser().screen()), expected);
+            assert_eq!(screen_rows(mirror.screen()), expected);
+            assert_eq!(screen.parser().screen().cursor_position(), (7, 2));
+            watcher.shutdown().await.unwrap();
+        };
+        let (result, ()) = tokio::join!(watch(host, &screen), check);
+        result.unwrap();
+    }
+
+    /// A watcher can join while the TUI has autowrap off, in the middle of
+    /// a line: it is told so with the screen.
+    #[tokio::test]
+    async fn a_watcher_joining_while_autowrap_is_off_is_told_so() {
+        let screen = Screen::new(3, 20);
+        screen.output(b"\x1b[?7labc");
+        let (host, mut watcher) = UnixStream::pair().unwrap();
+        let check = async {
+            assert_eq!(watcher.read_u8().await.unwrap(), WATCHING);
+            let mut mirror = Mirror::default();
+            until(&mut watcher, &mut mirror, "abc").await;
+            screen.output(b"defghijklmnopqrstuvwxyz\x1b[?7h");
+            until(&mut watcher, &mut mirror, "z").await;
+            assert_eq!(
+                screen_rows(mirror.screen()),
+                ["abcdefghijklmnopqrsz", "", ""]
+            );
+            assert_eq!(
+                screen_rows(mirror.screen()),
+                screen_rows(screen.parser().screen())
+            );
+            // A terminal that attaches now is told too, and only then.
+            screen.output(b"\x1b[?7l");
+            let (mirror, _) = screen.join();
+            assert!(mirror.attach_snapshot().ends_with(b"\x1b[?7l"));
+            screen.output(b"\x1b[?7h");
+            let (mirror, _) = screen.join();
+            assert!(!mirror.attach_snapshot().ends_with(b"\x1b[?7l"));
+            watcher.shutdown().await.unwrap();
+        };
+        let (result, ()) = tokio::join!(watch(host, &screen), check);
+        result.unwrap();
     }
 }
