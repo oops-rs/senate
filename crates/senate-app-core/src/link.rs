@@ -112,10 +112,11 @@ impl Link {
         let mut stream = WatchStream {
             reader: BufReader::new(stream),
         };
-        let mut line = serde_json::to_string(&Request::Watch { app: true })
-            .map_err(|e| ClientError::Protocol(e.to_string()))?;
-        line.push('\n');
-        stream.reader.get_mut().write_all(line.as_bytes()).await?;
+        // Through `request_line`, like every other request: the daemon serves
+        // a watch only to a caller it can identify, and that is where the
+        // app's proof is attached.
+        let line = ipc::request_line(&self.socket, &Request::Watch { app: true }).await?;
+        stream.reader.get_mut().write_all(&line).await?;
         let first = tokio::time::timeout(READ_TIMEOUT, stream.line())
             .await
             .map_err(|_| ClientError::Timeout)??
