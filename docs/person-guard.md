@@ -119,7 +119,10 @@ secretary, role-alias and seat changes, committee archive and unarchive,
 remote-machine administration and pairing, card writes, and operator-only
 host stop, restore, pause, resume and replacement require a local decision.
 History deletion and opening a writable terminal viewer also require local
-authorization. Routine CLI speech uses the operator proof without a presence
+authorization. `senate cleanup` asks once for a whole run: the request
+carries the plan the person was shown, the proof is bound to that request,
+and the daemon does only what a fresh plan still holds. Reading the plan is
+person-only too, without a prompt. Routine CLI speech uses the operator proof without a presence
 prompt. A verified session selector grants the authority of that session.
 An explicit person byline, memory correction or deletion, and thread takeover
 require operator proof even when a session is named. The daemon checks the

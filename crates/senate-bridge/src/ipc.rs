@@ -1430,6 +1430,18 @@ pub enum Request {
     /// directories of hosts that have ended ([`PruneReply`]). The local
     /// operator's: the CLI only.
     PruneHosts,
+    /// What `senate cleanup` would do within `scope`
+    /// ([`Plan`](crate::cleanup::Plan)), changing nothing. The person's
+    /// read: it names every committee's senators and open threads.
+    CleanupPlan {
+        scope: crate::cleanup::Scope,
+    },
+    /// Do what `plan` says, the plan the person was shown, where it still
+    /// holds ([`Report`](crate::cleanup::Report)). One approval covers the
+    /// whole run, bound to this very plan.
+    CleanupApply {
+        plan: Box<crate::cleanup::Plan>,
+    },
     RestartHost {
         senator: senate_core::alias::AliasName,
         host: EventId,

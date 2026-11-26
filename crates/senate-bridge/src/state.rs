@@ -2507,6 +2507,91 @@ impl Store {
         Ok(gone)
     }
 
+    /// What `senate cleanup` leaves of a session whose senator lost its
+    /// seat: the row History reads (who, where, when, where its transcript
+    /// is, its recorded name and model), and nothing that lists it, reaches
+    /// it or restores it as it stands. It is recorded ended, loses its
+    /// host, its inbox socket, token and process, and its senator's
+    /// stopped-on-purpose mark. A live session, a paused senator's, and one
+    /// whose host still runs are left as they are (`None`); otherwise the
+    /// host it had, whose directory can go.
+    pub(crate) fn retire_session(
+        &self,
+        id: &str,
+        paths: &Paths,
+    ) -> Result<Option<Option<EventId>>, StoreError> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let host = session_host(&tx, id)?;
+        if let Some(host) = &host
+            && host::running(paths, host)?
+        {
+            return Ok(None);
+        }
+        let retired = tx.execute(
+            "UPDATE sessions
+             SET state = 'ended', host_id = NULL, socket = NULL, token = NULL,
+                 claude_pid = NULL, socket_ok = NULL
+             WHERE session_id = ?1 AND state != 'live'
+               AND agent NOT IN (SELECT agent FROM hosted_paused)",
+            [id],
+        )?;
+        if retired == 0 {
+            return Ok(None);
+        }
+        tx.execute(
+            "UPDATE queue SET status = 'pending', session_id = NULL
+             WHERE session_id = ?1 AND status = 'queued'",
+            [id],
+        )?;
+        for table in [
+            "session_ancestors",
+            "native_process_claims",
+            "legacy_sessions",
+            "hosted_codex_backends",
+        ] {
+            tx.execute(&format!("DELETE FROM {table} WHERE session_id = ?1"), [id])?;
+        }
+        tx.execute(
+            "DELETE FROM hosted_stopped
+             WHERE agent = (SELECT agent FROM sessions WHERE session_id = ?1)",
+            [id],
+        )?;
+        tx.commit()?;
+        Ok(Some(host))
+    }
+
+    /// How many messages wait (pending, or held for hooks) for each agent
+    /// on each committee, and each seat this bridge keeps a cursor for.
+    pub(crate) fn waiting_by_seat(
+        &self,
+    ) -> Result<std::collections::BTreeMap<(SenatorName, CommitteeId), usize>, StoreError> {
+        let conn = self.conn();
+        let mut out = std::collections::BTreeMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT agent, committee, SUM(status IN ('pending', 'queued')) FROM queue
+             GROUP BY agent, committee
+             UNION ALL SELECT agent, committee, 0 FROM cursors",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (agent, committee, waiting) = row?;
+            if let (Ok(agent), Ok(committee)) =
+                (agent.parse::<SenatorName>(), CommitteeId::new(committee))
+            {
+                *out.entry((agent, committee)).or_default() +=
+                    usize::try_from(waiting).unwrap_or(0);
+            }
+        }
+        Ok(out)
+    }
+
     /// Agents with queued items or cursors and no contact since `cutoff_ms`:
     /// none of their sessions is registered (other than `ignoring`, which
     /// is being forgotten), and no cursor, queue row or session of theirs
@@ -4216,6 +4301,92 @@ mod tests {
         );
         assert_eq!(store.hosted_native_retired("current").unwrap(), None);
         assert!(store.hosted_model("current").unwrap().is_default());
+    }
+
+    #[test]
+    fn a_retired_session_keeps_its_record_and_nothing_that_reaches_it() {
+        let store = Store::in_memory().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::new(home.path());
+        let model = crate::ipc::HostedModel::new(Some("opus".into()), None, None);
+        let host = EventId::new();
+        let mut gone = upsert("gone");
+        gone.agent = agent("claude-gone");
+        gone.ancestor_pids = vec![5];
+        gone.transcript_path = Some("/t/gone.jsonl".into());
+        let session = store
+            .register_hosted_session(&gone, &host, &committee(), None, &model, false)
+            .unwrap();
+        store.mark_stopped(&session.agent, Utc::now()).unwrap();
+        store
+            .remember_history_name("gone", Some(&agent("reviewer")), "reviewer")
+            .unwrap();
+        // Something held for its next hook.
+        store.ingest(&session.agent, &event(1), true, None).unwrap();
+        store
+            .transition(
+                std::slice::from_ref(&key(&session.agent, 1)),
+                ItemStatus::Queued,
+                Some("gone"),
+                None,
+                "1 = 1",
+            )
+            .unwrap();
+
+        // Live: left as it is.
+        assert_eq!(store.retire_session("gone", &paths).unwrap(), None);
+        store
+            .set_session_state("gone", SessionState::Ended)
+            .unwrap();
+        // Paused: to be resumed, so left as it is.
+        store
+            .mark_paused(&session.agent, &committee(), Utc::now(), None)
+            .unwrap();
+        assert_eq!(store.retire_session("gone", &paths).unwrap(), None);
+        store.clear_paused(&session.agent).unwrap();
+        // Its host still runs (it holds its lock): left as it is.
+        let dir = host::directory(&paths, &host);
+        std::fs::create_dir_all(&dir).unwrap();
+        let owner = std::fs::File::create(dir.join("owner")).unwrap();
+        owner.try_lock().unwrap();
+        assert_eq!(store.retire_session("gone", &paths).unwrap(), None);
+        assert_eq!(store.session_host("gone").unwrap(), Some(host.clone()));
+        drop(owner);
+
+        assert_eq!(
+            store.retire_session("gone", &paths).unwrap(),
+            Some(Some(host.clone()))
+        );
+        // What History reads is all there.
+        let record = store.session("gone").unwrap().unwrap();
+        assert_eq!(record.state, SessionState::Ended);
+        assert_eq!(record.agent, agent("claude-gone"));
+        assert_eq!(record.transcript_path.as_deref(), Some("/t/gone.jsonl"));
+        assert_eq!(
+            store.history_name("gone").unwrap(),
+            Some((Some(agent("reviewer")), "reviewer".into()))
+        );
+        assert_eq!(store.hosted_model("gone").unwrap().label(), "opus");
+        // Nothing lists it as hosted, reaches it or marks it stopped.
+        assert!(store.hosted_sessions().unwrap().is_empty());
+        assert_eq!(store.session_host("gone").unwrap(), None);
+        assert_eq!(store.session_for_host(&host).unwrap(), None);
+        assert!(record.socket.is_none() && record.token.is_none() && record.claude_pid.is_none());
+        assert!(!store.stopped_on_purpose(&session.agent).unwrap());
+        assert!(store.sessions_below(5).unwrap().is_empty());
+        let item = store
+            .item(&session.agent, &committee(), Seq(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!((item.status, item.session_id), (ItemStatus::Pending, None));
+        // Its seat here: one message waits and a cursor may follow; both
+        // are counted until the seat is forgotten.
+        let seat = (session.agent.clone(), committee());
+        assert_eq!(store.waiting_by_seat().unwrap().get(&seat), Some(&1));
+        store.forget_agent(&session.agent, &[committee()]).unwrap();
+        assert!(store.waiting_by_seat().unwrap().is_empty());
+        // A second retirement finds nothing left to take.
+        assert_eq!(store.retire_session("gone", &paths).unwrap(), Some(None));
     }
 
     #[test]

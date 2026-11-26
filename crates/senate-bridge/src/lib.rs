@@ -65,6 +65,7 @@ pub mod approvals;
 pub mod binding;
 pub mod catch_up;
 pub mod checkpoint;
+pub mod cleanup;
 pub mod cli;
 pub mod client;
 pub mod companion;

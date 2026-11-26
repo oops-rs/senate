@@ -7,6 +7,8 @@
 // These two stay beside this file under their own names.
 #[path = "cli_chat.rs"]
 mod cli_chat;
+#[path = "cli_cleanup.rs"]
+mod cli_cleanup;
 #[path = "cli_desk.rs"]
 mod cli_desk;
 #[path = "cli_help.rs"]
@@ -583,6 +585,50 @@ stdin.")]
         #[command(subcommand)]
         action: Option<CommitteesCmd>,
     },
+    /// Start fresh: remove what ended sessions left behind, in one go.
+    ///
+    /// For every senator that is dead it removes the seat on each
+    /// committee, frees its aliases there (so they can be given again),
+    /// drops the messages queued for it, and forgets its session record.
+    /// It archives the open threads nobody is left to act on: a permission
+    /// notice whose session ended, a question to senators who are all
+    /// gone, a thread whose asker and addressees are all gone, and with
+    /// --older-than any thread in which nothing was said for that long.
+    ///
+    /// A senator is dead when it is a coding session's own identity that
+    /// you run, none of its sessions is live or paused anywhere, no
+    /// terminal of it runs, and its last activity is older than
+    /// --ended-for. A person, the Speaker and a named agent never are; a
+    /// dead chair or secretary is listed and removed only with
+    /// --include-roles.
+    ///
+    /// Nothing is deleted from the log. Removing a seat, freeing an alias
+    /// and archiving a thread are events and registry changes the server
+    /// records, each the same one `senate senator unseat`, `senate senator
+    /// unalias` and an archive make, so everything said stays readable and
+    /// searchable, and the server refuses what you may not do. A forgotten
+    /// session stays in `senate session history`, `session show` and
+    /// search whenever it has a transcript; it is no longer listed, attached to or
+    /// restored as it stands (`senate senator seat <id> --committee <c>`,
+    /// then `senate session restore <id>`, brings one back). It never
+    /// stops a running session, touches a running terminal or removes a
+    /// committee.
+    ///
+    /// On a terminal it shows the plan and asks once; applying takes one
+    /// authentication for the whole run. What changed between the plan
+    /// and its approval is left alone, and anything that fails is listed:
+    /// running it again finishes the rest. `senate setup clean` is the
+    /// other half: saved branch copies and records that expired on this
+    /// machine.
+    #[command(after_help = "Examples:
+  senate cleanup --dry-run             What it would do, by committee
+  senate cleanup                       Show the plan, ask once, apply
+  senate cleanup --committee api-test  One committee only
+  senate cleanup --older-than 2d       Also archive threads quiet for 2 days
+  senate cleanup --keep nous::main     Leave that senator as it is
+  senate cleanup --ended-for 0s --include-roles
+                                       Every dead senator, chairs too")]
+    Cleanup(cli_cleanup::Cleanup),
     /// Set or rename a senator's alias on its committee.
     Alias {
         /// Full senator ID, alias, or committee::alias.
@@ -1390,6 +1436,10 @@ enum SetupCmd {
     /// process is gone; queued items and cursors of agents with no session
     /// and no contact for `free_after_days` (senate.toml, default 30). A
     /// hosted Senate's log is only listed.
+    ///
+    /// This is the machine's own files. `senate cleanup` is the other
+    /// half: the seats, aliases and open threads that ended sessions left
+    /// on the Senate.
     Clean {
         /// Do it.
         #[arg(long)]
@@ -3705,6 +3755,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         Cmd::Secretary(args) => cli_secretary::run(args),
         Cmd::Terminal(args) => cli_terminal::run(args),
         Cmd::Desk(args) => cli_desk::run(args),
+        Cmd::Cleanup(args) => cli_cleanup::run(args, output),
         Cmd::Chat(args) => cli_chat::run(args),
         Cmd::DeskWorker { command } => {
             let paths = Paths::from_env()?;

@@ -18,7 +18,9 @@ impl Destination {
     }
 }
 
-fn actor(me: &Me) -> Option<SenatorName> {
+/// Who acts when the person writes for the Speaker's office in person: the
+/// Speaker themself, or the agent holding the office that they run.
+pub(super) fn actor(me: &Me) -> Option<SenatorName> {
     let office = me.office.as_ref()?;
     let named = office.speaker.name();
     match office.kind {

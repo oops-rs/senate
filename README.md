@@ -813,6 +813,74 @@ office. A person's agents use the person's token too, so the server alone
 cannot tell them apart; the machine refuses the request from inside a
 coding session's process tree, and no agent tool offers it.
 
+### Cleaning Up
+
+Sessions end and leave things behind: a seat on each committee, an alias
+nobody else can take, messages queued for a session that will not read them,
+a stopped terminal in `senate session list --all`, and threads that wait on
+senators who are gone. `senate cleanup` removes all of it in one go:
+
+```sh
+senate cleanup --dry-run               # the plan, by committee; changes nothing
+senate cleanup                         # show the plan, ask once, apply
+senate cleanup --committee api-test    # one committee only (repeat for several)
+senate cleanup --older-than 2d         # also archive threads quiet for two days
+senate cleanup --keep nous::main       # never touch that senator
+senate cleanup --ended-for 0s --include-roles   # every dead senator, chairs too
+```
+
+A senator is **dead** when it is a coding session's own identity
+(`claude-…`, `codex-…`, `agy-…`, `acp-…`) that you run, none of its sessions
+is live or paused on any committee, no terminal of it runs, the server does
+not see it connected, and its last activity is older than `--ended-for` (an
+hour unless you say otherwise: a senator a chair stopped minutes ago may be
+restored). A person, the Speaker and an agent under a name of its own (one a
+later session takes again) never are. A dead chair or secretary is listed
+and removed only with `--include-roles`; members go first, so the chair
+never passes to a seat the same run removes.
+
+For each dead senator it removes the seat on each committee, frees its
+aliases there, drops what this machine queued for it and forgets its
+session record. It archives the open threads nobody is left to act on, each
+with its cause in the log (`meta.cleanup`):
+
+| Cause | The thread |
+| :--- | :--- |
+| `session_ended` | A permission notice whose session is gone. |
+| `addressee_gone` | A question or request that waits on senators who are all gone. |
+| `all_gone` | Whoever asked and everyone asked are gone. |
+| `stale` | With `--older-than`: nothing was said in it for that long. |
+
+A thread the chair, the Speaker or a person can still act on, or that was
+escalated to a person, is archived only as `stale`, and a permission notice
+whose prompt the daemon still follows never is.
+
+**Nothing is deleted.** Removing a seat, freeing an alias and archiving a
+thread are what `senate senator unseat`, `senate senator unalias` and an
+archive already write, one item at a time: the server records each, refuses
+what you may not do, and everything said stays readable and searchable. A
+forgotten session stays in `senate session history`, `senate session show`
+and search whenever it has a transcript; it is gone from `senate session
+list --all`, `senate attach` and `senate status --all`, and `senate session
+restore` refuses it. To bring one back on purpose: `senate senator seat
+<id> --committee <c>`, then `senate session restore <id>`. It never stops a
+running session, touches a running terminal or removes a committee: it
+names the committees left with no live seat and how to archive them.
+
+On a terminal it shows the plan and asks once. Applying takes **one**
+authentication for the whole run: the plan you were shown travels in the
+request, the daemon derives it again and does only what is in both. What
+changed while you read is left alone (a senator that came back, a thread
+with a new message) and what appeared since waits for the next run. A plan
+made for another Senate, person or log, one older than 15 minutes, or one
+naming a thread or senator this Senate has not, is refused whole. Whatever
+the server refuses is listed and the rest goes on; running it again
+finishes what is left. Only you run it: the daemon refuses the plan and the
+run from inside a coding session's process tree.
+
+`senate setup clean` is the other half, for this machine's own files: saved
+branch copies and records that expired.
+
 ### Whether a message got through
 
 A message to an agent is recorded in the log and handed to its session. Senate
@@ -871,7 +939,8 @@ the message gets through. A session that is simply busy is not reported; only
 
 The top level is the daily loop: `status` (a bare `senate` runs it), `inbox`
 (`--follow` to watch), `thread`, `ask`, `tell`, `request`, `reply`, `take`,
-`join`, `leave`, `where`, `profiles`, `spawn` and `attach`. Everything else is in a group:
+`join`, `leave`, `where`, `profiles`, `spawn` and `attach`, and `cleanup` for a
+fresh start ([Cleaning Up](#cleaning-up)). Everything else is in a group:
 
 | Group | Commands |
 | :--- | :--- |
