@@ -250,49 +250,251 @@ fn report(params: &[u8], final_byte: u8, cursor: &mut CursorQueries, at: u64) ->
     }
 }
 
-/// Whether a viewer has left an unsubmitted line in the TUI's prompt: any
-/// key since the last Enter, Ctrl-U or Ctrl-C. Escape sequences (arrows,
-/// focus and mouse reports, a paste's brackets) say nothing either way;
-/// the text of a paste does. Backspace might empty the line or not, so it
-/// leaves the flag as it was.
+/// Whether a viewer has left an unsubmitted line in the TUI's prompt.
+///
+/// Tracks plain sequential typing by character count so backspacing all typed
+/// characters back to empty recovers automatically, while partial backspaces,
+/// cursor movement, pastes, and multi-line edits stay conservatively protected
+/// until an explicit submit or clear (legacy `\r`/`\n`/`^U`/`^C`, Kitty CSI u,
+/// or `modifyOtherKeys`). Terminal protocol traffic — including X10 mouse
+/// reports (`CSI M <3 bytes>`), SGR mouse reports, focus events, and Kitty key
+/// releases — never marks a draft pending.
 #[derive(Default)]
 pub(super) struct Draft {
-    pending: bool,
+    state: DraftState,
     escape: Escape,
+    in_paste: bool,
 }
 
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+enum DraftState {
+    #[default]
+    Empty,
+    /// Exact number of plain characters typed at the end of a single line.
+    Exact(usize),
+    /// Non-empty, but cursor movement, paste, or complex editing makes exact
+    /// backspace counting unsafe; cleared only by submit or line-clear.
+    Unknown,
+}
+
+#[derive(Default, Clone, PartialEq, Eq)]
 enum Escape {
     #[default]
     None,
     /// After ESC.
     Start,
-    /// A CSI (`ESC [`) or SS3 (`ESC O`) sequence, up to its final byte.
-    Sequence,
-    /// SS3 takes one byte.
+    /// A CSI (`ESC [`) sequence's parameter/intermediate bytes, up to its final byte.
+    Sequence(Vec<u8>),
+    /// SS3 (`ESC O`) takes one byte.
     Single,
+    /// X10 mouse report (`CSI M`) takes three raw payload bytes.
+    X10Mouse(u8),
     /// A control string (OSC, DCS, APC, PM), up to BEL or ST.
     String { escape: bool },
 }
 
 impl Draft {
     pub(super) fn pending(&self) -> bool {
-        self.pending
+        !matches!(self.state, DraftState::Empty)
+    }
+
+    fn clear(&mut self) {
+        self.state = DraftState::Empty;
+    }
+
+    fn push_char(&mut self) {
+        self.state = if self.in_paste {
+            DraftState::Unknown
+        } else {
+            match self.state {
+                DraftState::Empty => DraftState::Exact(1),
+                DraftState::Exact(n) => DraftState::Exact(n.saturating_add(1)),
+                DraftState::Unknown => DraftState::Unknown,
+            }
+        };
+    }
+
+    fn backspace(&mut self) {
+        if self.in_paste {
+            self.state = DraftState::Unknown;
+            return;
+        }
+        self.state = match self.state {
+            DraftState::Empty => DraftState::Empty,
+            DraftState::Exact(0 | 1) => DraftState::Empty,
+            DraftState::Exact(n) => DraftState::Exact(n - 1),
+            DraftState::Unknown => DraftState::Unknown,
+        };
+    }
+
+    fn degrade_if_pending(&mut self) {
+        if matches!(self.state, DraftState::Exact(_)) {
+            self.state = DraftState::Unknown;
+        }
+    }
+
+    fn observe_csi(&mut self, params: &[u8], final_byte: u8) -> Escape {
+        // X10 mouse report: CSI M followed by 3 raw bytes (>= 0x20).
+        if params.is_empty() && final_byte == b'M' {
+            return Escape::X10Mouse(3);
+        }
+        // Bracketed paste boundaries.
+        if final_byte == b'~' && params == b"200" {
+            self.in_paste = true;
+            return Escape::None;
+        }
+        if final_byte == b'~' && params == b"201" {
+            self.in_paste = false;
+            return Escape::None;
+        }
+        // Kitty keyboard protocol: `CSI <key>[:...] [; <mods>[:<event>]] [; ...] u`.
+        // `CSI ? <flags> u` is a capability report, never a key press.
+        if final_byte == b'u' && !params.starts_with(b"?") {
+            self.observe_kitty_key(params);
+            return Escape::None;
+        }
+        // xterm modifyOtherKeys: `CSI 27 ; <mods> ; <codepoint> ~`.
+        if final_byte == b'~' && params.starts_with(b"27;") {
+            self.observe_modify_other_key(params);
+            return Escape::None;
+        }
+        // Cursor navigation or forward-delete while a draft is active makes
+        // naive backspace counting unsafe: keep it conservatively protected.
+        if matches!(final_byte, b'A' | b'B' | b'C' | b'D' | b'H' | b'F')
+            || (final_byte == b'~' && matches!(params, b"1" | b"3" | b"4" | b"7" | b"8"))
+        {
+            self.degrade_if_pending();
+        }
+        Escape::None
+    }
+
+    fn observe_kitty_key(&mut self, params: &[u8]) {
+        let Ok(text) = std::str::from_utf8(params) else {
+            return;
+        };
+        let mut parts = text.split(';');
+        let Some(key_part) = parts.next() else {
+            return;
+        };
+        let Some(codepoint) = key_part
+            .split(':')
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            return;
+        };
+        let (mods, event_type) = match parts.next() {
+            Some(mod_part) if !mod_part.is_empty() => {
+                let mut sub = mod_part.split(':');
+                let mods = sub.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+                let event = sub.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+                (mods, event)
+            }
+            _ => (1, 1),
+        };
+        // Key-release events (`:3`) neither start nor clear a draft.
+        if event_type == 3 {
+            return;
+        }
+        self.apply_encoded_key(codepoint, mods);
+    }
+
+    fn observe_modify_other_key(&mut self, params: &[u8]) {
+        let Ok(text) = std::str::from_utf8(params) else {
+            return;
+        };
+        let mut parts = text.split(';');
+        if parts.next() != Some("27") {
+            return;
+        }
+        let Some(mods) = parts.next().and_then(|s| s.parse::<u32>().ok()) else {
+            return;
+        };
+        let Some(codepoint) = parts.next().and_then(|s| s.parse::<u32>().ok()) else {
+            return;
+        };
+        self.apply_encoded_key(codepoint, mods);
+    }
+
+    fn apply_encoded_key(&mut self, codepoint: u32, mods: u32) {
+        // Mask out CapsLock (64) and NumLock (128); keep Shift(1), Alt(2),
+        // Ctrl(4), Super(8), Hyper(16), Meta(32).
+        let active_mods = mods.saturating_sub(1) & 0b0011_1111;
+        let is_enter = codepoint == 13 || codepoint == 57414;
+        if is_enter {
+            if self.in_paste {
+                self.state = DraftState::Unknown;
+            } else if active_mods == 0 {
+                self.clear();
+            } else {
+                // Shift+Enter / Alt+Enter inserts a newline in a multi-line draft.
+                self.degrade_if_pending();
+            }
+            return;
+        }
+        // Ctrl-U or Ctrl-C clears the input line.
+        if active_mods == 4 && matches!(codepoint, 99 | 67 | 117 | 85) && !self.in_paste {
+            self.clear();
+            return;
+        }
+        // Unmodified Backspace.
+        if matches!(codepoint, 127 | 8) {
+            if active_mods == 0 {
+                self.backspace();
+            } else {
+                self.degrade_if_pending();
+            }
+            return;
+        }
+        // Tab completion or indentation.
+        if codepoint == 9 && active_mods == 0 {
+            self.state = DraftState::Unknown;
+            return;
+        }
+        // Printable Unicode key (unmodified or Shift-only), excluding Kitty's
+        // Private Use Area functional key codes (57344..=63743).
+        let is_printable =
+            codepoint >= 32 && codepoint != 127 && !(57344..=63743).contains(&codepoint);
+        if is_printable && (active_mods & !1) == 0 {
+            self.push_char();
+        } else if active_mods != 0 {
+            self.degrade_if_pending();
+        }
     }
 
     pub(super) fn observe(&mut self, bytes: &[u8]) {
         for &byte in bytes {
-            self.escape = match self.escape {
+            let escape = std::mem::take(&mut self.escape);
+            self.escape = match escape {
                 Escape::Start => match byte {
-                    b'[' => Escape::Sequence,
+                    b'[' => Escape::Sequence(Vec::new()),
                     b'O' => Escape::Single,
                     b']' | b'P' | b'_' | b'^' => Escape::String { escape: false },
                     0x1b => Escape::Start,
                     _ => Escape::None,
                 },
-                Escape::Sequence if (0x40..=0x7e).contains(&byte) => Escape::None,
-                Escape::Sequence => Escape::Sequence,
-                Escape::Single => Escape::None,
+                Escape::Sequence(params) if (0x40..=0x7e).contains(&byte) => {
+                    self.observe_csi(&params, byte)
+                }
+                Escape::Sequence(mut params) => {
+                    if params.len() < 64 {
+                        params.push(byte);
+                    }
+                    Escape::Sequence(params)
+                }
+                Escape::Single => {
+                    if matches!(byte, b'A' | b'B' | b'C' | b'D' | b'H' | b'F') {
+                        self.degrade_if_pending();
+                    }
+                    Escape::None
+                }
+                Escape::X10Mouse(left) => {
+                    if left <= 1 {
+                        Escape::None
+                    } else {
+                        Escape::X10Mouse(left - 1)
+                    }
+                }
                 Escape::String { escape } => match byte {
                     0x07 => Escape::None,
                     b'\\' if escape => Escape::None,
@@ -302,13 +504,44 @@ impl Draft {
                 },
                 Escape::None => match byte {
                     0x1b => Escape::Start,
-                    b'\r' | b'\n' | 0x15 | 0x03 => {
-                        self.pending = false;
+                    b'\r' | b'\n' => {
+                        if self.in_paste {
+                            self.state = DraftState::Unknown;
+                        } else {
+                            self.clear();
+                        }
                         Escape::None
                     }
-                    0x7f | 0x08 => Escape::None,
-                    0x09 | 0x20.. => {
-                        self.pending = true;
+                    0x15 | 0x03 => {
+                        if !self.in_paste {
+                            self.clear();
+                        }
+                        Escape::None
+                    }
+                    0x7f | 0x08 => {
+                        self.backspace();
+                        Escape::None
+                    }
+                    0x09 => {
+                        self.state = DraftState::Unknown;
+                        Escape::None
+                    }
+                    // Line-editing / cursor-movement control keys (Ctrl-A/B/E/F/K/W).
+                    0x01 | 0x02 | 0x05 | 0x06 | 0x0b | 0x17 => {
+                        self.degrade_if_pending();
+                        Escape::None
+                    }
+                    0x20..=0x7e | 0xc0..=0xff => {
+                        self.push_char();
+                        Escape::None
+                    }
+                    // UTF-8 continuation bytes: already counted on the leading byte.
+                    0x80..=0xbf => {
+                        if self.in_paste {
+                            self.state = DraftState::Unknown;
+                        } else if matches!(self.state, DraftState::Empty) {
+                            self.state = DraftState::Exact(1);
+                        }
                         Escape::None
                     }
                     _ => Escape::None,
@@ -316,6 +549,12 @@ impl Draft {
             };
         }
     }
+}
+
+/// Whether `keys` is a single menu/dialog selection key (1–9, y/n, Space) that
+/// answers an on-screen prompt rather than starting a composer draft.
+pub(super) fn is_modal_choice_key(keys: &[u8]) -> bool {
+    matches!(keys, [b'1'..=b'9' | b'y' | b'Y' | b'n' | b'N' | b' '])
 }
 
 #[cfg(test)]
@@ -445,6 +684,105 @@ mod tests {
         draft.observe("é".as_bytes());
         assert!(draft.pending());
         draft.observe(b"\x03");
+        assert!(!draft.pending());
+    }
+
+    #[test]
+    fn x10_mouse_reports_do_not_set_a_false_draft() {
+        let mut draft = Draft::default();
+        // X10 mouse press + release (including bytes >= 0x20, split across frames).
+        draft.observe(b"\x1b[M !\"");
+        assert!(!draft.pending(), "X10 mouse click must not set draft");
+        draft.observe(b"\x1b[M");
+        draft.observe(b"#");
+        draft.observe(b"ab");
+        assert!(
+            !draft.pending(),
+            "split X10 mouse report must not set draft"
+        );
+        // SGR mouse reports also stay clear.
+        draft.observe(b"\x1b[<0;21;4M\x1b[<0;21;4m");
+        assert!(!draft.pending());
+    }
+
+    #[test]
+    fn kitty_and_modify_other_keys_enter_clear_and_protect_drafts() {
+        let mut draft = Draft::default();
+        // Plain text submitted via Kitty Enter variants clears the draft.
+        for enter in [
+            b"\x1b[13u".as_slice(),
+            b"\x1b[13;1u",
+            b"\x1b[13;1:1u",
+            b"\x1b[57414u",
+            b"\x1b[27;1;13~",
+        ] {
+            draft.observe(b"hello");
+            assert!(draft.pending());
+            draft.observe(enter);
+            assert!(!draft.pending(), "enter {enter:?} must clear draft");
+        }
+        // Shift+Enter / Alt+Enter keep a multi-line draft protected, and a key
+        // release event (:3) must not clear a real draft.
+        draft.observe(b"line1");
+        draft.observe(b"\x1b[13;2u");
+        assert!(draft.pending(), "Shift+Enter must preserve draft");
+        draft.observe(b"\x1b[13;1:3u");
+        assert!(draft.pending(), "Enter key-release must not clear draft");
+        // Kitty Ctrl-U and Ctrl-C clear it.
+        draft.observe(b"\x1b[117;5u");
+        assert!(!draft.pending(), "Kitty Ctrl-U must clear draft");
+        draft.observe(b"again");
+        draft.observe(b"\x1b[99;5u");
+        assert!(!draft.pending(), "Kitty Ctrl-C must clear draft");
+        draft.observe(b"again");
+        draft.observe(b"\x1b[27;5;117~");
+        assert!(!draft.pending(), "modifyOtherKeys Ctrl-U must clear draft");
+
+        // Kitty capability report and key release never set a false draft;
+        // Kitty printable key press protects a real draft.
+        draft.observe(b"\x1b[?31u\x1b[97;1:3u");
+        assert!(!draft.pending());
+        draft.observe(b"\x1b[97u");
+        assert!(draft.pending(), "Kitty printable press must protect draft");
+        draft.observe(b"\x1b[127u");
+        assert!(
+            !draft.pending(),
+            "Kitty Backspace back to empty clears draft"
+        );
+    }
+
+    #[test]
+    fn backspacing_plain_typing_to_empty_recovers_while_partial_or_moved_draft_stays_protected() {
+        let mut draft = Draft::default();
+        draft.observe(b"abc");
+        assert!(draft.pending());
+        draft.observe(b"\x7f");
+        assert!(draft.pending(), "partial backspace leaves 'ab' protected");
+        draft.observe(b"\x7f\x7f");
+        assert!(!draft.pending(), "backspacing all typed chars clears draft");
+
+        // Multi-byte UTF-8 characters count per character, not per byte.
+        draft.observe("你好".as_bytes());
+        assert!(draft.pending());
+        draft.observe(b"\x7f");
+        assert!(draft.pending(), "one character left");
+        draft.observe(b"\x7f");
+        assert!(!draft.pending(), "both characters deleted");
+
+        // Cursor movement degrades exact counting so deleting at col 0 cannot
+        // falsely clear text still to the right of the cursor.
+        draft.observe(b"abc");
+        draft.observe(b"\x1b[D");
+        draft.observe(b"\x7f\x7f\x7f");
+        assert!(draft.pending(), "cursor-moved draft stays protected");
+        draft.observe(b"\x15");
+        assert!(!draft.pending());
+
+        // Multi-line bracketed paste ending in a newline stays protected until
+        // submitted outside the paste.
+        draft.observe(b"\x1b[200~line1\nline2\n\x1b[201~");
+        assert!(draft.pending(), "pasted newline must not clear draft");
+        draft.observe(b"\r");
         assert!(!draft.pending());
     }
 }

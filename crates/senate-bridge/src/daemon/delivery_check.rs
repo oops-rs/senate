@@ -233,6 +233,14 @@ fn seqs_in_words(seqs: &[Seq], locale: Locale) -> String {
     }
 }
 
+/// Recheck cadence once a blocked message has passed `stuck_after`.
+fn blocked_recheck(why: Why, after: Duration) -> Duration {
+    match why {
+        Why::Draft | Why::Prompt => RECHECK.min(after),
+        _ => after,
+    }
+}
+
 /// `45s`, `12m`, `3h`: the largest whole unit.
 fn span(d: Duration) -> String {
     crate::sessions::short(d.as_secs())
@@ -584,6 +592,9 @@ impl Shared {
 
     /// Held back for a reason a person must clear: told once what waits
     /// has waited [`CheckTiming::stuck_after`], looked at again meanwhile.
+    /// Once a draft or prompt block has been reported, keep rechecking at
+    /// [`RECHECK`] so clearing the terminal resumes delivery promptly rather
+    /// than stalling for another full `stuck_after` window.
     async fn blocked(
         &self,
         session: &Session,
@@ -594,7 +605,7 @@ impl Shared {
         let after = self.timing.check.stuck_after;
         if longest >= after {
             self.tell_stuck(session, why, rows, longest).await;
-            Some(Instant::now() + after)
+            Some(Instant::now() + blocked_recheck(why, after))
         } else {
             Some(Instant::now() + RECHECK.min(after - longest))
         }
@@ -1113,5 +1124,18 @@ mod tests {
             through_body(&agent, &[Seq(4), Seq(7)], false, Locale::En),
             "[senate] [senator::agy-7c1d] has now taken seq 4 and 7 at its prompt."
         );
+    }
+
+    #[test]
+    fn blocked_draft_and_prompt_recheck_promptly_after_stuck_after() {
+        let five_min = Duration::from_secs(300);
+        assert_eq!(blocked_recheck(Why::Draft, five_min), RECHECK);
+        assert_eq!(blocked_recheck(Why::Prompt, five_min), RECHECK);
+        assert_eq!(
+            blocked_recheck(Why::Draft, Duration::from_secs(3)),
+            Duration::from_secs(3)
+        );
+        assert_eq!(blocked_recheck(Why::NotHosted, five_min), five_min);
+        assert_eq!(blocked_recheck(Why::OldHost, five_min), five_min);
     }
 }

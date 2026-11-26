@@ -928,4 +928,43 @@ mod tests {
         assert!(Viewer::lock(&viewer).draft.pending());
         Ok(())
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn answering_a_prompt_choice_does_not_leave_a_false_draft() -> anyhow::Result<()> {
+        let (pty, pts) = pty_process::open()?;
+        let mut slave = std::fs::File::from(rustix::io::dup(&pts)?);
+        let flags = rustix::fs::fcntl_getfl(&slave)?;
+        rustix::fs::fcntl_setfl(&slave, flags | rustix::fs::OFlags::NONBLOCK)?;
+        let (_, write) = pty.into_split();
+        let tty = Tty::new(write, Scheme::Light, 24, 80);
+        let viewer = Mutex::new(Viewer {
+            path: PathBuf::new(),
+            activity: ViewerActivity::default(),
+            dirty: false,
+            draft: input::Draft::default(),
+        });
+        let cursor = Mutex::new(input::CursorQueries::default());
+        let mut classify = input::Input::default();
+        let (mut server, mut client) = UnixStream::pair()?;
+        let now = 100_000_000_000;
+
+        // A choice menu is on screen; answering it with `1` must not set a draft.
+        tty.screen
+            .output(b"Allow this command?\r\n\xe2\x9d\xaf 1. Yes\r\n  2. No\r\n");
+        forward_keys(&tty, &viewer, &cursor, &mut classify, b"1").await?;
+        assert!(
+            !Viewer::lock(&viewer).draft.pending(),
+            "answering an on-screen choice must not leave a stale draft"
+        );
+
+        // Once the modal clears and the quiet window passes, the wake succeeds.
+        tty.screen.output(b"\x1b[2J\x1b[H> ");
+        tty.screen.set_last_output(now - 60_000_000_000);
+        Viewer::lock(&viewer).activity.input_at = now - 60_000_000_000;
+        wake_once(&mut server, &viewer, &tty, Duration::from_secs(10), || now).await;
+        assert_eq!(reply(&mut client).await?, (NUDGED, None));
+        let mut buf = [0; 64];
+        assert!(slave.read(&mut buf).unwrap_or(0) > 0);
+        Ok(())
+    }
 }
