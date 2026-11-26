@@ -288,6 +288,10 @@ def setup(fx: Fixture, args: argparse.Namespace) -> None:
     config = fx.senate_home / "senate.toml"
     text = re.sub(r'(?m)^listen = ".*"$', f'listen = "127.0.0.1:{free_port()}"', config.read_text())
     text += f'\n[companion]\nclaude_bin = "{fx.tui}"\n'
+    # The fixture's questions and waiting prompts are addressed to its
+    # person: without this the daemon posts each as a desktop notification
+    # on the machine the benchmark runs on.
+    text += "\n[notify]\ndesktop = false\n"
     config.write_text(text)
     fx.helper.write_text(HOOK_HELPER)
     fx.tui.write_text(

@@ -36,7 +36,9 @@ def survives(bin_dir: Path, stack_kib: int) -> bool:
         text = config.read_text().replace(
             'listen = "127.0.0.1:7979"', f'listen = "127.0.0.1:{bench.free_port()}"'
         )
-        config.write_text(text + f'\n[companion]\nclaude_bin = "{fx.tui}"\n')
+        config.write_text(
+            text + f'\n[companion]\nclaude_bin = "{fx.tui}"\n\n[notify]\ndesktop = false\n'
+        )
         fx.helper.write_text(bench.HOOK_HELPER)
         fx.tui.write_text(
             bench.FAKE_TUI.replace("__SENATE__", str(fx.senate))
