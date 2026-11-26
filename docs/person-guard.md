@@ -43,7 +43,10 @@ for Speaker-level operations. User-writable transcript files
 retain their filesystem access policy. Routine IPC reads and routine person
 commands—including timelines, history, search, committee threads, session
 lifecycle, aliases, seats, and local attach—use the terminal-origin proof
-without an authentication prompt.
+without an authentication prompt. From an SSH login the routine person
+writes among them (writable attach, session lifecycle, aliases, seats,
+cards, revocations, secretary removal) stay refused, as they were on the
+presence path; reads and the read-only viewer remain available.
 
 | Policy target | Hosted lineage | Routine caller checks | Speaker-level requests | Hooks |
 | --- | --- | --- | --- | --- |

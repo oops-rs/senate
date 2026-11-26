@@ -7299,6 +7299,12 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                 match decoded {
                     Ok(_) if let Some(error) = identity_refusal => (Reply::err(error), false),
                     Ok(request)
+                        if remote_operator && approval_guard::refused_behind_ssh(&request) =>
+                    {
+                        tracing::warn!("refused a person write from behind SSH");
+                        (Reply::err(approval_guard::behind_ssh_refusal()), false)
+                    }
+                    Ok(request)
                         if crate::app_confirmation::required(&request)
                             && !approval_guard::advisory_host_action(&request)
                             && (!fixture

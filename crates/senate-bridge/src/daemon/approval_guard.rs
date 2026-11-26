@@ -350,6 +350,45 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
     }
 }
 
+/// Why a caller behind SSH is refused a person write.
+pub(super) const BEHIND_SSH: &str = "From an SSH login Senate serves reads only. Run this from a terminal or the Senate app on the hosting Mac";
+
+/// A person write that a caller behind SSH (a `RemoteOperator` proof) is
+/// refused: the routine person commands that left the user-presence path,
+/// which refused them behind SSH, keep that refusal. Reads, the read-only
+/// viewer among them, stay open to SSH as `docs/person-guard.md` says.
+pub(crate) fn refused_behind_ssh(request: &Request) -> bool {
+    let moved = match request {
+        Request::OpenViewer { writable, .. } => *writable,
+        Request::Attach { .. }
+        | Request::Stop { .. }
+        | Request::Restore { .. }
+        | Request::Replace { .. }
+        | Request::Pause { .. }
+        | Request::Resume { .. }
+        | Request::RestartHost { .. }
+        | Request::PruneHosts
+        | Request::SessionForget { .. }
+        | Request::RebindHost { .. }
+        | Request::SetAlias { .. }
+        | Request::RemoveAlias { .. }
+        | Request::SetCommitteeSeat { .. }
+        | Request::SetCard { .. }
+        | Request::ObserveAdmin { .. }
+        | Request::DeskWorker { .. }
+        | Request::Secretaries { .. } => true,
+        _ => false,
+    };
+    // A session selector (a hosted chair stopping its member) and a list are
+    // not person writes; Speaker-level ones are refused on their own path.
+    moved && request_effect(request) == RequestEffect::Operator
+}
+
+/// The refusal for [`refused_behind_ssh`].
+pub(crate) fn behind_ssh_refusal() -> IpcError {
+    refusal(BEHIND_SSH)
+}
+
 fn routine_operator_action(request: &Request) -> bool {
     // Observe, cards, history deletion, host repair/restart, aliases, seats and
     // desk-worker admin exercise the actual caller check in disposable fixtures too.
@@ -1560,6 +1599,39 @@ mod tests {
             let guidance = person_only(request)
                 .unwrap_or_else(|| panic!("expected person_only guidance for {request:?}"));
             check_refusal_text(guidance, request);
+            // Off the presence path, which refused SSH, but still refused
+            // from behind SSH, except the read-only viewer.
+            let read_only = matches!(
+                request,
+                Request::OpenViewer {
+                    writable: false,
+                    ..
+                }
+            );
+            assert_eq!(
+                refused_behind_ssh(request),
+                !read_only,
+                "SSH refusal for {request:?}"
+            );
+        }
+        // Reads, a session's own card and a list stay open to SSH.
+        for request in [
+            Request::Secretaries {
+                session: person.clone(),
+                action: ipc::SecretaryOp::List,
+                for_: None,
+                secretary: None,
+            },
+            Request::CleanupPlan {
+                scope: crate::cleanup::Scope::default(),
+            },
+            Request::SetCard {
+                session: hosted_session.clone(),
+                target: ipc::CardTarget::Own,
+                document: "{}".into(),
+            },
+        ] {
+            assert!(!refused_behind_ssh(&request), "{request:?}");
         }
 
         // Session-owned card writes stay SessionOrRead and prompt-free.
