@@ -30,6 +30,8 @@ mod queue {
 
     const CAPACITY: usize = 16;
     const APP_RECENCY: Duration = Duration::from_secs(5);
+    /// The most a prompt's display text runs to.
+    const DISPLAY_LIMIT: usize = 16 * 1024;
 
     #[derive(Default)]
     pub(crate) struct Queue {
@@ -115,9 +117,18 @@ mod queue {
                 }
             }
             let display = format!("{reason}\n\n{escaped}");
-            if display.len() > 16 * 1024 {
-                return Err(EnqueueError::RequestTooLarge);
-            }
+            // The request dump is detail for an app that shows it; the reason
+            // is what the person approves. A request too large to show (a
+            // cleanup plan of a whole Senate) is shown by its reason alone,
+            // never refused for its size.
+            let display = if display.len() > DISPLAY_LIMIT {
+                format!(
+                    "{reason}\n\n(the request, {} bytes, is too large to show here)",
+                    escaped.len()
+                )
+            } else {
+                display
+            };
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             let now = Instant::now();
             state.expire(now);
@@ -243,6 +254,34 @@ mod queue {
                 .unwrap()
                 .created -= LIFETIME;
             assert!(!queue.respond(&expired.id, true));
+        }
+
+        #[test]
+        fn a_request_too_large_to_show_is_shown_by_its_reason() {
+            // A whole Senate's cleanup plan runs to about 100 KB.
+            let queue = Arc::new(Queue::default());
+            queue.poll();
+            let big = Request::SetCard {
+                session: Default::default(),
+                target: crate::ipc::CardTarget::Own,
+                document: "x".repeat(100_000),
+            };
+            let mut ticket = queue
+                .enqueue(big, "Senate cleanup: unseat 110")
+                .expect("a large request is still put to the app");
+            let prompt = queue.poll().pop().expect("the app sees it");
+            assert!(
+                prompt.display.len() <= DISPLAY_LIMIT,
+                "{}",
+                prompt.display.len()
+            );
+            assert!(prompt.display.starts_with("Senate cleanup: unseat 110"));
+            assert_eq!(prompt.reason, "Senate cleanup: unseat 110");
+            assert!(queue.respond(&ticket.id, true));
+            assert!(matches!(
+                ticket.reply.try_recv(),
+                Ok(Some(ConfirmedRequest(Request::SetCard { .. })))
+            ));
         }
     }
 }
