@@ -489,7 +489,15 @@ impl<S: Sink> Driver<S> {
                         match stream.next().await {
                             Ok(Some(event)) => {
                                 let fx = self.model().apply(event);
-                                self.changed();
+                                // A line that only says what to read again
+                                // changes nothing to show: the read's own
+                                // `changed` follows it. The daemon sends
+                                // `sessions` on every hook of every session,
+                                // and each built a snapshot to find it was
+                                // the one the app has.
+                                if fx.touched {
+                                    self.changed();
+                                }
                                 self.effects(fx);
                             }
                             Ok(None) => break Offline::Closed,
@@ -555,6 +563,7 @@ impl<S: Sink> Driver<S> {
         let fx = Effects {
             refresh,
             notices: Vec::new(),
+            touched: false,
         };
         let this = Arc::clone(self);
         tokio::spawn(async move {

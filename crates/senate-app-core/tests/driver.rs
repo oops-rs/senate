@@ -509,6 +509,55 @@ async fn reconnect_now_cuts_a_long_wait_short() {
 /// Changes that come faster than [`PUBLISH_EVERY`] share snapshots: the sink
 /// is handed the model at most that often, and always as the last change
 /// left it.
+/// A line that only says what to read again (`sessions`, on every hook of
+/// every session) hands the sink nothing itself: the read it sets off
+/// does, when it comes back.
+#[tokio::test]
+async fn a_line_that_only_asks_for_a_read_hands_over_nothing_itself() {
+    use senate_bridge::ipc::{Request, WatchEvent};
+
+    let (_dir, socket, world) = setup();
+    world.lock().unwrap().sessions = common::hosted_sessions();
+    let daemon = FakeDaemon::start(&socket, Arc::clone(&world));
+    let (driver, sink) = driver(&socket, Locale::En);
+    until(&driver, "everything read", |s| {
+        s.online && s.inbox.len() == 2 && s.sessions.len() == 2
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let handed = || sink.handed.lock().unwrap().0.len();
+    let reads = || {
+        daemon
+            .requests()
+            .iter()
+            .filter(|r| matches!(r, Request::Sessions))
+            .count()
+    };
+
+    // Forty lines, 50 ms apart: further apart than two snapshots may be,
+    // so each line that marked the model would get one of its own.
+    let (before, reads_before) = (handed(), reads());
+    for _ in 0..40 {
+        daemon.emit(WatchEvent::Sessions);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let read = reads() - reads_before;
+    assert!(read >= 2, "{read} reads of the sessions");
+    assert!(
+        handed() - before <= read,
+        "{} snapshots for {read} reads",
+        handed() - before
+    );
+
+    // A line that changes the model still hands it over.
+    let before = handed();
+    let status = world.lock().unwrap().status.clone();
+    daemon.emit(WatchEvent::Status(Box::new(status)));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(handed() > before);
+}
+
 #[tokio::test]
 async fn changes_in_a_burst_share_snapshots_and_the_last_one_is_the_latest() {
     let (_dir, socket, world) = setup();

@@ -133,7 +133,9 @@ fn session_start_hook(root: &Path, home: &Path, session: &str, cwd: &Path) -> St
 #[allow(unsafe_code)]
 async fn sessions_from_0_12_3_keep_working_after_the_upgrade_and_rollback_can_open_the_home() {
     // Set before any thread reads the environment: this test binary holds
-    // this one test, and the daemon starts below.
+    // this one test, and the daemon starts below. That is why this file is
+    // a binary of its own and not a module of `suite`: there the variable
+    // would reach every other test's daemon.
     unsafe { std::env::set_var(testenv::STRICT_IDENTITY_ENV, "1") };
     let mut h = Harness::new().await;
     let root = h.dir.path().to_path_buf();

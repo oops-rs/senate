@@ -1914,9 +1914,9 @@ pub fn fast_timing() -> Timing {
         retry_base: Duration::from_millis(400),
         retry_max: Duration::from_secs(1),
         // No Speaker here: these tests model a bridge whose roots are never
-        // judged, so nothing waits. `tests/tasks.rs` turns the wait on.
+        // judged, so nothing waits. `tests/suite/tasks.rs` turns the wait on.
         triage_wait: Duration::ZERO,
-        // Off unless a test turns it on (`tests/checkpoint.rs`).
+        // Off unless a test turns it on (`tests/suite/checkpoint.rs`).
         checkpoint_poll: Duration::from_secs(3600),
         checkpoint_interval: Duration::from_secs(7200),
         // The delivery check at test speed: a wake once a TUI has been

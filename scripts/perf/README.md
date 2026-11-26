@@ -73,7 +73,7 @@ first. `--all` prints every plan.
 
 ```sh
 scripts/perf/stack_depth.py                      # the optimised daemon
-RUST_MIN_STACK=1048576 cargo test -p senate-bridge --test hosted   # the debug build, half the usual stack
+RUST_MIN_STACK=1048576 cargo test -p senate-bridge --test suite hosted::   # the debug build, half the usual stack
 ```
 
 The first starts the daemon with smaller and smaller thread stacks and asks
