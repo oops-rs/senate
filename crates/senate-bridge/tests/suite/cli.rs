@@ -607,7 +607,10 @@ fn install_sets_up_codex_in_its_config_toml() {
         "{text}"
     );
     assert!(
-        text.contains(&format!("+ mcp_servers.senate: {} mcp", exe.display())),
+        text.contains(&format!(
+            "+ mcp_servers.senate: {} mcp --runtime codex",
+            exe.display()
+        )),
         "{text}"
     );
     assert!(

@@ -4,7 +4,7 @@
 //! ```toml
 //! [mcp_servers.senate]
 //! command = "<abs exe>"
-//! args = ["mcp"]
+//! args = ["mcp", "--runtime", "codex"]
 //! default_tools_approval_mode = "approve"
 //!
 //! [[hooks.SessionStart]]
@@ -144,10 +144,13 @@ pub fn merge(doc: &mut DocumentMut, exe: &str) -> Result<Vec<String>, String> {
             .map(str::to_string)
             .collect()
     });
-    let want = format!("{} mcp", shell_quote(exe));
-    if command.as_deref() != Some(exe) || args.as_deref() != Some(&["mcp".to_string()][..]) {
+    let want_args = ["mcp", "--runtime", "codex"];
+    let want = format!("{} mcp --runtime codex", shell_quote(exe));
+    if command.as_deref() != Some(exe)
+        || args.as_deref() != Some(&want_args.map(str::to_string)[..])
+    {
         server.insert("command", value(exe));
-        server.insert("args", value(Array::from_iter(["mcp"])));
+        server.insert("args", value(Array::from_iter(want_args)));
         changes.push(if present {
             format!(
                 "~ mcp_servers.{SERVER_NAME}: {} {}  →  {want}",
@@ -589,7 +592,7 @@ trusted_hash = "sha256:abc"
         );
         assert_eq!(
             parsed["mcp_servers"]["senate"]["args"],
-            toml::Value::Array(vec!["mcp".into()])
+            toml::Value::Array(vec!["mcp".into(), "--runtime".into(), "codex".into()])
         );
         assert_eq!(
             parsed["mcp_servers"]["senate"]["default_tools_approval_mode"].as_str(),
@@ -641,7 +644,7 @@ trusted_hash = "sha256:abc"
     fn senate_tools_are_approved_once_and_a_dry_run_shows_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let original = "[mcp_servers.senate]\ncommand = \"/opt/bin/senate\"\nargs = [\"mcp\"]\n\
+        let original = "[mcp_servers.senate]\ncommand = \"/opt/bin/senate\"\nargs = [\"mcp\", \"--runtime\", \"codex\"]\n\
                         default_tools_approval_mode = \"prompt\"\nstartup_timeout_sec = 20\n";
         std::fs::write(&path, original).unwrap();
         // The dry run names the change and writes nothing.
@@ -699,6 +702,29 @@ trusted_hash = "sha256:abc"
             Some("/opt/bin/senate hook session-start --runtime codex")
         );
         assert!(merge(&mut doc, EXE).unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_mcp_args_are_migrated_to_explicit_codex_runtime() {
+        let mut doc: DocumentMut =
+            "[mcp_servers.senate]\ncommand = \"/opt/bin/senate\"\nargs = [\"mcp\"]\n\
+             default_tools_approval_mode = \"approve\"\nstartup_timeout_sec = 20\n"
+                .parse()
+                .unwrap();
+        let changes = merge(&mut doc, EXE).unwrap();
+        assert_eq!(
+            changes[0],
+            "~ mcp_servers.senate: /opt/bin/senate mcp  →  /opt/bin/senate mcp --runtime codex"
+        );
+        let parsed: toml::Value = toml::from_str(&doc.to_string()).unwrap();
+        assert_eq!(
+            parsed["mcp_servers"]["senate"]["args"],
+            toml::Value::Array(vec!["mcp".into(), "--runtime".into(), "codex".into()])
+        );
+        assert_eq!(
+            parsed["mcp_servers"]["senate"]["startup_timeout_sec"].as_integer(),
+            Some(20)
+        );
     }
 
     #[test]

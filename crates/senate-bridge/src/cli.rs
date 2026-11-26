@@ -4407,23 +4407,26 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
             init_logging("senate_bridge=warn");
             let paths = Paths::from_env()?;
             let locale = BridgeConfig::locale_at(&paths.config());
-            let agy = RuntimeFlag::chosen(flag, false, agy) == Some(Runtime::Agy);
-            let (harness, selector) = if agy {
-                (Runtime::Agy, SessionSelector::default())
-            } else if let Some(session_id) = acp_session {
-                anyhow::ensure!(
-                    Runtime::Acp.native_id(&session_id).is_some(),
-                    "invalid ACP session key"
-                );
-                (
-                    Runtime::Acp,
-                    SessionSelector {
-                        session_id: Some(session_id),
-                        claude_pid: None,
-                    },
-                )
-            } else {
-                (Runtime::Claude, mcp::selector_from_env())
+            let (harness, selector) = match RuntimeFlag::chosen(flag, false, agy) {
+                Some(Runtime::Agy) => (Runtime::Agy, SessionSelector::default()),
+                Some(Runtime::Codex) => (Runtime::Codex, SessionSelector::default()),
+                _ => {
+                    if let Some(session_id) = acp_session {
+                        anyhow::ensure!(
+                            Runtime::Acp.native_id(&session_id).is_some(),
+                            "invalid ACP session key"
+                        );
+                        (
+                            Runtime::Acp,
+                            SessionSelector {
+                                session_id: Some(session_id),
+                                claude_pid: None,
+                            },
+                        )
+                    } else {
+                        (Runtime::Claude, mcp::selector_from_env())
+                    }
+                }
             };
             runtime(false)?.block_on(mcp::serve_stdio(paths.socket(), selector, locale, harness))
         }

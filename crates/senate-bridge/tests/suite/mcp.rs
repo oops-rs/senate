@@ -119,6 +119,50 @@ impl McpClient {
         c
     }
 
+    /// Connect using MCP 2026-07-28 stateless discovery (`server/discover`
+    /// with per-request `_meta`, no `initialize` handshake), as Codex 0.172+
+    /// negotiates with rmcp 3.x.
+    async fn start_discover(
+        daemon_socket: PathBuf,
+        selector: SessionSelector,
+        runtime: Runtime,
+        client_name: Option<&str>,
+    ) -> Self {
+        let (client, server) = tokio::io::duplex(1 << 20);
+        tokio::spawn(async move {
+            let mcp = SenateMcp::new(daemon_socket, selector)
+                .with_locale(Locale::En)
+                .with_pins(senate_bridge::mcp::Pins {
+                    runtime,
+                    ..Default::default()
+                });
+            let running = mcp.clone().serve(server).await.unwrap();
+            let roles = tokio::spawn(mcp.follow_roles(running.peer().clone()));
+            let _ = running.waiting().await;
+            roles.abort();
+        });
+        let (r, w) = tokio::io::split(client);
+        let mut c = Self {
+            lines: BufReader::new(r).lines(),
+            writer: w,
+            next_id: 1,
+            list_changes: 0,
+        };
+        let discover = c
+            .request(
+                "server/discover",
+                json!({ "_meta": discover_meta(client_name) }),
+            )
+            .await;
+        assert!(
+            discover["supportedVersions"]
+                .as_array()
+                .is_some_and(|v| v.iter().any(|ver| ver == "2026-07-28")),
+            "{discover}"
+        );
+        c
+    }
+
     async fn send(&mut self, v: Value) {
         let mut line = v.to_string();
         line.push('\n');
@@ -2330,6 +2374,437 @@ async fn memory_search_shows_what_the_committee_knows_with_its_sources() {
         text.contains("Nothing refund-v2 remembers matches"),
         "{text}"
     );
+    h.stop().await;
+}
+
+fn discover_meta(client_name: Option<&str>) -> Value {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "io.modelcontextprotocol/protocolVersion".into(),
+        json!("2026-07-28"),
+    );
+    meta.insert(
+        "io.modelcontextprotocol/clientCapabilities".into(),
+        json!({}),
+    );
+    if let Some(name) = client_name {
+        meta.insert(
+            "io.modelcontextprotocol/clientInfo".into(),
+            json!({"name": name, "version": "0.172.0"}),
+        );
+    }
+    Value::Object(meta)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn codex_discover_exposes_desk_and_spawn_tools_for_secretary_and_refuses_ordinary_agent() {
+    use senate_bridge::daemon::{DaemonOptions, start_with_host_binary};
+    use senate_bridge::ipc::{self, HookReply, HostedRuntime, SpawnReply, StopReply};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut h = Harness::new().await;
+    h.dir = tempfile::tempdir_in("/tmp").unwrap();
+    h.paths = senate_bridge::Paths::new(h.dir.path().join("senate"));
+    h.paths.ensure_home().unwrap();
+    let program = h.dir.path().join("fixture-tui");
+    std::fs::write(
+        &program,
+        "#!/bin/sh\nwhile [ -d \"$PWD\" ]; do sleep 0.1; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        h.paths.config(),
+        format!(
+            "[companion]\nclaude_bin = {:?}\n",
+            program.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    h.daemon = Some(
+        start_with_host_binary(
+            DaemonOptions {
+                paths: h.paths.clone(),
+                config: h.config.clone(),
+                timing: fast_timing(),
+                desktop: None,
+            },
+            env!("CARGO_BIN_EXE_senate").into(),
+        )
+        .await
+        .unwrap(),
+    );
+
+    let project = h.workdir("other-proj", None);
+    let office_dir = h.workdir("office-proj", Some("office"));
+    // Seed a hosted chair on `other`, then stop it so it needs restoring.
+    let chair: SpawnReply = ipc::request(
+        &h.socket(),
+        &Request::Spawn {
+            attempt_id: None,
+            session: Default::default(),
+            runtime: Some(HostedRuntime::Claude),
+            profile: None,
+            committee: "other".parse().unwrap(),
+            alias: Some(path("main")),
+            cwd: project.clone(),
+            chair: false,
+            secretary: false,
+            prompt: None,
+            model: Default::default(),
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    let _: StopReply = ipc::request(
+        &h.socket(),
+        &Request::Stop {
+            session: Default::default(),
+            senator: "other::main".parse().unwrap(),
+            force: false,
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        h.store().session(&chair.session_id).unwrap().unwrap().state,
+        senate_bridge::SessionState::Ended
+    );
+
+    // Register an existing/resumed Codex secretary and an ordinary fresh Codex
+    // session on `office`.
+    let codex_hook = |id: &str, source: &str| {
+        Request::SessionHook(
+            serde_json::from_value(json!({
+                "event": "session_start",
+                "runtime": "codex",
+                "session_id": id,
+                "cwd": office_dir,
+                "committee_file": "office",
+                "source": source,
+            }))
+            .unwrap(),
+        )
+    };
+    let _: HookReply = ipc::request(
+        &h.socket(),
+        &codex_hook("sec-resumed", "resume"),
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+    let _: HookReply = ipc::request(
+        &h.socket(),
+        &codex_hook("ordinary-fresh", "startup"),
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
+
+    let sec_agent = path("codex-sec-resumed");
+    {
+        let mut server = h.server.state.inner.lock().unwrap();
+        server.chair = Some((chair.senator.clone(), true));
+        server
+            .roster
+            .name_speaker(Some(path("alice").into()))
+            .unwrap();
+        server
+            .roster
+            .set_secretaries(path("alice"), vec![sec_agent.clone()])
+            .unwrap();
+    }
+    let _: Value = ipc::request(&h.socket(), &Request::Status, WAIT, WAIT)
+        .await
+        .unwrap();
+
+    // 1. Legacy Codex config (`args = ["mcp"]` -> default Runtime::Claude) over
+    // MCP 2026-07-28 `server/discover`: `tools/list` carries no threadId and
+    // no `initialize` happened, so client identity comes from `_meta`.
+    let mut codex = McpClient::start_discover(
+        h.socket(),
+        SessionSelector::default(),
+        Runtime::Claude,
+        Some("codex-mcp-client"),
+    )
+    .await;
+    let listed = codex
+        .request(
+            "tools/list",
+            json!({ "_meta": discover_meta(Some("codex-mcp-client")) }),
+        )
+        .await;
+    let tools = listed["tools"].as_array().unwrap();
+    let desc = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing from Codex discover tools/list"))
+            ["description"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    for name in senate_bridge::mcp::PRESIDING_TOOLS {
+        assert!(desc(name).starts_with("If you work the Speaker's desk: "));
+    }
+    for name in senate_bridge::mcp::CHAIR_TOOLS {
+        assert!(desc(name).starts_with("If you chair this committee: "));
+    }
+    let spawn_desc = desc("spawn");
+    assert!(
+        spawn_desc.starts_with("If you work the Speaker's desk or chair this committee: "),
+        "{spawn_desc}"
+    );
+    assert!(
+        spawn_desc.contains("restore a recorded local senator's session"),
+        "{spawn_desc}"
+    );
+    assert!(
+        !spawn_desc.contains(
+            "restoring a hosted session, or stopping its terminal requires local presence"
+        ),
+        "{spawn_desc}"
+    );
+
+    // 2. Explicit `senate mcp --runtime codex` also exposes the full tool set
+    // even when optional `clientInfo` is omitted from `_meta`.
+    let mut codex_explicit =
+        McpClient::start_discover(h.socket(), SessionSelector::default(), Runtime::Codex, None)
+            .await;
+    let explicit_listed = codex_explicit
+        .request("tools/list", json!({ "_meta": discover_meta(None) }))
+        .await;
+    let explicit_names: Vec<&str> = explicit_listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    for required in ["speaker_docket", "speaker_forward", "spawn", "chair_docket"] {
+        assert!(
+            explicit_names.contains(&required),
+            "{required} missing from explicit codex runtime list: {explicit_names:?}"
+        );
+    }
+
+    // 3. Non-Codex MCP 2026-07-28 client keeps role-filtered tool lists.
+    let mut non_codex_ordinary = McpClient::start_discover(
+        h.socket(),
+        selector("ordinary-fresh"),
+        Runtime::Claude,
+        Some("claude-code"),
+    )
+    .await;
+    let ordinary_names: Vec<String> = non_codex_ordinary
+        .request(
+            "tools/list",
+            json!({ "_meta": discover_meta(Some("claude-code")) }),
+        )
+        .await["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_owned))
+        .collect();
+    for forbidden in ["speaker_docket", "speaker_forward", "spawn", "chair_docket"] {
+        assert!(
+            !ordinary_names.iter().any(|n| n == forbidden),
+            "ordinary non-Codex client got {forbidden}: {ordinary_names:?}"
+        );
+    }
+    let mut non_codex_secretary = McpClient::start_discover(
+        h.socket(),
+        selector("sec-resumed"),
+        Runtime::Claude,
+        Some("claude-code"),
+    )
+    .await;
+    let sec_names: Vec<String> = non_codex_secretary
+        .request(
+            "tools/list",
+            json!({ "_meta": discover_meta(Some("claude-code")) }),
+        )
+        .await["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_owned))
+        .collect();
+    for expected in ["speaker_docket", "speaker_forward", "spawn"] {
+        assert!(
+            sec_names.iter().any(|n| n == expected),
+            "secretary non-Codex client missed {expected}: {sec_names:?}"
+        );
+    }
+    assert!(!sec_names.iter().any(|n| n == "chair_docket"));
+
+    // Queue a cross-committee implementation request on `office` meant for
+    // `other::chair` (mirroring office#101).
+    let queued = h.server.append(
+        NewEvent::new(
+            "office".parse().unwrap(),
+            Kind::Request,
+            Address::senator(&sec_agent),
+            "Please fix the regression on other.",
+        )
+        .to(Address::Speaker)
+        .with_meta(meta::INTENDED, json!("/senate::other::chair")),
+    );
+
+    let call_as = |thread_id: &str, name: &str, arguments: Value| {
+        let mut meta = discover_meta(Some("codex-mcp-client"));
+        meta.as_object_mut()
+            .unwrap()
+            .insert("threadId".into(), json!(thread_id));
+        json!({ "name": name, "arguments": arguments, "_meta": meta })
+    };
+    let text_of = |reply: &Value| {
+        reply["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    // Ordinary Codex agent is refused desk and restore calls on the shared server.
+    for (tool, args, expected) in [
+        (
+            "speaker_docket",
+            json!({}),
+            "does not work the Speaker's desk",
+        ),
+        (
+            "speaker_forward",
+            json!({"committee": "office", "seq": queued.seq.0}),
+            "does not work the Speaker's desk",
+        ),
+        (
+            "spawn",
+            json!({"action": "restore", "senator": "other::main"}),
+            "only the Speaker's office or this committee's chair",
+        ),
+    ] {
+        let reply = codex
+            .request("tools/call", call_as("ordinary-fresh", tool, args))
+            .await;
+        assert_eq!(reply["isError"], json!(true), "{tool}: {reply}");
+        assert!(
+            text_of(&reply).contains(expected),
+            "{tool}: {}",
+            text_of(&reply)
+        );
+    }
+
+    // Resumed Codex secretary sees the queued item, forwards it with Speaker
+    // attribution (`acted_by`), and restores the ended chair via `spawn`.
+    let docket = codex
+        .request(
+            "tools/call",
+            call_as("sec-resumed", "speaker_docket", json!({})),
+        )
+        .await;
+    assert_ne!(docket["isError"], json!(true), "{docket}");
+    let docket_text = text_of(&docket);
+    assert!(
+        docket_text.contains("Please fix the regression on other."),
+        "{docket_text}"
+    );
+
+    let forwarded = codex
+        .request(
+            "tools/call",
+            call_as(
+                "sec-resumed",
+                "speaker_forward",
+                json!({"committee": "office", "seq": queued.seq.0}),
+            ),
+        )
+        .await;
+    assert_ne!(forwarded["isError"], json!(true), "{forwarded}");
+    let other_events = h.server.events("other");
+    let relayed = other_events
+        .iter()
+        .find(|e| e.body == "Please fix the regression on other.")
+        .expect("forwarded request landed on other");
+    assert_eq!(relayed.from, Address::Speaker);
+    assert_eq!(relayed.meta.get(meta::ACTED_BY), Some(&json!(&sec_agent)));
+
+    let restored = codex
+        .request(
+            "tools/call",
+            call_as(
+                "sec-resumed",
+                "spawn",
+                json!({"action": "restore", "senator": "other::main"}),
+            ),
+        )
+        .await;
+    assert_ne!(restored["isError"], json!(true), "{restored}");
+    let restored_reply: SpawnReply = serde_json::from_str(&text_of(&restored)).unwrap();
+    assert_eq!(restored_reply.senator, chair.senator);
+    assert!(
+        h.store()
+            .session(&chair.session_id)
+            .unwrap()
+            .unwrap()
+            .is_live()
+    );
+    let restore_note = h
+        .server
+        .events("other")
+        .into_iter()
+        .find(|e| e.body.contains("restored") && e.body.contains(chair.senator.as_str()))
+        .expect("restore audit note recorded");
+    assert_eq!(restore_note.from, Address::Speaker);
+    assert_eq!(
+        restore_note.meta.get(meta::ACTED_BY),
+        Some(&json!(&sec_agent))
+    );
+
+    // A fresh Codex session newly appointed to the desk uses the same
+    // already-opened shared `server/discover` server immediately.
+    let _: HookReply = ipc::request(&h.socket(), &codex_hook("sec-fresh", "startup"), WAIT, WAIT)
+        .await
+        .unwrap();
+    let fresh_agent = path("codex-sec-fresh");
+    h.server
+        .state
+        .inner
+        .lock()
+        .unwrap()
+        .roster
+        .set_secretaries(path("alice"), vec![sec_agent.clone(), fresh_agent])
+        .unwrap();
+    let _: Value = ipc::request(&h.socket(), &Request::Status, WAIT, WAIT)
+        .await
+        .unwrap();
+    let fresh_docket = codex
+        .request(
+            "tools/call",
+            call_as("sec-fresh", "speaker_docket", json!({})),
+        )
+        .await;
+    assert_ne!(fresh_docket["isError"], json!(true), "{fresh_docket}");
+
+    // Clean up the restored fixture host before stopping the harness.
+    let _: StopReply = ipc::request(
+        &h.socket(),
+        &Request::Stop {
+            session: Default::default(),
+            senator: "other::main".parse().unwrap(),
+            force: false,
+        },
+        WAIT,
+        WAIT,
+    )
+    .await
+    .unwrap();
     h.stop().await;
 }
 

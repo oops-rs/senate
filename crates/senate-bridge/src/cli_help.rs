@@ -219,6 +219,10 @@ mod tests {
             mcp(&["senate", "mcp", "--runtime", "agy"]),
             Some(Runtime::Agy)
         );
+        assert_eq!(
+            mcp(&["senate", "mcp", "--runtime", "codex"]),
+            Some(Runtime::Codex)
+        );
         assert_eq!(mcp(&["senate", "mcp", "--agy"]), Some(Runtime::Agy));
         assert_eq!(mcp(&["senate", "mcp"]), None);
     }
