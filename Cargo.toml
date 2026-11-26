@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.13.1"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -13,20 +13,20 @@ repository = "https://github.com/oops-rs/senate"
 # `workspace = true`.
 [workspace.dependencies]
 # Members, bottom of the stack first.
-senate-observe = { path = "crates/senate-observe", version = "0.13.1" }
-senate-observe-client = { path = "crates/senate-observe-client", version = "0.13.1" }
-senate-observe-protocol = { path = "crates/senate-observe-protocol", version = "0.13.1" }
-senate-scene = { path = "crates/senate-scene", version = "0.13.1" }
-senate-core = { path = "crates/senate-core", version = "0.13.1" }
-senate-markdown = { path = "crates/senate-markdown", version = "0.13.1" }
-senate-log = { path = "crates/senate-log", version = "0.13.1" }
-senate-server = { path = "crates/senate-server", version = "0.13.1" }
-senate-work = { path = "crates/senate-work", version = "0.13.1" }
-senate-speaker = { path = "crates/senate-speaker", version = "0.13.1" }
-senate-remote-admin = { path = "crates/senate-remote-admin", version = "0.13.1" }
-senate-bridge = { path = "crates/senate-bridge", version = "0.13.1", default-features = false }
-senate-app-core = { path = "crates/senate-app-core", version = "0.13.1" }
-senated = { path = "crates/senated", version = "0.13.1" }
+senate-observe = { path = "crates/senate-observe", version = "0.14.0" }
+senate-observe-client = { path = "crates/senate-observe-client", version = "0.14.0" }
+senate-observe-protocol = { path = "crates/senate-observe-protocol", version = "0.14.0" }
+senate-scene = { path = "crates/senate-scene", version = "0.14.0" }
+senate-core = { path = "crates/senate-core", version = "0.14.0" }
+senate-markdown = { path = "crates/senate-markdown", version = "0.14.0" }
+senate-log = { path = "crates/senate-log", version = "0.14.0" }
+senate-server = { path = "crates/senate-server", version = "0.14.0" }
+senate-work = { path = "crates/senate-work", version = "0.14.0" }
+senate-speaker = { path = "crates/senate-speaker", version = "0.14.0" }
+senate-remote-admin = { path = "crates/senate-remote-admin", version = "0.14.0" }
+senate-bridge = { path = "crates/senate-bridge", version = "0.14.0", default-features = false }
+senate-app-core = { path = "crates/senate-app-core", version = "0.14.0" }
+senated = { path = "crates/senated", version = "0.14.0" }
 senate-e2e = { path = "crates/senate-e2e" }
 
 # The agent harness behind the built-in Speaker. basis re-exports every
