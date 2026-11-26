@@ -883,6 +883,145 @@ async fn entries_kept_with_no_epoch_are_dropped_and_the_parents_log_read_again()
     world.stop().await;
 }
 
+/// A child Senate whose local log was wiped connects again under the same
+/// name: threads it already answered on the parent are not brought down
+/// again as unanswered desk items, while unanswered ones still arrive, and
+/// a later follow-up in a previously answered thread still crosses down and
+/// replies to the parent thread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wiped_child_log_does_not_replay_threads_it_already_answered_above() {
+    let world = team_above().await;
+    let dir1 = tempfile::tempdir().unwrap();
+    let mut desk1 = Desk::new(
+        dir1.path(),
+        "alice",
+        Locale::En,
+        &under(&world, "tok-alice", ""),
+    );
+    desk1.start().await;
+    assert_eq!(
+        desk1.wait_registration().await.registration,
+        Registration::Registered
+    );
+
+    let answered_q = ask_desk(&world, "Already answered before wipe").await;
+    let answered_root = on_desk(&desk1, "Already answered before wipe").await;
+    let top1 = desk1.senate();
+    speak(
+        &top1.url,
+        &top1.token,
+        &NewEvent::new(
+            refund(),
+            Kind::Answer,
+            person("alice"),
+            "Handled before wipe",
+        )
+        .to(Address::Committee)
+        .in_thread(answered_root.seq),
+    )
+    .await
+    .unwrap();
+    let up_answer = eventually_async("answer reaches parent", || async {
+        world
+            .events_of(&refund())
+            .await
+            .into_iter()
+            .find(|e| e.thread == Some(answered_q.seq) && e.body == "Handled before wipe")
+    })
+    .await;
+    assert_eq!(up_answer.from, alice_desk());
+
+    // Normal live operation: polling past our own answer above must neither
+    // duplicate it locally nor echo anything back up.
+    let unanswered_q = ask_desk(&world, "Still open before wipe").await;
+    on_desk(&desk1, "Still open before wipe").await;
+    let local_answers: Vec<senate_core::Event> = desk1
+        .events_of(&refund())
+        .await
+        .into_iter()
+        .filter(|e| e.thread == Some(answered_root.seq) && e.kind == Kind::Answer)
+        .collect();
+    assert_eq!(local_answers.len(), 1, "no duplicate local answer");
+    desk1.stop().await;
+
+    // Fresh local log under the same child Senate name.
+    let dir2 = tempfile::tempdir().unwrap();
+    let mut desk2 = Desk::new(
+        dir2.path(),
+        "alice",
+        Locale::En,
+        &under(&world, "tok-alice", ""),
+    );
+    desk2.start().await;
+    assert_eq!(
+        desk2.wait_registration().await.registration,
+        Registration::Registered
+    );
+    let open_root = on_desk(&desk2, "Still open before wipe").await;
+    assert_eq!(Origin::of(&open_root).unwrap().thread, unanswered_q.seq);
+
+    let below = desk2.events_of(&refund()).await;
+    assert!(
+        below
+            .iter()
+            .all(|e| e.body != "Already answered before wipe"),
+        "already-answered parent thread must not replay into a fresh local log: {below:#?}"
+    );
+    let docket = desk2.senate().daemon.hub.docket(&refund()).await.unwrap();
+    assert!(
+        docket
+            .items
+            .iter()
+            .all(|item| item.event.body != "Already answered before wipe"),
+        "already-answered parent thread must not land on the desk"
+    );
+
+    // A later follow-up in the previously answered thread still crosses down
+    // and answers back into the original parent thread.
+    speak(
+        &world.server_url(),
+        "tok-bob",
+        &NewEvent::new(
+            refund(),
+            Kind::Question,
+            person("bob"),
+            "Follow-up after wipe",
+        )
+        .to(alice_desk())
+        .in_thread(answered_q.seq),
+    )
+    .await
+    .unwrap();
+    let followup_root = on_desk(&desk2, "Follow-up after wipe").await;
+    assert_eq!(Origin::of(&followup_root).unwrap().thread, answered_q.seq);
+    let top2 = desk2.senate();
+    speak(
+        &top2.url,
+        &top2.token,
+        &NewEvent::new(
+            refund(),
+            Kind::Answer,
+            person("alice"),
+            "Handled follow-up after wipe",
+        )
+        .to(Address::Committee)
+        .in_thread(followup_root.seq),
+    )
+    .await
+    .unwrap();
+    let followup_up =
+        eventually_async("follow-up answer reaches parent thread", || async {
+            world.events_of(&refund()).await.into_iter().find(|e| {
+                e.thread == Some(answered_q.seq) && e.body == "Handled follow-up after wipe"
+            })
+        })
+        .await;
+    assert_eq!(followup_up.from, alice_desk());
+
+    desk2.stop().await;
+    world.stop().await;
+}
+
 // ---- the parent's Speaker and a child Senate's seat -------------------------
 
 /// The parent's built-in Speaker is asked in chat for alice's agent. Alice

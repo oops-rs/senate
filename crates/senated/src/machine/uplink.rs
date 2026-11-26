@@ -73,6 +73,7 @@
 //! what is kept about that committee is dropped and it is read from the
 //! start.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -518,10 +519,12 @@ impl Worker {
         for committee in me.committees {
             let key = format!("{CURSOR}{committee}");
             let mut cursor: Seq = self.get(&key).await?.unwrap_or(Seq::ZERO);
+            let mut next_cursor = cursor;
+            let mut pending = Vec::new();
             loop {
                 let page = match tokio::time::timeout(
                     TIMEOUT,
-                    self.above.events(&committee, cursor, Some(PAGE)),
+                    self.above.events(&committee, next_cursor, Some(PAGE)),
                 )
                 .await
                 {
@@ -533,7 +536,9 @@ impl Worker {
                         }
                         if e.is_cursor_ahead() && cursor > Seq::ZERO {
                             self.forget_committee(&committee).await?;
+                            pending.clear();
                             cursor = Seq::ZERO;
+                            next_cursor = Seq::ZERO;
                             continue;
                         }
                         return Err(lost_or_failed(&e));
@@ -545,23 +550,54 @@ impl Worker {
                 for raw in page.events {
                     let seq = match decode_event(raw) {
                         Decoded::Event(event) => {
-                            self.on_above(&parent, &event, &me.people).await?;
-                            event.seq
+                            let seq = event.seq;
+                            pending.push(event);
+                            seq
                         }
                         Decoded::Undecodable { seq, error } => {
                             tracing::debug!(%committee, "an event above this build cannot read: {error}");
-                            seq.unwrap_or(cursor)
+                            seq.unwrap_or(next_cursor)
                         }
                     };
-                    cursor = cursor.max(seq);
+                    next_cursor = next_cursor.max(seq);
                 }
-                self.put(&key, &cursor).await?;
                 if !page.has_more {
                     break;
                 }
             }
+            let settled = self.settled_above(&pending);
+            for event in &pending {
+                self.on_above(&parent, event, &me.people, &settled).await?;
+            }
+            self.put(&key, &next_cursor).await?;
         }
         Ok(())
+    }
+
+    /// For each parent thread in `events`, the latest seq at which this
+    /// child Senate already gave a final answer (or the parent archived the
+    /// thread). On a fresh or wiped local log, older messages in those
+    /// threads are already settled and are not brought down again.
+    fn settled_above(&self, events: &[Box<Event>]) -> HashMap<Seq, Seq> {
+        let name = &self.config.name;
+        let mut settled = HashMap::new();
+        for event in events {
+            let Some(thread) = event.thread else {
+                continue;
+            };
+            let our_answer = matches!(&event.from, Address::Child { senate, .. } if senate == name)
+                && event.kind == Kind::Answer
+                && !is_provisional(event);
+            let archived = senate_core::StatusPayload::of(event)
+                .is_some_and(|s| s.state == senate_core::StatusState::Archived);
+            if our_answer || archived {
+                settled
+                    .entry(thread)
+                    .and_modify(|s: &mut Seq| *s = (*s).max(event.seq))
+                    .or_insert(event.seq);
+            }
+        }
+        settled
     }
 
     /// One event above.
@@ -570,6 +606,7 @@ impl Worker {
         parent: &SenatePath,
         event: &Event,
         people: &senate_core::People,
+        settled: &HashMap<Seq, Seq>,
     ) -> Result<(), Pass> {
         let name = &self.config.name;
         let ours = matches!(&event.from, Address::Child { senate, .. } if senate == name);
@@ -584,6 +621,11 @@ impl Worker {
             {
                 let key = format!("{UP}{}:{}", event.committee, event.seq);
                 self.put(&key, &origin).await?;
+            } else if event.kind == Kind::Answer
+                && !is_provisional(event)
+                && let Some(thread) = event.thread
+            {
+                self.mirror_own_answer_down(parent, event, thread).await?;
             }
             return Ok(());
         }
@@ -605,8 +647,78 @@ impl Worker {
             _ => None,
         });
         if let Some(committee) = for_us {
+            let thread = event.thread.unwrap_or(event.seq);
+            if settled
+                .get(&thread)
+                .is_some_and(|&settled_at| event.seq < settled_at)
+            {
+                let down_key = format!("{DOWN}{}:{thread}", event.committee);
+                if self.get::<Brought>(&down_key).await?.is_none() {
+                    return Ok(());
+                }
+            }
             return self.bring_down(parent, event, committee, people).await;
         }
+        Ok(())
+    }
+
+    /// Our own final answer above in a thread already brought down here:
+    /// normally the local thread already holds the answer that produced it
+    /// (no-op). If it does not (for instance after restoring an older local
+    /// log), mirror it down so the thread does not remain open on the desk;
+    /// `meta::ORIGIN` above ensures `on_here` never echoes it back up.
+    async fn mirror_own_answer_down(
+        &self,
+        parent: &SenatePath,
+        event: &Event,
+        thread: Seq,
+    ) -> Result<(), Pass> {
+        let down_key = format!("{DOWN}{}:{thread}", event.committee);
+        let Some(brought) = self.get::<Brought>(&down_key).await? else {
+            return Ok(());
+        };
+        let existing = self
+            .hub
+            .thread(&brought.committee, brought.seq)
+            .await
+            .map_err(|e| Pass::Failed(format!("reading local thread {}: {e}", brought.seq)))?;
+        let down_id = derived(event, "uplink:down");
+        if existing
+            .iter()
+            .any(|local| local.id == down_id || derived(local, "uplink:up") == event.id)
+        {
+            return Ok(());
+        }
+        let origin = Origin {
+            locator: Locator::at(
+                parent.clone().absolute(),
+                event.committee.clone(),
+                event.from.clone(),
+            ),
+            thread,
+        };
+        let answered_by = event
+            .meta
+            .get(meta::ANSWERED_BY)
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| origin.locator.to_string());
+        let mut here = NewEvent::new(
+            brought.committee,
+            Kind::Answer,
+            Address::Committee,
+            &event.body,
+        )
+        .to(Address::Speaker)
+        .in_thread(brought.seq)
+        .with_id(down_id)
+        .with_meta(meta::ORIGIN, origin.value())
+        .with_meta(meta::ANSWERED_BY, serde_json::Value::String(answered_by));
+        here.refs = event.refs.clone();
+        self.hub
+            .append(here)
+            .await
+            .map_err(|e| Pass::Failed(format!("mirroring answer {} down: {e}", event.id)))?;
         Ok(())
     }
 
