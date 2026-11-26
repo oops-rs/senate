@@ -170,6 +170,7 @@ use crate::stream::{self, CommitteeWorker};
 
 mod activity;
 pub(crate) mod approval_guard;
+mod cleanup;
 pub mod default_secretary;
 mod delivery_check;
 mod desk_decision;
@@ -3617,18 +3618,7 @@ impl Shared {
             Request::Attach { senator } => wrap(on_heap(|| self.on_attach(senator)).await),
             Request::Receipt { committee, seq } => wrap(on_heap(|| self.receipt(&committee, seq)).await),
             Request::SetCommitteeSeat { committee, request } => {
-                let result = self.api.set_committee_seat(&committee, &request).await;
-                if result.is_ok() {
-                    self.seed_chair(&committee).await;
-                    // A seat given back: a stream the server refused for
-                    // want of it connects now, not at its slow retry.
-                    for ((_, on), worker) in lock(&self.streams).iter() {
-                        if on == &committee {
-                            worker.retry_now();
-                        }
-                    }
-                }
-                wrap(result.map_err(server_error))
+                wrap(self.set_committee_seat(&committee, &request).await)
             }
             Request::DeskWorker { command } => wrap(self.api.desk_worker(&command).await.map_err(server_error)),
             Request::ServerHealth => match self.api.me().await {
@@ -3657,6 +3647,10 @@ impl Shared {
             Request::Timeline { session_id, direction, cursor, limit } =>
                 wrap(on_heap(|| self.on_timeline(session_id, direction, cursor, limit)).await),
             Request::PruneHosts => wrap(on_heap(|| self.on_prune_hosts()).await),
+            Request::CleanupPlan { scope } => wrap(on_heap(|| self.on_cleanup_plan(scope)).await),
+            Request::CleanupApply { plan } => {
+                self.sessions_changed(wrap(on_heap(|| self.on_cleanup_apply(*plan)).await))
+            }
             Request::HookDropped(report) => {
                 self.on_hook_dropped(report);
                 Reply::ok(&())
@@ -4174,6 +4168,29 @@ impl Shared {
             local_rows,
             orphans,
         })
+    }
+
+    /// `senate senator seat|unseat`, and each seat a cleanup removes: the
+    /// server's seat change, then what follows from it here.
+    async fn set_committee_seat(
+        &self,
+        committee: &CommitteeId,
+        request: &api::SetCommitteeSeat,
+    ) -> Result<api::CommitteeSeatInfo, IpcError> {
+        let info = self
+            .api
+            .set_committee_seat(committee, request)
+            .await
+            .map_err(server_error)?;
+        self.seed_chair(committee).await;
+        // A seat given back: a stream the server refused for want of it
+        // connects now, not at its slow retry.
+        for ((_, on), worker) in lock(&self.streams).iter() {
+            if on == committee {
+                worker.retry_now();
+            }
+        }
+        Ok(info)
     }
 
     /// `senate session prune`: stop each orphaned host, then remove the

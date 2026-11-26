@@ -321,24 +321,36 @@ pub(crate) fn remove_ended(
         if !entry.file_type()?.is_dir() || keep(&id) {
             continue;
         }
-        let path = entry.path();
-        // Held while removing: a host taking it now waits, then finds it gone.
-        let _lock = match File::open(path.join("owner")) {
-            Ok(file) => match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-                Ok(()) => Some(file),
-                Err(rustix::io::Errno::WOULDBLOCK) => continue,
-                Err(error) => return Err(error.into()),
-            },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
-        };
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => removed.push(id),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+        if remove_if_ended(&entry.path())? {
+            removed.push(id);
         }
     }
     Ok(removed)
+}
+
+/// Removes the directory of the host `id` unless it runs: what a cleanup
+/// clears for a session it forgets. Whether it removed one.
+pub(crate) fn remove_ended_host(paths: &Paths, id: &EventId) -> io::Result<bool> {
+    remove_if_ended(&directory(paths, id))
+}
+
+/// Removes a host's directory, `path`, unless its host holds its lock.
+fn remove_if_ended(path: &Path) -> io::Result<bool> {
+    // Held while removing: a host taking it now waits, then finds it gone.
+    let _lock = match File::open(path.join("owner")) {
+        Ok(file) => match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Some(file),
+            Err(rustix::io::Errno::WOULDBLOCK) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// Remove abandoned, old launch directories. A live lock or a recent

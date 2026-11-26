@@ -166,6 +166,7 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
         | Request::Resume { .. }
         | Request::SessionForget { .. }
         | Request::PruneHosts
+        | Request::CleanupApply { .. }
         | Request::RestartHost { .. }
         | Request::Attach { .. }
         | Request::ArchiveCommittee { .. }
@@ -302,6 +303,7 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
         | Request::SessionSearch { .. }
         | Request::Timeline { .. }
         | Request::CommitteeThreads { .. }
+        | Request::CleanupPlan { .. }
         | Request::ActivityWatch { .. }
         | Request::TimelineWatch { .. }
         | Request::AttachInfo { .. }
@@ -420,6 +422,11 @@ pub(crate) fn person_only(request: &Request) -> Option<&'static str> {
         Request::ArchiveCommittee { .. } => {
             "Archiving a committee is the Speaker's own act: run `senate committees archive` from your own terminal"
         }
+        // The plan is a read, and the person's: it names every committee's
+        // senators and open threads.
+        Request::CleanupPlan { .. } | Request::CleanupApply { .. } => {
+            "Cleaning up the Senate is the person's to do: run `senate cleanup` from your own terminal"
+        }
         Request::EnsureSecretary => {
             "Only the person starts the default secretary: ask it from your own terminal or the Senate app"
         }
@@ -455,6 +462,7 @@ pub(crate) fn operator_only(request: &Request) -> bool {
         | Request::Pause { .. }
         | Request::Resume { .. }
         | Request::PruneHosts
+        | Request::CleanupApply { .. }
         | Request::SetSecretarySession { .. }
         | Request::DeskItem { .. }
         | Request::Approvals
@@ -1234,6 +1242,37 @@ mod tests {
             assert!(person_only(&request).is_some());
             assert_eq!(crate::app_confirmation::required(&request), writable);
         }
+    }
+
+    #[test]
+    fn a_cleanup_is_the_persons_to_read_and_takes_one_authentication_to_apply() {
+        let scope = crate::cleanup::Scope::default();
+        let read = Request::CleanupPlan {
+            scope: scope.clone(),
+        };
+        let apply = Request::CleanupApply {
+            plan: Box::new(crate::cleanup::Plan {
+                scope,
+                senate: "/acme".into(),
+                person: "alice".parse().unwrap(),
+                epoch: "e".into(),
+                derived_at: chrono::Utc::now(),
+                committees: Vec::new(),
+                sessions: Vec::new(),
+            }),
+        };
+        // Neither is an agent's, whatever session it names: there is no
+        // session to name.
+        for request in [&read, &apply] {
+            assert!(person_only(request).is_some());
+            assert_eq!(session_selector(request), None);
+        }
+        // Reading asks for nothing; applying asks once, for the whole plan.
+        assert_eq!(request_effect(&read), RequestEffect::SessionOrRead);
+        assert!(!crate::app_confirmation::required(&read));
+        assert_eq!(request_effect(&apply), RequestEffect::Presence);
+        assert!(crate::app_confirmation::required(&apply));
+        assert!(operator_only(&apply));
     }
 
     #[test]

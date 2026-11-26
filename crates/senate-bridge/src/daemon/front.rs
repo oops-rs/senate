@@ -1128,6 +1128,8 @@ macro_rules! request_selector {
             | Request::ActivityWatch { .. }
             | Request::TimelineWatch { .. }
             | Request::PruneHosts
+            | Request::CleanupPlan { .. }
+            | Request::CleanupApply { .. }
             | Request::RestartHost { .. }
             | Request::AttachInfo { .. }
             | Request::AttachChoices

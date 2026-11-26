@@ -345,6 +345,7 @@ pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> 
         Request::SessionForget { session_id } => {
             format!("Forget stored session history for {session_id}")
         }
+        Request::CleanupApply { plan } => plan.summary(),
         Request::Secretaries {
             action,
             for_,
