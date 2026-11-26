@@ -297,7 +297,10 @@ fn grid(count: usize, rows: u16, cols: u16) -> (u16, u16) {
     (across, down)
 }
 
-/// Where tile `slot` of a page is: its top-left corner (0-based) and size.
+/// Where tile `slot` of a page holding `on_page` sessions is: its top-left
+/// corner (0-based) and size. An incomplete row distributes the terminal's
+/// width across the tiles present in that row instead of leaving empty cells
+/// to their right.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Rect {
     row: u16,
@@ -306,19 +309,28 @@ struct Rect {
     cols: u16,
 }
 
-fn rect(slot: u16, across: u16, down: u16, rows: u16, cols: u16) -> Rect {
-    let (tile_rows, tile_cols) = (rows.saturating_sub(1) / down, cols / across);
+fn row_span(r: u16, down: u16, rows: u16) -> (u16, u16) {
+    let usable_rows = rows.saturating_sub(1);
+    let tile_rows = usable_rows / down;
+    let height = if r + 1 == down {
+        usable_rows - r * tile_rows
+    } else {
+        tile_rows
+    };
+    (r * tile_rows, height)
+}
+
+fn rect(slot: u16, on_page: u16, across: u16, down: u16, rows: u16, cols: u16) -> Rect {
     let (r, c) = (slot / across, slot % across);
+    let in_row = on_page.saturating_sub(r * across).clamp(1, across);
+    let tile_cols = cols / in_row;
+    let (row, height) = row_span(r, down, rows);
     Rect {
-        row: r * tile_rows,
+        row,
         col: c * tile_cols,
-        // The last column and row take what the division left over.
-        rows: if r + 1 == down {
-            rows.saturating_sub(1) - r * tile_rows
-        } else {
-            tile_rows
-        },
-        cols: if c + 1 == across {
+        // The last column in the row and the last row take what the division left over.
+        rows: height,
+        cols: if c + 1 == in_row {
             cols - c * tile_cols
         } else {
             tile_cols
@@ -1068,27 +1080,40 @@ impl Viewer {
                 let per_page = usize::from(across) * usize::from(down);
                 let pages = self.tiles.len().div_ceil(per_page);
                 let page = self.focus / per_page;
-                for slot in 0..per_page {
+                let page_start = page * per_page;
+                let on_page = self.tiles.len().saturating_sub(page_start).min(per_page);
+                let on_page_u16 = u16::try_from(on_page).unwrap_or(u16::MAX);
+                for slot in 0..on_page {
                     let area = rect(
                         u16::try_from(slot).unwrap_or(u16::MAX),
+                        on_page_u16,
                         across,
                         down,
                         rows,
                         cols,
                     );
-                    match self.tiles.get(page * per_page + slot) {
-                        Some(tile) => {
-                            paint_tile(
-                                &mut frame,
-                                tile,
-                                area,
-                                page * per_page + slot == self.focus,
-                                self.help || self.finder.is_some(),
-                                self.widths,
-                            );
-                        }
-                        None => paint_note(&mut frame, area, ""),
-                    }
+                    paint_tile(
+                        &mut frame,
+                        &self.tiles[page_start + slot],
+                        area,
+                        page_start + slot == self.focus,
+                        self.help || self.finder.is_some(),
+                        self.widths,
+                    );
+                }
+                let used_rows = on_page_u16.div_ceil(across);
+                for r in used_rows..down {
+                    let (row, height) = row_span(r, down, rows);
+                    paint_note(
+                        &mut frame,
+                        Rect {
+                            row,
+                            col: 0,
+                            rows: height,
+                            cols,
+                        },
+                        "",
+                    );
                 }
                 let paging = if pages > 1 {
                     format!(" · page {}/{pages}", page + 1)
@@ -1456,8 +1481,8 @@ mod tests {
         // Tiles cover the terminal above the status line, with no overlap.
         let (rows, cols) = (51, 201);
         let (across, down) = grid(5, rows, cols);
-        let rects: Vec<Rect> = (0..across * down)
-            .map(|slot| rect(slot, across, down, rows, cols))
+        let rects: Vec<Rect> = (0..5)
+            .map(|slot| rect(slot, 5, across, down, rows, cols))
             .collect();
         assert_eq!(
             rects[0],
@@ -1468,11 +1493,210 @@ mod tests {
                 cols: 67
             }
         );
+        // Second row has two tiles: they split the full 201 columns (100 + 101).
+        assert_eq!(
+            rects[3],
+            Rect {
+                row: 25,
+                col: 0,
+                rows: 25,
+                cols: 100
+            }
+        );
+        assert_eq!(
+            rects[4],
+            Rect {
+                row: 25,
+                col: 100,
+                rows: 25,
+                cols: 101
+            }
+        );
         let last = rects.last().unwrap();
         assert_eq!(
             (last.row + last.rows, last.col + last.cols),
             (rows - 1, cols)
         );
+    }
+
+    #[test]
+    fn incomplete_rows_distribute_full_width_while_full_rows_and_minimums_hold() {
+        // 3 sessions in a 2-column layout (21 x 80): A and B share row 0;
+        // C spans the full second row instead of leaving the bottom-right blank.
+        let (rows, cols) = (21, 80);
+        let (across, down) = grid(3, rows, cols);
+        assert_eq!((across, down), (2, 2));
+        let three: Vec<Rect> = (0..3)
+            .map(|slot| rect(slot, 3, across, down, rows, cols))
+            .collect();
+        assert_eq!(
+            three,
+            [
+                Rect {
+                    row: 0,
+                    col: 0,
+                    rows: 10,
+                    cols: 40
+                },
+                Rect {
+                    row: 0,
+                    col: 40,
+                    rows: 10,
+                    cols: 40
+                },
+                Rect {
+                    row: 10,
+                    col: 0,
+                    rows: 10,
+                    cols: 80
+                },
+            ]
+        );
+
+        // Full rows keep identical geometry (4 sessions on 21 x 80 -> 2x2 of 40 cols).
+        let four: Vec<Rect> = (0..4).map(|slot| rect(slot, 4, 2, 2, rows, cols)).collect();
+        assert_eq!(
+            four,
+            [
+                Rect {
+                    row: 0,
+                    col: 0,
+                    rows: 10,
+                    cols: 40
+                },
+                Rect {
+                    row: 0,
+                    col: 40,
+                    rows: 10,
+                    cols: 40
+                },
+                Rect {
+                    row: 10,
+                    col: 0,
+                    rows: 10,
+                    cols: 40
+                },
+                Rect {
+                    row: 10,
+                    col: 40,
+                    rows: 10,
+                    cols: 40
+                },
+            ]
+        );
+
+        // General incomplete rows across larger grids: 7 and 8 sessions in 3x3,
+        // and partial last pages (1, 2, 3 sessions on a 2x2 or 3x2 grid).
+        for (count, rows, cols) in [
+            (1, 30, 120),
+            (2, 30, 120),
+            (3, 30, 120),
+            (3, 31, 121),
+            (4, 30, 120),
+            (5, 51, 201),
+            (6, 51, 201),
+            (7, 60, 200),
+            (8, 60, 200),
+            (9, 60, 200),
+            // Narrow terminal: minimum tile width forces a single column.
+            (3, 30, 60),
+            // Short terminal: minimum tile height forces a single row.
+            (3, 12, 120),
+        ] {
+            let (across, down) = grid(count, rows, cols);
+            let per_page = usize::from(across) * usize::from(down);
+            let pages = count.div_ceil(per_page);
+            for page in 0..pages {
+                let on_page = count.saturating_sub(page * per_page).min(per_page);
+                let on_page_u16 = u16::try_from(on_page).unwrap();
+                let rects: Vec<Rect> = (0..on_page_u16)
+                    .map(|slot| rect(slot, on_page_u16, across, down, rows, cols))
+                    .collect();
+                let used_rows = on_page_u16.div_ceil(across);
+                for r in 0..used_rows {
+                    let row_start = usize::from(r * across);
+                    let row_end = (row_start + usize::from(across)).min(on_page);
+                    let row_rects = &rects[row_start..row_end];
+                    // Contiguous left-to-right covering the full terminal width.
+                    let mut col = 0;
+                    for area in row_rects {
+                        assert_eq!(area.col, col, "{count} on {rows}x{cols} p{page} r{r}");
+                        if cols >= MIN_TILE_COLS {
+                            assert!(
+                                area.cols >= MIN_TILE_COLS,
+                                "{count} on {rows}x{cols}: width {} < MIN_TILE_COLS",
+                                area.cols
+                            );
+                        }
+                        if rows.saturating_sub(1) >= MIN_TILE_ROWS {
+                            assert!(
+                                area.rows >= MIN_TILE_ROWS,
+                                "{count} on {rows}x{cols}: height {} < MIN_TILE_ROWS",
+                                area.rows
+                            );
+                        }
+                        col += area.cols;
+                    }
+                    assert_eq!(col, cols, "{count} on {rows}x{cols} p{page} r{r}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn three_panel_grid_spans_second_row_and_adapts_on_resize_and_relist() {
+        let mut viewer = Viewer {
+            tiles: vec![
+                tile("alpha", "screen alpha", false),
+                tile("beta", "screen beta", false),
+                tile("gamma", "screen gamma", false),
+            ],
+            focus: 0,
+            ..Viewer::new(Mode::Grid, None)
+        };
+        // 30 x 120: 2x2 grid with 3 tiles -> alpha & beta share row 0 (60 cols each,
+        // body 59), gamma spans the full second row (120 cols, body 119).
+        let painted = viewer.paint(30, 120);
+        assert_eq!(asked(&viewer.tiles[0]), Some((13, 59)));
+        assert_eq!(asked(&viewer.tiles[1]), Some((13, 59)));
+        assert_eq!(asked(&viewer.tiles[2]), Some((14, 119)));
+
+        // Rendered terminal preserves stable order: alpha left, beta right, gamma full row 1.
+        let terminal = shows(30, 120, &painted);
+        let lines: Vec<String> = terminal.screen().rows(0, 120).collect();
+        assert!(lines[0].starts_with("▶ alpha"), "{:?}", lines[0]);
+        let right_header: String = lines[0].chars().skip(60).collect();
+        assert!(right_header.starts_with("  beta"), "{:?}", right_header);
+        assert!(lines[14].starts_with("  gamma"), "{:?}", lines[14]);
+        // Gamma's header underline spans past column 60 into the second half.
+        assert!(terminal.screen().cell(14, 90).unwrap().underline());
+
+        // Resizing narrower to 31 x 70 forces 1 column (MIN_TILE_COLS = 40)
+        // and fits 3 rows (MIN_TILE_ROWS = 10): each tile gets full 70-col width (body 69).
+        viewer.paint(31, 70);
+        assert_eq!(asked(&viewer.tiles[0]), Some((9, 69)));
+        assert_eq!(asked(&viewer.tiles[1]), Some((9, 69)));
+        assert_eq!(asked(&viewer.tiles[2]), Some((9, 69)));
+
+        // Resizing to 30 x 70 keeps MIN_TILE_ROWS (29 / 10 = 2 down, paged 1x2).
+        assert_eq!(grid(3, 30, 70), (1, 2));
+        viewer.paint(30, 70);
+        assert_eq!(asked(&viewer.tiles[0]), Some((13, 69)));
+        assert_eq!(asked(&viewer.tiles[1]), Some((14, 69)));
+
+        // Resizing back wider to 25 x 100 restores 2-col layout with gamma spanning 100 cols.
+        viewer.paint(25, 100);
+        assert_eq!(asked(&viewer.tiles[0]), Some((11, 49)));
+        assert_eq!(asked(&viewer.tiles[1]), Some((11, 49)));
+        assert_eq!(asked(&viewer.tiles[2]), Some((11, 99)));
+
+        // Adding a fourth session turns row 1 into a full 2-column row cleanly.
+        viewer.tiles.push(tile("delta", "screen delta", false));
+        viewer.paint(25, 100);
+        assert_eq!(asked(&viewer.tiles[0]), Some((11, 49)));
+        assert_eq!(asked(&viewer.tiles[1]), Some((11, 49)));
+        assert_eq!(asked(&viewer.tiles[2]), Some((11, 49)));
+        assert_eq!(asked(&viewer.tiles[3]), Some((11, 49)));
     }
 
     #[test]
