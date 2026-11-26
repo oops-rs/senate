@@ -1444,6 +1444,22 @@ cargo test --workspace
 SENATE_TEST_DATABASE_URL="postgres://senate:senate@127.0.0.1:5432/senate" cargo test -p senate-log
 ```
 
+`senate-bridge` and `senate-e2e` each build their integration tests as one
+binary, `suite`. A file under `tests/suite/` is a module of it, so a test's
+name starts with its file's name:
+
+```sh
+# One file's tests (crates/senate-bridge/tests/suite/hosted.rs)
+cargo test -p senate-bridge --test suite hosted::
+
+# One test, by its full name
+cargo test -p senate-bridge --test suite -- --exact hosted::a_finished_test_leaves_no_host_or_tui_behind
+```
+
+The filter matches any part of a name, so `cli::` also runs `desk_cli::`.
+`crates/senate-bridge/tests/upgrade.rs` is a binary of its own (`--test
+upgrade`), because it sets an environment variable for its whole process.
+
 ### Simulated Chat
 
 A chat flow can be a script instead of clicks in the chat platform. `senate
@@ -1497,7 +1513,7 @@ senate chat thread "$ref" --wait   # "Record this as a decision?"
   Conversations are held in the daemon's memory until `senated` restarts.
 
 End-to-end tests drive the same path in-process: see
-[`crates/senate-e2e/tests/chat_sim.rs`](crates/senate-e2e/tests/chat_sim.rs).
+[`crates/senate-e2e/tests/suite/chat_sim.rs`](crates/senate-e2e/tests/suite/chat_sim.rs).
 
 ---
 
