@@ -3298,6 +3298,15 @@ pub(crate) fn proof_kind(request: &Request) -> Option<(crate::mac_scope::ProofKi
 pub async fn request_line(socket: &Path, request: &Request) -> Result<Vec<u8>, ClientError> {
     let body = serde_json::to_vec(request).map_err(|e| ClientError::Protocol(e.to_string()))?;
     let mut frame = Vec::new();
+    #[cfg(feature = "fake-proofs")]
+    if fake_proofs::on() {
+        if let Some(ticket) = fake_proofs::ticket(request, &body) {
+            frame.extend_from_slice(format!("SCOPE1 {ticket} ").as_bytes());
+        }
+        frame.extend(body);
+        frame.push(b'\n');
+        return Ok(frame);
+    }
     #[cfg(target_os = "macos")]
     if let Some((kind, required)) = proof_kind(request) {
         use crate::app_confirmation::macos::CallFailure;
@@ -3326,6 +3335,48 @@ pub async fn request_line(socket: &Path, request: &Request) -> Result<Vec<u8>, C
     frame.extend(body);
     frame.push(b'\n');
     Ok(frame)
+}
+
+/// For tests of a client of the daemon (the app's core) against a fake one,
+/// which has no Mach service to issue proofs: once [`enable`]d,
+/// [`request_line`] attaches a stand-in proof, `SCOPE1 fake-<digest of the
+/// body> `, to every request a signed build would prove. A fake daemon
+/// refuses a line whose proof is not [`ticket`]'s, as a signed daemon
+/// refuses one without its proof: a request written to the socket by hand
+/// instead of through [`request_line`] fails there as it would on a
+/// person's Mac.
+#[cfg(feature = "fake-proofs")]
+pub mod fake_proofs {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use sha2::{Digest, Sha256};
+
+    use super::Request;
+
+    static ON: AtomicBool = AtomicBool::new(false);
+
+    /// Stand-in proofs for the rest of this process.
+    pub fn enable() {
+        ON.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn on() -> bool {
+        ON.load(Ordering::SeqCst)
+    }
+
+    /// The proof [`request_line`](super::request_line) attaches to `request`
+    /// encoded as `body`; `None` where a signed build attaches none (any
+    /// request off macOS).
+    pub fn ticket(request: &Request, body: &[u8]) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        let proved = super::proof_kind(request).is_some();
+        #[cfg(not(target_os = "macos"))]
+        let proved = {
+            let _ = request;
+            false
+        };
+        proved.then(|| format!("fake-{}", hex::encode(Sha256::digest(body))))
+    }
 }
 
 /// One connection to the daemon.

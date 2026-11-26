@@ -1164,10 +1164,21 @@ impl AppCore {
         })
     }
 
-    /// `senate <args>` in a terminal, with this app's Senate home.
+    /// `senate <args>` in a terminal, with this app's Senate home. The
+    /// program is the `senate` the service install copied beside its daemon
+    /// (`<home>/bin/senate`, the same signed build) when there is one, else
+    /// the one on the person's PATH: a signed daemon serves attach and watch
+    /// only to a CLI that proves its caller, and the PATH may hold an older
+    /// or an unsigned build.
     fn senate_command(&self, args: &[&str]) -> TerminalCommand {
         let home = self.senate_home();
-        let mut argv = vec!["senate".to_string()];
+        let installed = std::path::Path::new(&home).join("bin").join("senate");
+        let program = if installed.is_file() {
+            installed.display().to_string()
+        } else {
+            "senate".to_string()
+        };
+        let mut argv = vec![program];
         argv.extend(args.iter().map(ToString::to_string));
         let words: Vec<String> = argv.iter().map(|a| model::shell_quote(a)).collect();
         let shell_line = format!(

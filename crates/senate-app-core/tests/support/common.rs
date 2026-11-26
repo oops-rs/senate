@@ -314,6 +314,9 @@ pub struct World {
     desk_receipts: std::collections::BTreeMap<EventId, DeskOutcome>,
     desk_sources: std::collections::BTreeMap<(CommitteeId, Seq), Event>,
     pub requests: Vec<Request>,
+    /// Requests refused for lacking the proof `ipc::request_line` gives
+    /// them ([`FakeDaemon::start`]).
+    pub unproven: Vec<Request>,
     /// The committee of each thread not on [`committee`], by root.
     pub committee_of: std::collections::BTreeMap<u64, CommitteeId>,
     /// The Senate's aliases; `None` is `claude` as `lead` on refund-v2.
@@ -379,6 +382,7 @@ impl World {
             desk_receipts: Default::default(),
             desk_sources: Default::default(),
             requests: Vec::new(),
+            unproven: Vec::new(),
             committee_of: Default::default(),
             aliases: None,
             roster: Vec::new(),
@@ -409,7 +413,24 @@ pub struct FakeDaemon {
 }
 
 impl FakeDaemon {
+    /// A fake for a client in this process. It refuses a request without
+    /// the proof `ipc::request_line` gives it, as a signed daemon does
+    /// ([`senate_bridge::ipc::fake_proofs`]): a request the app writes to
+    /// the socket by hand fails here, not first on a person's Mac.
+    #[allow(dead_code)] // the example uses `start_unproven`
     pub fn start(socket: &Path, world: Arc<Mutex<World>>) -> Self {
+        senate_bridge::ipc::fake_proofs::enable();
+        Self::serve(socket, world, true)
+    }
+
+    /// A fake for an app in another process, which has no stand-in proofs
+    /// (`examples/fake_daemon.rs`): it serves every request.
+    #[allow(dead_code)] // the tests use `start`
+    pub fn start_unproven(socket: &Path, world: Arc<Mutex<World>>) -> Self {
+        Self::serve(socket, world, false)
+    }
+
+    fn serve(socket: &Path, world: Arc<Mutex<World>>, proofs: bool) -> Self {
         let _ = std::fs::remove_file(socket);
         let listener = UnixListener::bind(socket).unwrap();
         let (events, _) = broadcast::channel(64);
@@ -428,7 +449,7 @@ impl FakeDaemon {
                 let Ok((conn, _)) = listener.accept().await else {
                     return;
                 };
-                let task = tokio::spawn(serve(conn, Arc::clone(&world), events.clone()));
+                let task = tokio::spawn(serve(conn, Arc::clone(&world), events.clone(), proofs));
                 inner.lock().unwrap().push(task.abort_handle());
             }
         });
@@ -517,11 +538,44 @@ async fn observe_serve(
     Ok(issued)
 }
 
-async fn serve(conn: UnixStream, world: Arc<Mutex<World>>, events: broadcast::Sender<WatchEvent>) {
+/// The request on one line, and whether it carries the proof
+/// `ipc::request_line` gives it (always, when `proofs` is off).
+fn proved(line: &str, proofs: bool) -> (Request, bool) {
+    let (ticket, body) = match line
+        .strip_prefix("SCOPE1 ")
+        .and_then(|rest| rest.split_once(' '))
+    {
+        Some((ticket, body)) => (Some(ticket), body),
+        None => (None, line),
+    };
+    let request: Request = serde_json::from_str(body).unwrap();
+    let expected = senate_bridge::ipc::fake_proofs::ticket(&request, body.as_bytes());
+    let ok = !proofs || ticket == expected.as_deref();
+    (request, ok)
+}
+
+async fn serve(
+    conn: UnixStream,
+    world: Arc<Mutex<World>>,
+    events: broadcast::Sender<WatchEvent>,
+    proofs: bool,
+) {
     let (r, mut w) = conn.into_split();
     let mut lines = BufReader::new(r).lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        let request: Request = serde_json::from_str(&line).unwrap();
+        let (request, ok) = proved(&line, proofs);
+        if !ok {
+            // What a signed daemon answers a request without its proof.
+            world.lock().unwrap().unproven.push(request);
+            let reply = Reply::err(IpcError::new(
+                senate_bridge::ipc::codes::NOT_A_PERSON,
+                "the daemon could not tell which process sent this request: it carried no caller proof",
+            ));
+            let _ = w
+                .write_all(format!("{}\n", serde_json::to_string(&reply).unwrap()).as_bytes())
+                .await;
+            return;
+        }
         if matches!(request, Request::Watch { .. }) {
             let mut rx = events.subscribe();
             let mut out = vec![

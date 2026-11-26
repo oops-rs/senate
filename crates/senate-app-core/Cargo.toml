@@ -44,6 +44,9 @@ cc = "1"
 
 [dev-dependencies]
 axum = { workspace = true }
+# The fake daemon refuses what a signed daemon refuses: a request that did
+# not go through `ipc::request_line` (tests/support/common.rs).
+senate-bridge = { workspace = true, features = ["fake-proofs"] }
 senate-observe = { workspace = true, features = ["replay"] }
 tempfile = { workspace = true }
 

@@ -90,7 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        NSApplication.shared.setActivationPolicy(Dock.policy(showInDock: Dock.showsInDock()))
+        NSApplication.shared.setActivationPolicy(Dock.policy(showInDock: !CoreStore.headless && Dock.showsInDock()))
     }
 
     /// Links: this handler, installed once SwiftUI has set up its own.

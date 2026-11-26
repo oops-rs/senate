@@ -125,7 +125,7 @@ async fn main() {
     // FAKE_SAY_HOLD=1: notes said to a session are not delivered.
     w.hold_says = std::env::var("FAKE_SAY_HOLD").is_ok_and(|v| v == "1");
     let world = Arc::new(Mutex::new(w));
-    let daemon = common::FakeDaemon::start(&socket, Arc::clone(&world));
+    let daemon = common::FakeDaemon::start_unproven(&socket, Arc::clone(&world));
     println!("fake daemon on {}", socket.display());
     let every_ms = |name: &str| {
         std::env::var(name)

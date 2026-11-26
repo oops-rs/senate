@@ -17,6 +17,9 @@ path = "src/main.rs"
 [features]
 default = ["observe-cli"]
 observe-cli = ["dep:axum", "dep:senate-observe-client", "senate-observe/replay"]
+# Stand-in caller proofs for a client's tests against a fake daemon
+# (`ipc::fake_proofs`); only senate-app-core's dev-dependency turns it on.
+fake-proofs = []
 
 [dependencies]
 axum = { workspace = true, optional = true }
