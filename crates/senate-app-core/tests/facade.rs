@@ -1,6 +1,8 @@
 //! The FFI facade, from Rust, against the fake daemon: what a native app
 //! sees through [`CoreListener`] and what its calls do.
 
+// The macOS app's core, tested against Unix-socket fakes.
+#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 #[path = "support/common.rs"]

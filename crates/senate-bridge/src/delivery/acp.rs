@@ -4,18 +4,17 @@
 
 use std::ffi::OsString;
 use std::io::{BufRead, IsTerminal, Write as _};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::local;
 use anyhow::Context;
 use async_trait::async_trait;
 use senate_core::EventId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 
@@ -71,7 +70,7 @@ impl DeliveryAdapter for AcpAdapter {
             );
         }
         let send = async {
-            let stream = UnixStream::connect(path).await.map_err(|e| {
+            let stream = local::Stream::connect(path).await.map_err(|e| {
                 let gone = matches!(
                     e.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
@@ -365,7 +364,7 @@ impl Drop for SocketPath {
     }
 }
 
-async fn receive_push(stream: &mut BufReader<UnixStream>) -> anyhow::Result<Push> {
+async fn receive_push(stream: &mut BufReader<local::Stream>) -> anyhow::Result<Push> {
     let line = tokio::time::timeout(LOCAL_TIMEOUT, ipc::read_line(stream))
         .await??
         .context("ACP push disconnected")?;
@@ -387,9 +386,9 @@ pub async fn run(paths: &Paths, cwd: &Path, command: &[OsString]) -> anyhow::Res
     let nonce = EventId::new().to_string().to_ascii_lowercase();
     let session_id = Runtime::Acp.session_key(&nonce);
     let path = paths.home().join(format!("acp-{nonce}.sock"));
-    let listener = UnixListener::bind(&path).context("bind the private ACP delivery socket")?;
+    let listener = local::Listener::bind(&path).context("bind the private ACP delivery socket")?;
     let socket = SocketPath(path);
-    std::fs::set_permissions(&socket.0, std::fs::Permissions::from_mode(0o600))?;
+    crate::fsmode::set_mode(&socket.0, 0o600)?;
     let mut client = Client::spawn(command)?;
     let init = client
         .setup(

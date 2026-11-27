@@ -21,15 +21,27 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+// The macOS app's fake daemon serves a Unix socket.
+#[cfg(unix)]
 #[path = "../tests/support/common.rs"]
 mod common;
 
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use senate_bridge::Paths;
+#[cfg(unix)]
 use senate_bridge::ipc::WatchEvent;
 
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("the fake daemon serves a Unix socket, for the macOS app");
+}
+
+#[cfg(unix)]
 #[tokio::main]
 async fn main() {
     assert!(

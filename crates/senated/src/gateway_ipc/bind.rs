@@ -329,7 +329,7 @@ mod tests {
         let config = SenatedConfig::from_toml_str(&format!(
             r#"
 listen = "127.0.0.1:0"
-database_url = "sqlite:{}"
+database_url = 'sqlite:{}'
 [[roster.principals]]
 handle = "alice"
 accounts = [{{platform = "chat", id = "u_alice"}}]

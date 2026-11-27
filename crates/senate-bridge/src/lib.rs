@@ -77,6 +77,7 @@ pub mod doctor;
 pub mod fd;
 pub mod follow;
 pub mod format;
+mod fsmode;
 mod git_read;
 pub mod hook;
 pub mod host;
@@ -88,6 +89,7 @@ pub mod joinname;
 mod kernel_process;
 #[cfg(target_os = "linux")]
 mod linux_scope;
+pub mod local;
 #[cfg(target_os = "macos")]
 mod mac_scope;
 pub mod mcp;
@@ -99,6 +101,7 @@ pub mod preside;
 #[doc(hidden)]
 pub mod remote;
 pub mod routing;
+#[cfg_attr(windows, path = "safe_path_windows.rs")]
 mod safe_path;
 pub mod service;
 pub mod session;
@@ -112,6 +115,8 @@ pub mod terminal;
 pub mod terminal_use;
 pub mod testenv;
 mod timeline;
+#[cfg(windows)]
+mod win;
 pub mod wsl;
 
 pub use config::BridgeConfig;

@@ -60,9 +60,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use crate::local::{Listener as UnixListener, Stream as UnixStream};
 use anyhow::{Context, bail, ensure};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, broadcast};
 use tokio::task::JoinSet;
 
@@ -254,7 +254,7 @@ pub(super) async fn serve(
     let mut watchers = JoinSet::new();
     loop {
         tokio::select! {
-            (mut stream, _) = super::accept(listener), if watchers.len() < 128 => {
+            mut stream = super::accept(listener), if watchers.len() < 128 => {
                 let screen = screen.clone();
                 let admission = admission.clone();
                 watchers.spawn(async move {
@@ -638,12 +638,12 @@ pub(crate) struct Watch {
     from: Box<dyn AsyncRead + Send + Unpin>,
     /// Where fit requests go ([`Fitter`]); closing it would tell the host
     /// the watcher is gone.
-    to: Option<tokio::net::unix::OwnedWriteHalf>,
+    to: Option<crate::local::OwnedWriteHalf>,
 }
 
 /// What asks the host to fit the session to a tile.
 pub(crate) struct Fitter {
-    to: tokio::net::unix::OwnedWriteHalf,
+    to: crate::local::OwnedWriteHalf,
 }
 
 impl Fitter {
@@ -739,6 +739,7 @@ async fn read_frame(from: &mut (impl AsyncRead + Unpin)) -> anyhow::Result<Optio
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 

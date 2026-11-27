@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, split};
-use tokio::net::UnixStream;
 use tokio::sync::watch;
 use tokio::time::timeout;
 
@@ -16,7 +15,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(super) async fn relay(
     wire: impl AsyncRead + AsyncWrite + Unpin,
-    mut host: UnixStream,
+    mut host: crate::local::Stream,
     attach: bool,
 ) -> anyhow::Result<()> {
     let (mut incoming, mut outgoing) = split(wire);
@@ -102,6 +101,7 @@ async fn attach_input(
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 
@@ -117,7 +117,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_idle_terminal_stream_closes() -> anyhow::Result<()> {
         let (wire, _peer) = tokio::io::duplex(1);
-        let (host, _remote_host) = UnixStream::pair()?;
+        let (host, _remote_host) = crate::local::Stream::pair()?;
         let start = tokio::time::Instant::now();
         assert!(relay(wire, host, false).await.is_err());
         assert!(start.elapsed() >= IDLE);

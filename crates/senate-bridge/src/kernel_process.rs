@@ -25,7 +25,9 @@ impl BoundProcess {
         let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
             .trim()
             .to_owned();
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(windows)]
+        let boot = crate::win::boot_id()?;
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         let boot = String::new();
         if boot.is_empty() {
             return Err(io::Error::other("kernel boot identity is unavailable"));
@@ -133,7 +135,39 @@ pub(crate) fn inspect(pid: u32) -> io::Result<Process> {
     })
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// Windows records a parent's pid and never reparents, so the recorded
+/// pid may since belong to another process: a parent born after its child
+/// is not its parent, and the chain ends there. The name is the image's
+/// without `.exe`, as the runtimes are named on Unix (`codex`).
+#[cfg(windows)]
+pub(crate) fn inspect(pid: u32) -> io::Result<Process> {
+    let birth = crate::win::birth(pid)?;
+    let entry = crate::win::processes()?
+        .into_iter()
+        .find(|entry| entry.pid == pid)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such process"))?;
+    let parent_birth = crate::win::birth(entry.parent)
+        .ok()
+        .filter(|born| *born < birth);
+    let name = entry
+        .name
+        .strip_suffix(".exe")
+        .or_else(|| entry.name.strip_suffix(".EXE"))
+        .unwrap_or(&entry.name)
+        .to_owned();
+    Ok(Process {
+        identity: ProcessIdentity { pid, birth },
+        parent_pid: if parent_birth.is_some() {
+            entry.parent
+        } else {
+            0
+        },
+        parent_birth,
+        name,
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub(crate) fn inspect(_pid: u32) -> io::Result<Process> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -191,7 +225,12 @@ pub(crate) fn executable(pid: u32) -> io::Result<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/exe"))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+pub(crate) fn executable(pid: u32) -> io::Result<PathBuf> {
+    crate::win::executable(pid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) fn executable(_pid: u32) -> io::Result<PathBuf> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -287,12 +326,27 @@ pub(crate) fn cwd(_pid: u32) -> io::Result<PathBuf> {
     ))
 }
 
+/// The pid of the process that started this one.
+pub(crate) fn parent_id() -> u32 {
+    #[cfg(unix)]
+    return std::os::unix::process::parent_id();
+    #[cfg(windows)]
+    return crate::win::parent_id();
+}
+
 /// Whether the kernel refused to describe a process because another user
 /// owns it. Terminal apps start shells under the root-owned `/usr/bin/login`
 /// (Ghostty, Terminal, iTerm2 by default) and SSH under a root sshd, and
 /// macOS answers EPERM for them: the user's own chain ends there.
+#[cfg(unix)]
 pub(crate) fn foreign(error: &io::Error) -> bool {
     error.raw_os_error() == Some(libc::EPERM)
+}
+
+/// On Windows: access denied, for a process of another user or the system.
+#[cfg(windows)]
+pub(crate) fn foreign(error: &io::Error) -> bool {
+    crate::win::foreign(error)
 }
 
 /// Return the verified prefix of a live process's parent chain. A reparented
@@ -340,6 +394,47 @@ pub(crate) fn ancestors(peer: u32, limit: usize) -> io::Result<Vec<ProcessIdenti
         ));
     }
     Ok(ancestors)
+}
+
+#[cfg(test)]
+#[cfg(windows)]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn live_process_identity_and_ancestry() -> io::Result<()> {
+        let pid = std::process::id();
+        let process = inspect(pid)?;
+        assert_eq!(process.identity.pid, pid);
+        assert_eq!(process.identity, inspect(pid)?.identity);
+        assert!(
+            process.parent_pid > 0,
+            "cargo's test runner started this one"
+        );
+        let parent = inspect(process.parent_pid)?;
+        assert_eq!(process.parent_birth, Some(parent.identity.birth));
+        assert_eq!(ancestors(pid, 1)?, [parent.identity]);
+        assert_eq!(executable(pid)?, std::env::current_exe()?);
+        let bound = BoundProcess::capture(process.identity)?;
+        assert!(bound.live());
+        assert!(bound.contains(pid, 4));
+        Ok(())
+    }
+
+    #[test]
+    fn a_child_is_contained_by_its_parents_binding_and_not_the_reverse() -> io::Result<()> {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "ping -n 3 127.0.0.1 >nul"])
+            .spawn()?;
+        let me = BoundProcess::capture(inspect(std::process::id())?.identity)?;
+        let theirs = BoundProcess::capture(inspect(child.id())?.identity)?;
+        assert!(me.contains(child.id(), 8));
+        assert!(!theirs.contains(std::process::id(), 8));
+        child.kill()?;
+        child.wait()?;
+        assert!(!theirs.live(), "a dead process's binding is not live");
+        Ok(())
+    }
 }
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]

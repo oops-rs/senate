@@ -15,10 +15,10 @@ mod titles;
 
 pub(crate) use titles::{SidebarTranscript, TitleCache};
 
+use crate::fsmode::{FileExt, MetadataExt};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::{self, BufRead, BufReader};
-use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -47,10 +47,7 @@ pub(crate) fn path(session: &Session) -> Option<PathBuf> {
 fn open_file(path: &Path) -> io::Result<File> {
     // An agent supplies this path in its hook. Never wait on a FIFO or read
     // from a device presented as a transcript.
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-        .open(path)?;
+    let file = crate::fsmode::no_follow(OpenOptions::new().read(true)).open(path)?;
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

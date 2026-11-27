@@ -1042,6 +1042,8 @@ mod tests {
     /// Which sessions keep a record to look in: Claude Code, Codex and agy.
     /// An ACP client keeps none Senate reads, whatever path it names, so
     /// what it took stays `injected` and is never woken for or reported.
+    // Unix paths and programs; remote authority is Unix only.
+    #[cfg(unix)]
     #[test]
     fn an_acp_session_has_no_record_to_look_in() {
         let now = chrono::Utc::now();

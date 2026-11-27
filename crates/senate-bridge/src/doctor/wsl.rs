@@ -124,7 +124,9 @@ pub fn checks(wsl: &Wsl, spec: Option<&service::Spec>, l: Locale) -> Vec<Check> 
     checks
 }
 
+// For doctor's tests, which are Unix only.
 #[cfg(test)]
+#[cfg(unix)]
 pub(super) fn fake(root: &std::path::Path) -> Wsl {
     Wsl {
         distro: "Ubuntu".into(),

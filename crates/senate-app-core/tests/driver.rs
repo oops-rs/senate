@@ -2,6 +2,8 @@
 //! stream, reconnecting, and the inbox / take / close / approve / docket
 //! round trips, all in the bridge's own wire types.
 
+// The macOS app's core, tested against Unix-socket fakes.
+#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 #[path = "support/common.rs"]

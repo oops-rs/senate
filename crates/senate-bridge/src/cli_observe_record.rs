@@ -1,7 +1,7 @@
+use crate::fsmode::OpenOptionsExt;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::net::{Ipv4Addr, SocketAddr};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -53,10 +53,9 @@ pub(super) struct Replay {
 
 pub(super) async fn record(args: Record) -> anyhow::Result<()> {
     use std::io::Read;
-    use std::os::unix::fs::PermissionsExt;
 
     let token_file = std::fs::File::open(&args.token_file)?;
-    if token_file.metadata()?.permissions().mode() & 0o077 != 0 {
+    if !crate::fsmode::owner_only(&token_file.metadata()?) {
         bail!("Use an owner-only token file");
     }
     let mut token = String::new();

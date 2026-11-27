@@ -2,10 +2,10 @@
 
 use super::*;
 use crate::ipc::{TimelineDirection, TimelineReply, TimelineUpdate};
+use crate::local::{OwnedReadHalf, OwnedWriteHalf};
 use crate::timeline::{self, SidebarTranscript, Transcript};
 use chrono::{DateTime, Utc};
 use tokio::io::{AsyncReadExt, BufReader};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 impl Shared {
     pub(super) fn timeline_session(&self, id: &str) -> Result<Session, IpcError> {

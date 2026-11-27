@@ -1,8 +1,10 @@
 //! File descriptor budgets shared by the daemon and its service definitions.
 
+#[cfg(unix)]
 use rustix::process::{Resource, getrlimit, setrlimit};
 
 pub(crate) const SERVICE_LIMIT: u64 = 10_240;
+#[cfg(unix)]
 const HOST_LIMIT: u64 = 4_096;
 
 #[cfg(target_os = "macos")]
@@ -22,13 +24,23 @@ fn kernel_limit() -> Option<u64> {
     (result == 0 && value > 0).then_some(value as u64)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn kernel_limit() -> Option<u64> {
+    None
+}
+
+/// Windows has no descriptor limit to raise: handles are bounded by memory.
+#[cfg(windows)]
+pub fn raise_daemon_limit() {}
+
+#[cfg(windows)]
+fn effective_limit() -> Option<u64> {
     None
 }
 
 /// Run before opening the daemon's listeners. Keep an administrator's hard
 /// limit. Darwin wants a finite request rather than RLIM_INFINITY.
+#[cfg(unix)]
 pub fn raise_daemon_limit() {
     let mut limits = getrlimit(Resource::Nofile);
     let before = limits.current;
@@ -47,6 +59,7 @@ pub fn raise_daemon_limit() {
 
 /// A terminal host and its runtime need a smaller budget than a daemon
 /// serving every session. Preserve any lower limit inherited from launch.
+#[cfg(unix)]
 pub(crate) fn cap_host_limit() -> std::io::Result<()> {
     let mut limits = getrlimit(Resource::Nofile);
     if limits.current.is_none_or(|current| current > HOST_LIMIT) {
@@ -62,6 +75,7 @@ pub struct Snapshot {
     pub open: Option<u64>,
 }
 
+#[cfg(unix)]
 fn effective_limit() -> Option<u64> {
     let current = getrlimit(Resource::Nofile).current;
     match (current, kernel_limit()) {
@@ -77,8 +91,15 @@ pub(crate) fn snapshot() -> Snapshot {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn exhausted(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(libc::EMFILE | libc::ENFILE))
+}
+
+/// ERROR_TOO_MANY_OPEN_FILES.
+#[cfg(windows)]
+pub(crate) fn exhausted(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(4)
 }
 
 #[cfg(target_os = "macos")]

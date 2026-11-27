@@ -1,6 +1,10 @@
 //! A detached terminal owner. The daemon records the session's identity, but
 //! only this process holds the master PTY and its child.
 
+// Hosted terminals run on Unix PTYs; on Windows only the host's records
+// (none exist there) and its refusals are used, the rest is not.
+#![cfg_attr(windows, allow(dead_code, unused_imports, unused_variables))]
+
 pub(crate) mod activity;
 pub(crate) mod control;
 mod emulation;
@@ -8,7 +12,30 @@ mod input;
 mod keyboard;
 pub(crate) mod keys;
 pub(crate) mod look;
+#[cfg(unix)]
 pub(crate) mod paste;
+/// Pastes and uploads go into a host's directory, which no host has on
+/// Windows.
+#[cfg(windows)]
+pub(crate) mod paste {
+    use std::ffi::OsStr;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    pub(crate) fn store(_: &Path, _: &OsStr, _: &mut impl io::Read) -> io::Result<PathBuf> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            super::HOSTED_UNSUPPORTED,
+        ))
+    }
+
+    pub(crate) fn drop_directory(_: &crate::Paths, _: &Path) -> io::Result<PathBuf> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            super::HOSTED_UNSUPPORTED,
+        ))
+    }
+}
 mod picker;
 pub(crate) mod prompt;
 pub mod scratch;
@@ -19,11 +46,14 @@ pub mod view;
 mod vt;
 pub(crate) mod watch;
 
+use crate::fsmode::{DirBuilderExt, OpenOptionsExt};
+#[cfg(unix)]
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,15 +61,18 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::local::{Listener as UnixListener, Stream as UnixStream};
 use anyhow::{Context, bail, ensure};
+#[cfg(unix)]
 use pty_process::{OwnedWritePty, Size};
+#[cfg(unix)]
 use rustix::fs::{FlockOperation, flock};
 use senate_core::EventId;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::process::Child;
 #[cfg(not(target_os = "linux"))]
 use tokio::process::Command;
+#[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::broadcast;
 
@@ -71,6 +104,7 @@ pub(crate) const COLORS: u8 = 3;
 
 /// The TUI's side of the PTY, shared by the output pump, which answers for
 /// an absent viewer, and the relay of an attached one.
+#[cfg(unix)]
 struct Tty {
     write: tokio::sync::Mutex<OwnedWritePty>,
     emulation: Mutex<Emulation>,
@@ -83,6 +117,7 @@ struct Tty {
     find: tokio::sync::Notify,
 }
 
+#[cfg(unix)]
 impl Tty {
     fn new(write: OwnedWritePty, scheme: Scheme, rows: u16, cols: u16) -> Self {
         Self {
@@ -257,9 +292,7 @@ fn open_lock(dir: &Path) -> io::Result<File> {
 
 /// The operating system releases this lock even if the host crashes.
 pub(crate) fn running(paths: &Paths, id: &EventId) -> io::Result<bool> {
-    let file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+    let file = match crate::fsmode::no_follow(OpenOptions::new().read(true))
         .open(directory(paths, id).join("owner"))
     {
         Ok(file) => file,
@@ -269,10 +302,10 @@ pub(crate) fn running(paths: &Paths, id: &EventId) -> io::Result<bool> {
     if !file.metadata()?.is_file() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    match flock(&file, FlockOperation::NonBlockingLockShared) {
+    match file.try_lock_shared() {
         Ok(()) => Ok(false),
-        Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
-        Err(e) => Err(e.into()),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
     }
 }
 
@@ -339,10 +372,10 @@ pub(crate) fn remove_ended_host(paths: &Paths, id: &EventId) -> io::Result<bool>
 fn remove_if_ended(path: &Path) -> io::Result<bool> {
     // Held while removing: a host taking it now waits, then finds it gone.
     let _lock = match File::open(path.join("owner")) {
-        Ok(file) => match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(file) => match file.try_lock() {
             Ok(()) => Some(file),
-            Err(rustix::io::Errno::WOULDBLOCK) => return Ok(false),
-            Err(error) => return Err(error.into()),
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
@@ -382,10 +415,10 @@ pub(crate) fn prune_abandoned(paths: &Paths, age: Duration) -> io::Result<()> {
         }
         let path = entry.path();
         let _lock = match File::open(path.join("owner")) {
-            Ok(file) => match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(file) => match file.try_lock() {
                 Ok(()) => Some(file),
-                Err(rustix::io::Errno::WOULDBLOCK) => continue,
-                Err(error) => return Err(error.into()),
+                Err(std::fs::TryLockError::WouldBlock) => continue,
+                Err(std::fs::TryLockError::Error(error)) => return Err(error),
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
@@ -436,12 +469,19 @@ pub(super) struct Admission {
 }
 
 impl Admission {
+    #[cfg(unix)]
     fn peer(stream: &UnixStream) -> Option<u32> {
         let credentials = stream.peer_cred().ok()?;
         if credentials.uid() != rustix::process::geteuid().as_raw() {
             return None;
         }
         u32::try_from(credentials.pid()?).ok()
+    }
+
+    /// The pipe's client, checked at accept to run as this user.
+    #[cfg(windows)]
+    fn peer(stream: &UnixStream) -> Option<u32> {
+        Some(stream.peer_pid())
     }
 
     async fn is_daemon(&self, stream: &UnixStream, host: &EventId) -> bool {
@@ -737,8 +777,13 @@ pub(crate) fn preflight(paths: &Paths, id: &EventId, program: &Path) -> anyhow::
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
             let metadata = std::fs::symlink_metadata(parent)?;
+            #[cfg(unix)]
+            let private = metadata.permissions().mode() & 0o777 == 0o700;
+            // The home's DACL, inherited, keeps it the person's.
+            #[cfg(windows)]
+            let private = true;
             ensure!(
-                metadata.is_dir() && metadata.permissions().mode() & 0o777 == 0o700,
+                metadata.is_dir() && private,
                 "{} must be a private directory (0700)",
                 parent.display()
             );
@@ -746,8 +791,13 @@ pub(crate) fn preflight(paths: &Paths, id: &EventId, program: &Path) -> anyhow::
         Err(e) => return Err(e.into()),
     }
 
+    #[cfg(unix)]
     let executable = |path: &Path| {
         path.is_file() && rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
+    };
+    #[cfg(windows)]
+    let executable = |path: &Path| {
+        std::fs::metadata(path).is_ok_and(|meta| crate::fsmode::runnable(path, &meta))
     };
     let found =
         if program.components().count() == 1 && program.file_name() == Some(program.as_os_str()) {
@@ -776,6 +826,9 @@ pub(crate) fn start(
     session: &SessionCommand<'_>,
     before_spawn: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<(Child, File)> {
+    if cfg!(windows) {
+        bail!(HOSTED_UNSUPPORTED);
+    }
     let dir = directory(paths, id);
     #[cfg(target_os = "linux")]
     let mut command = crate::linux_scope::command(host_binary, id);
@@ -844,6 +897,10 @@ pub(crate) fn start(
     }
 }
 
+/// Why a hosted session cannot start on this machine.
+pub(crate) const HOSTED_UNSUPPORTED: &str =
+    "hosted sessions are not supported on Windows yet: run the coding agent in your own terminal";
+
 struct RemoveDirectory(PathBuf);
 
 impl Drop for RemoveDirectory {
@@ -852,6 +909,18 @@ impl Drop for RemoveDirectory {
     }
 }
 
+#[cfg(windows)]
+pub async fn run(
+    _paths: &Paths,
+    _id: &EventId,
+    _runtime: HostedRuntime,
+    _cwd: &Path,
+    _session: &SessionCommand<'_>,
+) -> anyhow::Result<()> {
+    bail!(HOSTED_UNSUPPORTED)
+}
+
+#[cfg(unix)]
 pub async fn run(
     paths: &Paths,
     id: &EventId,
@@ -1177,6 +1246,7 @@ impl HostedModel {
     }
 }
 
+#[cfg(unix)]
 fn runtime_command(
     runtime: HostedRuntime,
     cwd: &Path,
@@ -1327,6 +1397,7 @@ async fn vanished(dir: &Path) {
     }
 }
 
+#[cfg(unix)]
 async fn stop_group(child: &mut Child, pid: Pid) -> anyhow::Result<()> {
     fn send(pid: Pid, signal: Signal) -> rustix::io::Result<()> {
         match kill_process_group(pid, signal) {
@@ -1500,6 +1571,7 @@ pub(crate) fn clear_context_reports(paths: &Paths, id: &EventId) {
 /// process group) ID.
 const HOST_PID: &str = "host-pid";
 
+#[cfg(unix)]
 fn recorded_pid(dir: &Path, file: &str) -> Option<Pid> {
     std::fs::read_to_string(dir.join(file))
         .ok()
@@ -1511,6 +1583,14 @@ fn recorded_pid(dir: &Path, file: &str) -> Option<Pid> {
 /// stops its TUI's group and removes its directory), and kills both
 /// groups if it is still running after `grace`. Nothing to do for a host
 /// that is not running.
+#[cfg(windows)]
+pub(crate) async fn terminate(paths: &Paths, id: &EventId, _grace: Duration) -> io::Result<()> {
+    // No host runs on Windows (start refuses), so none is left to end.
+    let _ = running(paths, id)?;
+    Ok(())
+}
+
+#[cfg(unix)]
 pub(crate) async fn terminate(paths: &Paths, id: &EventId, grace: Duration) -> io::Result<()> {
     if !running(paths, id)? {
         return Ok(());
@@ -1539,6 +1619,10 @@ pub(crate) async fn terminate(paths: &Paths, id: &EventId, grace: Duration) -> i
 /// this is for a test's temporary home as the test ends (a test harness
 /// calls it when dropped, even when the test panics), not for a person's
 /// sessions, which `senate session stop` ends.
+#[cfg(windows)]
+pub fn kill_all(_paths: &Paths) {}
+
+#[cfg(unix)]
 pub fn kill_all(paths: &Paths) {
     let Ok(entries) = std::fs::read_dir(hosts(paths)) else {
         return;
@@ -1568,8 +1652,12 @@ pub fn kill_all(paths: &Paths) {
 
 /// The host process's own pid, as it recorded it.
 pub(crate) fn host_pid(paths: &Paths, id: &EventId) -> Option<u32> {
-    recorded_pid(&directory(paths, id), HOST_PID)
-        .and_then(|pid| u32::try_from(pid.as_raw_nonzero().get()).ok())
+    std::fs::read_to_string(directory(paths, id).join(HOST_PID))
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid > 0)
 }
 
 pub(crate) fn child_pid(paths: &Paths, id: &EventId) -> Option<u32> {
@@ -1580,10 +1668,10 @@ pub(crate) fn child_pid(paths: &Paths, id: &EventId) -> Option<u32> {
         .ok()
 }
 
-async fn accept(listener: &UnixListener) -> (UnixStream, tokio::net::unix::SocketAddr) {
+async fn accept(listener: &UnixListener) -> UnixStream {
     loop {
         match listener.accept().await {
-            Ok(connection) => return connection,
+            Ok((stream, _)) => return stream,
             Err(error) => {
                 tracing::warn!(%error, "accepting a terminal host connection");
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1592,6 +1680,7 @@ async fn accept(listener: &UnixListener) -> (UnixStream, tokio::net::unix::Socke
     }
 }
 
+#[cfg(unix)]
 async fn serve(
     listener: &UnixListener,
     tty: &Tty,
@@ -1599,7 +1688,7 @@ async fn serve(
     admission: &Admission,
 ) -> anyhow::Result<()> {
     loop {
-        let (mut stream, _) = accept(listener).await;
+        let mut stream = accept(listener).await;
         if !admission.viewer(&mut stream, true).await {
             continue;
         }
@@ -1621,7 +1710,7 @@ async fn serve(
                         }
                         break;
                     }
-                    (mut other, _) = accept(listener) => {
+                    mut other = accept(listener) => {
                         if !admission.viewer(&mut other, true).await {
                             continue;
                         }
@@ -1651,6 +1740,7 @@ async fn serve(
     }
 }
 
+#[cfg(unix)]
 async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> anyhow::Result<()> {
     stream.write_u8(ATTACHED_NATIVE).await?;
     let (rows, cols) = tokio::time::timeout(Duration::from_secs(3), async {
@@ -1822,6 +1912,7 @@ async fn relay(mut stream: UnixStream, tty: &Tty, viewer: &Mutex<Viewer>) -> any
     result
 }
 
+#[cfg(unix)]
 async fn attachment_size(
     input: &mut (impl tokio::io::AsyncRead + Unpin),
 ) -> anyhow::Result<(u16, u16)> {
@@ -1831,6 +1922,7 @@ async fn attachment_size(
     Ok((rows, cols))
 }
 
+#[cfg(unix)]
 async fn forward_keys(
     tty: &Tty,
     viewer: &Mutex<Viewer>,
@@ -1868,6 +1960,7 @@ async fn forward_keys(
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     #[test]
     fn replacement_daemon_fixture_process() -> anyhow::Result<()> {

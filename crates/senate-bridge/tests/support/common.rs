@@ -34,6 +34,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use senate_bridge::hook::{HookEnv, HookKind, HookTimeouts};
+use senate_bridge::local::Listener as UnixListener;
 use senate_bridge::state::Store;
 use senate_bridge::{BridgeConfig, DaemonHandle, DaemonOptions, Paths, Timing, daemon};
 use senate_core::api::{
@@ -48,12 +49,13 @@ use senate_core::{
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-use tokio::net::UnixListener;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 
+// A fake Codex app-server on a Unix socket (`codex.listen`).
+#[cfg(unix)]
 #[path = "common/fake_codex.rs"]
 pub mod fake_codex;
 
@@ -161,6 +163,7 @@ fi
 /// A stand-in for agy: it records its argv, then does what agy does on its
 /// first prompt, running Senate's SessionStart hook with the conversation
 /// it picked, and records what the hook printed.
+#[cfg(unix)]
 pub fn agy_fixture(dir: &std::path::Path, conversation: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt as _;
     const BIN: &str = env!("CARGO_BIN_EXE_senate");
@@ -2084,6 +2087,7 @@ impl Harness {
     }
 
     /// The fake Codex app-server the daemon's `[codex] listen` names.
+    #[cfg(unix)]
     pub fn codex(&self) -> fake_codex::FakeCodex {
         fake_codex::FakeCodex::bind(self.dir.path().join("codex.sock"))
     }

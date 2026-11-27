@@ -9,12 +9,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
+#[cfg(windows)]
+use senate_bridge::local::Stream as UnixStream;
 use senate_core::{
     AnnouncementSection, Card, ChatSurface, CreatedGroup, Link, Locale, NewGroup, PostTarget,
     StatusState, Step, SurfaceError,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -131,7 +134,7 @@ struct Served {
 async fn serve(capabilities: &'static [&'static str]) -> Served {
     let dir = tempfile::tempdir().unwrap();
     let config = SenatedConfig::from_toml_str(&format!(
-        "listen = \"127.0.0.1:0\"\ndatabase_url = \"sqlite:{}\"\n",
+        "listen = \"127.0.0.1:0\"\ndatabase_url = 'sqlite:{}'\n",
         dir.path().join("log.db").display(),
     ))
     .unwrap();

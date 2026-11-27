@@ -567,9 +567,9 @@ fn agy_conversation_open_in(home: &Path, session_id: &str) -> Option<bool> {
         .join(".gemini/antigravity-cli/presence")
         .join(format!("{conversation}.lock"));
     let file = std::fs::File::open(path).ok()?;
-    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared) {
+    match file.try_lock_shared() {
         Ok(()) => Some(false),
-        Err(rustix::io::Errno::WOULDBLOCK) => Some(true),
+        Err(std::fs::TryLockError::WouldBlock) => Some(true),
         Err(_) => None,
     }
 }
@@ -579,7 +579,7 @@ fn agy_conversation_open_in(home: &Path, session_id: &str) -> Option<bool> {
 /// (agy runs its hooks where hooks.json is), the runtime's.
 pub async fn ancestor_cwd(timeout: Duration) -> Option<PathBuf> {
     let own = std::env::current_dir().ok()?;
-    let parent = std::os::unix::process::parent_id();
+    let parent = crate::kernel_process::parent_id();
     for pid in ancestor_pids(parent, 4, timeout).await {
         if let Ok(cwd) = crate::kernel_process::cwd(pid)
             && cwd.is_absolute()
@@ -592,6 +592,13 @@ pub async fn ancestor_cwd(timeout: Duration) -> Option<PathBuf> {
 }
 
 /// Whether a process with this pid exists (it may belong to another user).
+#[cfg(windows)]
+pub fn pid_alive(pid: u32) -> bool {
+    crate::win::alive(pid)
+}
+
+/// Whether a process with this pid exists (it may belong to another user).
+#[cfg(unix)]
 #[allow(unsafe_code)]
 pub fn pid_alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
@@ -611,6 +618,7 @@ pub fn pid_alive(pid: u32) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn an_agy_conversation_is_open_while_agy_holds_its_presence_lock() {
         let home = tempfile::tempdir().unwrap();
@@ -751,7 +759,7 @@ mod tests {
         let me = std::process::id();
         let chain = ancestor_pids(me, 2, Duration::from_secs(5)).await;
         assert_eq!(chain.first(), Some(&me));
-        let parent = std::os::unix::process::parent_id();
+        let parent = crate::kernel_process::parent_id();
         if parent > 1 {
             assert_eq!(chain.get(1), Some(&parent), "{chain:?}");
         }

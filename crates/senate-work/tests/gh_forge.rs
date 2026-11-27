@@ -1,4 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// The fake is a `#!/bin/sh` script, which Windows cannot run.
+#![cfg(unix)]
 
 //! GhForge against a fake `gh` (a shell script that keeps its PRs in a
 //! file): command construction, the token by environment only, idempotency.

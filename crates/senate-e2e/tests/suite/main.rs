@@ -13,6 +13,9 @@
 //! the process itself (its environment, its working directory) belongs in a
 //! binary of its own beside this directory.
 
+// Built on Unix fixtures (`#!/bin/sh` fakes, Unix sockets): Unix only for now.
+#![cfg(unix)]
+
 #[path = "../support/common.rs"]
 mod common;
 

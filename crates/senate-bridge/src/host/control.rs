@@ -2,18 +2,19 @@
 //! a host with a viewer.
 
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::local::{Listener as UnixListener, Stream as UnixStream};
 use senate_core::{EventId, NewEvent};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 
+use super::directory;
 use super::prompt::{self, NoChoice, PermissionChoice};
-use super::{Tty, Viewer, accept, directory, observed_at};
+#[cfg(unix)]
+use super::{Tty, Viewer, accept, observed_at};
 use crate::ipc::{self, IpcError, codes};
 use crate::paths::Paths;
 use crate::state::Store;
@@ -152,11 +153,12 @@ fn socket(paths: &Paths, id: &EventId) -> PathBuf {
 pub(super) fn listen(paths: &Paths, id: &EventId) -> io::Result<UnixListener> {
     let path = socket(paths, id);
     let listener = UnixListener::bind(&path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    crate::fsmode::set_mode(&path, 0o600)?;
     Ok(listener)
 }
 
 /// Serves nudges until a stop request is accepted, and returns its stream.
+#[cfg(unix)]
 pub(super) async fn next_stop(
     listener: &UnixListener,
     viewer: &Mutex<Viewer>,
@@ -166,7 +168,7 @@ pub(super) async fn next_stop(
     admission: &super::Admission,
 ) -> UnixStream {
     loop {
-        let (mut stream, _) = accept(listener).await;
+        let mut stream = accept(listener).await;
         if !admission.is_daemon(&stream, host).await {
             tracing::warn!(%host, "refused a terminal control request from an unverified daemon peer");
             continue;
@@ -311,6 +313,7 @@ pub(crate) async fn grant_viewer(
 /// Whether the screen shows something a typed Enter would answer: a
 /// prompt or choice as [`prompt::looks_like_prompt`] sees it, or a choice
 /// whose options are spread out by long descriptions.
+#[cfg(unix)]
 fn prompt_on_screen(tty: &Tty) -> bool {
     let rows = tty.screen.rows();
     prompt::looks_like_prompt(&rows) || prompt::may_be_choice(&rows)
@@ -322,6 +325,7 @@ fn prompt_on_screen(tty: &Tty) -> bool {
 /// within `quiet` of a viewer typing, or within `quiet` of the TUI writing
 /// to its terminal (a turn is running: [`super::activity`]). A watcher
 /// records no input, so watching never holds a wake back.
+#[cfg(unix)]
 async fn wake_once(
     stream: &mut UnixStream,
     viewer: &Mutex<Viewer>,
@@ -397,6 +401,7 @@ async fn wake_once(
 /// Type the key that makes `choice` in the permission dialog on screen, as
 /// a person at the terminal would, and wait for the TUI to redraw. Never
 /// types when the screen shows no such dialog or option.
+#[cfg(unix)]
 async fn answer_once(stream: &mut UnixStream, tty: &Tty, choice: PermissionChoice) {
     let before = tty.screen.rows();
     let key = match prompt::permission_key(&before, choice) {
@@ -667,6 +672,7 @@ pub(crate) async fn begin_stop(
     }
 }
 
+#[cfg(unix)]
 pub(super) async fn acknowledge(mut stream: UnixStream, stopped: bool, recorded: bool) {
     let reply = match (stopped, recorded) {
         (false, _) => FAILED,
@@ -692,6 +698,7 @@ pub(crate) async fn wait_stopped(mut stream: UnixStream) -> Result<bool, IpcErro
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use std::io::Read as _;
 

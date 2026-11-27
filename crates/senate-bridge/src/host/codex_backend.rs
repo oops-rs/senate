@@ -1,5 +1,5 @@
+use crate::fsmode::DirBuilderExt;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -8,6 +8,7 @@ use anyhow::{Context, Result, ensure};
 use senate_core::EventId;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::{TcpStream, UnixListener, UnixStream};
 use tokio::process::{ChildStdin, Command};
 
@@ -34,6 +35,20 @@ fn directory(paths: &Paths, id: &EventId) -> PathBuf {
 }
 
 impl Unpublished {
+    /// The TUI reaches its backend over a Unix socket of Senate's
+    /// (`--remote unix://…`): hosted Codex is Unix only.
+    #[cfg(windows)]
+    pub(crate) async fn start(
+        _paths: &Paths,
+        _id: &EventId,
+        _bridge: &Path,
+        _program: &Path,
+        _cwd: &Path,
+    ) -> Result<Self> {
+        anyhow::bail!(super::HOSTED_UNSUPPORTED)
+    }
+
+    #[cfg(unix)]
     pub(crate) async fn start(
         paths: &Paths,
         id: &EventId,
@@ -106,13 +121,24 @@ impl Drop for BackendDirectory {
     }
 }
 
+#[cfg(windows)]
+pub(crate) async fn supervise(
+    _paths: &Paths,
+    _id: &EventId,
+    _program: &Path,
+    _cwd: &Path,
+) -> Result<()> {
+    anyhow::bail!(super::HOSTED_UNSUPPORTED)
+}
+
+#[cfg(unix)]
 pub(crate) async fn supervise(
     paths: &Paths,
     id: &EventId,
     program: &Path,
     cwd: &Path,
 ) -> Result<()> {
-    let daemon = super::DaemonIdentity::capture(std::os::unix::process::parent_id())?;
+    let daemon = super::DaemonIdentity::capture(crate::kernel_process::parent_id())?;
     let executable = std::env::current_exe()?.canonicalize()?;
     let dir = directory(paths, id);
     ensure!(
@@ -198,22 +224,26 @@ pub(crate) async fn supervise(
     Ok(())
 }
 
+#[cfg(unix)]
 fn private_listener(path: &Path) -> Result<UnixListener> {
     let listener = UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    crate::fsmode::set_mode(path, 0o600)?;
     Ok(listener)
 }
 
+#[cfg(unix)]
 fn bind_process(pid: u32) -> std::io::Result<BoundProcess> {
     BoundProcess::capture(kernel_process::inspect(pid)?.identity)
 }
 
+#[cfg(unix)]
 fn is_child(pid: u32, parent: &BoundProcess) -> bool {
     parent.live()
         && kernel_process::inspect(pid)
             .is_ok_and(|process| process.parent_pid == parent.pid && parent.contains(pid, 2))
 }
 
+#[cfg(unix)]
 async fn accept_host(
     listener: &UnixListener,
     daemon: &BoundProcess,
@@ -230,6 +260,7 @@ async fn accept_host(
     }
 }
 
+#[cfg(unix)]
 async fn startup_address(
     report: &mut BufReader<impl tokio::io::AsyncRead + Unpin>,
 ) -> Result<SocketAddrV4> {
@@ -252,6 +283,7 @@ async fn startup_address(
 type OwnerWatch = tokio::sync::watch::Receiver<Option<BoundProcess>>;
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(unix)]
 async fn serve_rpc(
     paths: &Paths,
     listener: &UnixListener,
@@ -291,6 +323,7 @@ async fn serve_rpc(
     }
 }
 
+#[cfg(unix)]
 async fn relay(
     mut local: UnixStream,
     address: SocketAddrV4,
@@ -333,6 +366,7 @@ async fn relay(
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 

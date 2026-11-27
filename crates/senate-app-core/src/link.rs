@@ -19,12 +19,12 @@ use senate_bridge::ipc::{
     MAX_LINE, Posted, Reply, Request, SessionRow, SessionSelector, SessionsReply, TimelineUpdate,
     WatchEvent,
 };
+use senate_bridge::local::Stream as UnixStream;
 use senate_core::alias::KnownAliases;
 use senate_core::{CommitteeId, Locale, SenatorName};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 use crate::model::{Action, Effects, Failure, Model, Notice, Offline, ReadOf, Refresh, message};
 

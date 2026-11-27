@@ -5,10 +5,27 @@ use serde::{Deserialize, Serialize};
 
 /// An observation time shared by the host, hooks and daemon on this machine.
 /// A host ID never survives a reboot, so different boots cannot mix times.
+#[cfg(unix)]
 pub(crate) fn observed_at() -> u64 {
     use rustix::time::{ClockId, clock_gettime};
     let now = clock_gettime(ClockId::Monotonic);
     (now.tv_sec as u64) * 1_000_000_000 + now.tv_nsec as u64
+}
+
+/// The performance counter is one system-wide monotonic clock on Windows.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub(crate) fn observed_at() -> u64 {
+    use windows_sys::Win32::System::Performance::{
+        QueryPerformanceCounter, QueryPerformanceFrequency,
+    };
+    let (mut count, mut frequency) = (0i64, 0i64);
+    // SAFETY: two writable integers; both calls cannot fail on XP and later.
+    unsafe {
+        QueryPerformanceCounter(&mut count);
+        QueryPerformanceFrequency(&mut frequency);
+    }
+    (i128::from(count) * 1_000_000_000 / i128::from(frequency.max(1))) as u64
 }
 
 /// One bounded log line. Runtime tool arguments are untrusted text.

@@ -10,13 +10,16 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 
+#[cfg(unix)]
 use crate::bundle::digest_file;
 use crate::{
-    ArchiveProblem, Bundle, MAX_FILE, MAX_TOTAL, Problem, content_type, ignored, read, shown,
-    valid_relative,
+    ArchiveProblem, MAX_FILE, MAX_TOTAL, Problem, content_type, ignored, shown, valid_relative,
 };
+#[cfg(unix)]
+use crate::{Bundle, read};
 
 /// The largest archive.
 pub const MAX_ARCHIVE: u64 = MAX_TOTAL + 1024 * 1024;
@@ -166,6 +169,7 @@ pub fn unpack(archive: &Path, staging: &Path) -> Result<PathBuf, Problem> {
     let bytes = fs::read(archive).map_err(|_| io(archive))?;
     let list = entries(&bytes)?;
     let mut dir = fs::DirBuilder::new();
+    #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
     dir.create(staging).map_err(|_| io(staging))?;
     for entry in list.iter().filter(|e| !e.directory && !e.sidecar) {
@@ -243,6 +247,7 @@ pub(crate) fn crc32(data: &[u8]) -> u32 {
 /// not exist): the bundle is checked first, then exactly its files, sorted,
 /// stored, with fixed times and modes, so the same bundle always makes the
 /// same bytes. Returns the checked bundle.
+#[cfg(unix)]
 pub fn pack(root: &Path, out: &Path) -> Result<Bundle, Problem> {
     let bundle = Bundle::scan(root)?;
     let mut archive: Vec<u8> = Vec::new();
@@ -318,6 +323,7 @@ pub fn pack(root: &Path, out: &Path) -> Result<Bundle, Problem> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     const MANIFEST: &str = r#"{"name":"Fixture","version":"1.0.0","entry":"index.html","observe":{"major":1,"required":[],"optional":[]},"cards":{"reads":[],"writes":[]},"min_host_version":1}"#;
 
     /// A hand-made zip, so tests can write what no tool would.
@@ -446,6 +452,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn pack_is_deterministic_and_unpacks_to_the_same_bundle() {
         let src = tempfile::tempdir().expect("tempdir");
@@ -475,6 +482,7 @@ mod tests {
         assert_eq!(Bundle::scan(&root).expect("scan").digest, a.digest);
     }
 
+    #[cfg(unix)]
     #[test]
     fn unpack_takes_one_top_folder_and_checks_every_file() {
         let out = tempfile::tempdir().expect("tempdir");

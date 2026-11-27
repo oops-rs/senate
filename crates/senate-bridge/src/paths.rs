@@ -15,7 +15,6 @@
 //! and every session's inbox token.
 
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use senate_core::Locale;
@@ -141,10 +140,12 @@ impl Paths {
     /// Whether [`Paths::socket`] fits in a Unix socket address. The socket
     /// is never moved somewhere else on its own: the person decides where
     /// their home is.
+    /// A named pipe (Windows) has no such limit: its name is a digest of
+    /// the path ([`crate::local`]).
     pub fn check_socket(&self, locale: Locale) -> Result<(), SocketPathTooLong> {
         let path = self.socket();
         let len = path.as_os_str().len();
-        if len > SOCKET_PATH_LIMIT {
+        if cfg!(unix) && len > SOCKET_PATH_LIMIT {
             return Err(SocketPathTooLong {
                 path,
                 len,
@@ -156,12 +157,21 @@ impl Paths {
     }
 
     /// Create the home directory (0700) if missing and tighten its mode.
+    /// On Windows its DACL grants the person alone, and what is created
+    /// inside inherits that.
     pub fn ensure_home(&self) -> io::Result<()> {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&self.home)?;
-        std::fs::set_permissions(&self.home, std::fs::Permissions::from_mode(0o700))
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&self.home)?;
+        #[cfg(unix)]
+        return std::fs::set_permissions(
+            &self.home,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        );
+        #[cfg(windows)]
+        return crate::win::OwnerOnly::current()?.apply(&self.home);
     }
 }
 
@@ -178,6 +188,7 @@ mod tests {
         assert_eq!(p.socket(), PathBuf::from("/x/.senate/bridge.sock"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_socket_path_over_the_limit_is_refused_in_the_configured_language() {
         let short = Paths::new("/x/.senate");
@@ -213,8 +224,10 @@ mod tests {
         assert_eq!(p.config(), dir.path().join("senate.toml"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn ensure_home_is_private() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let p = Paths::new(dir.path().join("h"));
         p.ensure_home().unwrap();

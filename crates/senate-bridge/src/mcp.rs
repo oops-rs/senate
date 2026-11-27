@@ -1274,7 +1274,7 @@ pub fn selector_from_env() -> SessionSelector {
         session_id: var("CLAUDE_CODE_SESSION_ID"),
         claude_pid: var("CLAUDE_PID")
             .and_then(|p| p.parse().ok())
-            .or_else(|| Some(std::os::unix::process::parent_id())),
+            .or_else(|| Some(crate::kernel_process::parent_id())),
     }
 }
 
@@ -3794,9 +3794,9 @@ mod tests {
         use serde_json::json;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let dir = crate::testenv::short_tempdir().unwrap();
         let socket = dir.path().join("bridge.sock");
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let listener = crate::local::Listener::bind(&socket).unwrap();
         let (sent, mut seen) = tokio::sync::mpsc::unbounded_channel::<String>();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
@@ -4158,7 +4158,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bridge.sock");
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let listener = crate::local::Listener::bind(&path).unwrap();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
         let log = seen.clone();
         tokio::spawn(async move {

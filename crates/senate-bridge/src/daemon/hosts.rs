@@ -169,6 +169,10 @@ impl HostProcess {
 }
 
 async fn stop_child(child: &mut Child) -> Result<(), IpcError> {
+    // Windows has no SIGTERM: end the process, then wait as below.
+    #[cfg(windows)]
+    let _ = child.start_kill();
+    #[cfg(unix)]
     if let Some(pid) = child
         .id()
         .and_then(|pid| i32::try_from(pid).ok())
@@ -1185,9 +1189,13 @@ impl Shared {
                 .map_err(IpcError::internal)?
                 .bin(),
         };
-        if !self.host_binary.is_file()
-            || rustix::fs::access(&self.host_binary, rustix::fs::Access::EXEC_OK).is_err()
-        {
+        #[cfg(unix)]
+        let runnable = self.host_binary.is_file()
+            && rustix::fs::access(&self.host_binary, rustix::fs::Access::EXEC_OK).is_ok();
+        #[cfg(windows)]
+        let runnable = std::fs::metadata(&self.host_binary)
+            .is_ok_and(|meta| crate::fsmode::runnable(&self.host_binary, &meta));
+        if !runnable {
             return Err(IpcError::internal(format!(
                 "Senate CLI executable not found: {}",
                 self.host_binary.display()
@@ -1793,7 +1801,7 @@ async fn claude_reachable(session: &Session) -> bool {
         return false;
     };
     crate::testenv::confined(socket)
-        && tokio::time::timeout(Duration::from_millis(300), UnixStream::connect(socket))
+        && tokio::time::timeout(Duration::from_millis(300), local::Stream::connect(socket))
             .await
             .is_ok_and(|result| result.is_ok())
 }

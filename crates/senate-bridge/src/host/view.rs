@@ -51,6 +51,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+#[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -1211,6 +1212,14 @@ enum Left {
     Attach(Session),
 }
 
+/// Opening the raw terminal fails on Windows (`RawTerminal`), before any
+/// signal is waited for.
+#[cfg(windows)]
+async fn stay(_viewer: &mut Viewer, _relist: Option<&mut GridListing<'_>>) -> anyhow::Result<Left> {
+    RawTerminal::open(true).await.map(|_| Left::Quit)
+}
+
+#[cfg(unix)]
 async fn stay(
     viewer: &mut Viewer,
     mut relist: Option<&mut GridListing<'_>>,
@@ -1417,6 +1426,7 @@ async fn watch_grid(
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 
@@ -2393,7 +2403,7 @@ mod tests {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         let listener =
-            tokio::net::UnixListener::bind(dir.path().join(super::super::watch::SOCKET)).unwrap();
+            crate::local::Listener::bind(dir.path().join(super::super::watch::SOCKET)).unwrap();
         let host = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             // Greet, say the size, and show a prompt.

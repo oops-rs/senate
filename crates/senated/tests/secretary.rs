@@ -35,7 +35,7 @@ fn home(body: &str, files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf) {
     std::fs::write(
         &config,
         format!(
-            "listen = \"127.0.0.1:0\"\ndatabase_url = \"memory:\"\ndata_dir = \"{}\"\nlocale = \"en\"\n{body}",
+            "listen = \"127.0.0.1:0\"\ndatabase_url = \"memory:\"\ndata_dir = '{}'\nlocale = \"en\"\n{body}",
             dir.path().join("data").display()
         ),
     )
@@ -226,8 +226,11 @@ fn secretary_show_names_each_source_and_never_the_key() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let text = String::from_utf8(output.stdout).unwrap();
+    // The fixture's own paths may lie under HOME (on Windows the temp dir
+    // is C:\Users\<name>\AppData\…): only the rest must not show it.
+    let outside = text.replace(&dir.path().display().to_string(), "");
     assert!(
-        !text.contains(&secret),
+        !outside.contains(&secret),
         "the key's value is printed:\n{text}"
     );
     let line_of = |key: &str| {

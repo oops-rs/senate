@@ -448,14 +448,14 @@ pub async fn prepare(
                 .flatten();
             let ancestors = async {
                 if host.is_some() {
-                    let parent = std::os::unix::process::parent_id();
+                    let parent = crate::kernel_process::parent_id();
                     return session::ancestor_pids(parent, ANCESTOR_DEPTH, git_timeout).await;
                 }
                 let in_host = std::env::var_os(crate::host::HOSTED_CLAUDE_ENV).is_some();
                 if runtime != Runtime::Claude || (env.claude_pid.is_some() && !in_host) {
                     return Vec::new();
                 }
-                let parent = std::os::unix::process::parent_id();
+                let parent = crate::kernel_process::parent_id();
                 if env.claude_pid == Some(parent) {
                     return vec![parent];
                 }
@@ -524,6 +524,8 @@ fn approval_signal(hook: &Value) -> Option<ClaudeApprovalSignal> {
 mod tests {
     use super::*;
 
+    // Unix paths and programs; remote authority is Unix only.
+    #[cfg(unix)]
     #[test]
     fn agy_input_without_a_directory_leaves_it_to_the_hook() {
         let id = "0b1f6e9a-2c3d-4e5f-8a9b-0c1d2e3f4a5b";

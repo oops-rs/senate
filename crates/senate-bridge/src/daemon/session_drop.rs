@@ -1,11 +1,23 @@
 use std::ffi::OsStr;
+#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
+use crate::local::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::io::{AsyncReadExt, BufReader};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use super::{Front, Shared, internal, send_ipc_line, wrap};
+
+#[cfg(unix)]
+fn is_socket(stat: &std::fs::Metadata) -> bool {
+    stat.file_type().is_socket()
+}
+
+/// A listener's path holds a marker file on Windows (crate::local).
+#[cfg(windows)]
+fn is_socket(stat: &std::fs::Metadata) -> bool {
+    stat.is_file()
+}
 use crate::host;
 use crate::ipc::{IpcError, MAX_SESSION_DROP_BYTES, Reply, Request, SESSION_DROP_TIMEOUT, codes};
 use crate::paths::Paths;
@@ -100,8 +112,7 @@ fn target(shared: &Shared, session_id: &str) -> Result<PathBuf, IpcError> {
         .ok_or_else(|| IpcError::bad_request("this session is not hosted on this machine"))?;
     let paths = Paths::new(&shared.home);
     let socket = host::socket(&paths, &host);
-    if !session.is_live()
-        || !std::fs::symlink_metadata(&socket).is_ok_and(|stat| stat.file_type().is_socket())
+    if !session.is_live() || !std::fs::symlink_metadata(&socket).is_ok_and(|stat| is_socket(&stat))
     {
         return Err(IpcError::bad_request(
             "this session's terminal host is not running",

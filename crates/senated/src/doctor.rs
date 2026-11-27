@@ -260,8 +260,14 @@ fn gateway_checks(config: &SenatedConfig, running: bool, l: Locale) -> Vec<Check
     }
     let socket = remote.socket();
     {
-        use std::os::unix::fs::FileTypeExt;
-        let listening = std::fs::metadata(socket).is_ok_and(|m| m.file_type().is_socket());
+        #[cfg(unix)]
+        let listening = {
+            use std::os::unix::fs::FileTypeExt;
+            std::fs::metadata(socket).is_ok_and(|m| m.file_type().is_socket())
+        };
+        // A pipe's listener marks its path with a file (senate_bridge::local).
+        #[cfg(windows)]
+        let listening = std::fs::metadata(socket).is_ok_and(|m| m.is_file());
         checks.push(if listening {
             Check::ok(
                 "gateway.socket",
@@ -474,8 +480,8 @@ mod tests {
         std::fs::write(
             &file,
             format!(
-                "listen = \"127.0.0.1:{port}\"\ndatabase_url = \"sqlite:{}\"\ndata_dir = \"{}\"\n\
-                 [chat_gateway]\nsocket = \"{}\"\nplatform = \"chat\"\ntoken_env = \"SENATED_DOCTOR_TEST_UNSET\"\n",
+                "listen = \"127.0.0.1:{port}\"\ndatabase_url = 'sqlite:{}'\ndata_dir = '{}'\n\
+                 [chat_gateway]\nsocket = '{}'\nplatform = \"chat\"\ntoken_env = \"SENATED_DOCTOR_TEST_UNSET\"\n",
                 dir.path().join("log.db").display(),
                 data.display(),
                 dir.path().join("gw.sock").display(),

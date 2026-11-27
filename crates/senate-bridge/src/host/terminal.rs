@@ -3,19 +3,27 @@
 
 use std::fs::File;
 use std::io::{self, IsTerminal as _, Read as _, Write as _};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 use std::time::Duration;
 
+#[cfg(unix)]
+use crate::local::Stream as UnixStream;
 use anyhow::{Context, bail, ensure};
+#[cfg(unix)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+#[cfg(unix)]
 use rustix::termios::{OptionalActions, Termios, tcgetattr, tcgetwinsize, tcsetattr};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Interest, unix::AsyncFd};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+#[cfg(unix)]
+use tokio::io::{AsyncReadExt, Interest, unix::AsyncFd};
+#[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
 use super::emulation::{Colors, Scheme};
 use super::keyboard;
+#[cfg(unix)]
 use super::paste::Pastes;
 use super::{ATTACHED, ATTACHED_NATIVE, ATTACHED_PLAIN, BUSY, COLORS, IO_CHUNK, KEYS, RESIZE};
 use crate::paths::Paths;
@@ -178,17 +186,44 @@ async fn send_keys(out: &mut (impl AsyncWrite + Unpin), bytes: &[u8]) -> anyhow:
     Ok(())
 }
 
+/// No raw console on Windows yet: opening one fails, so the viewers that
+/// need it (attach, watch, the picker) say so and stop.
+#[cfg(windows)]
+pub(super) struct RawTerminal(());
+
+#[cfg(windows)]
+impl RawTerminal {
+    pub(super) async fn open(_alternate_screen: bool) -> anyhow::Result<Self> {
+        bail!("an interactive terminal view is not supported on Windows yet")
+    }
+
+    pub(super) async fn read(&self, _buf: &mut [u8]) -> io::Result<usize> {
+        Ok(0)
+    }
+
+    pub(super) fn window(&self) -> anyhow::Result<(u16, u16)> {
+        bail!("an interactive terminal view is not supported on Windows yet")
+    }
+
+    pub(super) async fn draw(&self, _bytes: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
 pub(super) struct RawTerminal {
     input: AsyncFd<NonblockingFile>,
     output: AsyncFd<NonblockingFile>,
     original: Termios,
 }
 
+#[cfg(unix)]
 struct NonblockingFile {
     file: File,
     original: OFlags,
 }
 
+#[cfg(unix)]
 impl NonblockingFile {
     fn new(file: File) -> io::Result<Self> {
         let original = fcntl_getfl(&file)?;
@@ -204,18 +239,21 @@ impl NonblockingFile {
     }
 }
 
+#[cfg(unix)]
 impl AsRawFd for NonblockingFile {
     fn as_raw_fd(&self) -> RawFd {
         self.file.as_raw_fd()
     }
 }
 
+#[cfg(unix)]
 impl Drop for NonblockingFile {
     fn drop(&mut self) {
         let _ = fcntl_setfl(&self.file, self.original);
     }
 }
 
+#[cfg(unix)]
 impl RawTerminal {
     pub(super) async fn open(alternate_screen: bool) -> anyhow::Result<Self> {
         let stdin = io::stdin();
@@ -315,6 +353,7 @@ impl RawTerminal {
     }
 }
 
+#[cfg(unix)]
 impl Drop for RawTerminal {
     fn drop(&mut self) {
         let _ = tcsetattr(
@@ -338,13 +377,30 @@ impl std::fmt::Display for Busy {
 impl std::error::Error for Busy {}
 
 /// The path of the terminal on stdin (`/dev/ttys012`), when it is one.
+#[cfg(unix)]
 fn own_tty() -> Option<String> {
     rustix::termios::ttyname(std::io::stdin(), Vec::new())
         .ok()
         .and_then(|name| name.into_string().ok())
 }
 
+/// No hosted terminals on Windows, so nothing to attach to.
+#[cfg(windows)]
+pub async fn attach(_path: &Path, _paths: &Paths, _label: &str) -> anyhow::Result<()> {
+    bail!(super::HOSTED_UNSUPPORTED)
+}
+
+#[cfg(windows)]
+pub(crate) async fn attach_stream(
+    _stream: impl AsyncRead + AsyncWrite + Unpin,
+    _label: &str,
+    _drops: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    bail!(super::HOSTED_UNSUPPORTED)
+}
+
 /// Attach until Ctrl-], the person closes the terminal, or the host exits.
+#[cfg(unix)]
 pub async fn attach(path: &Path, paths: &Paths, label: &str) -> anyhow::Result<()> {
     ensure!(
         crate::testenv::confined(path),
@@ -357,6 +413,7 @@ pub async fn attach(path: &Path, paths: &Paths, label: &str) -> anyhow::Result<(
     drive(stream, label, drops, UnixStream::into_split).await
 }
 
+#[cfg(unix)]
 pub(crate) async fn attach_stream(
     stream: impl AsyncRead + AsyncWrite + Unpin,
     label: &str,
@@ -365,8 +422,10 @@ pub(crate) async fn attach_stream(
     drive(stream, label, drops, tokio::io::split).await
 }
 
+#[cfg(unix)]
 const ATTACH_STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[cfg(unix)]
 async fn drive<S, R, W>(
     mut stream: S,
     label: &str,
@@ -514,6 +573,7 @@ fn reset_display(native: bool, probe: &TerminalProbe) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 

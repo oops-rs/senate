@@ -36,10 +36,10 @@
 //! success. The previous contents are kept as `settings.json.bak` next to
 //! the path Claude reads.
 
+use crate::fsmode::OpenOptionsExt;
 use std::fmt::Write as _;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, Write as _};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -179,14 +179,18 @@ pub enum Choice {
 }
 
 /// `name` as an executable file in the first of `path`'s directories that
-/// has one.
+/// has one. On Windows a bare name also matches `name.exe`, then
+/// `name.cmd` (an npm wrapper), in each directory.
 fn find_in(path: &str, name: &str) -> Option<PathBuf> {
+    let names: Vec<String> = if cfg!(windows) && Path::new(name).extension().is_none() {
+        vec![format!("{name}.exe"), format!("{name}.cmd")]
+    } else {
+        vec![name.to_owned()]
+    };
     std::env::split_paths(path)
         .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(name))
-        .find(|p| {
-            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
+        .find(|p| std::fs::metadata(p).is_ok_and(|m| crate::fsmode::runnable(p, &m)))
 }
 
 /// `name` on `$PATH`; in WSL, never a Windows program ([`crate::wsl`]).
@@ -890,13 +894,16 @@ fn replace_file(target: &Path, text: &str, mode: Option<u32>) -> io::Result<()> 
         let mut file = options.open(&tmp)?;
         if let Some(mode) = mode {
             // The umask may have narrowed the mode `open` used.
-            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            crate::fsmode::set_mode(&tmp, mode)?;
         }
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         drop(file);
         std::fs::rename(&tmp, target)?;
-        File::open(dir)?.sync_all()
+        // A directory cannot be opened as a file on Windows, nor synced.
+        #[cfg(unix)]
+        std::fs::File::open(dir)?.sync_all()?;
+        Ok(())
     };
     let result = write();
     if result.is_err() && std::fs::symlink_metadata(&tmp).is_ok() {
@@ -925,7 +932,11 @@ fn write_config(path: &Path, existed: bool, text: &str) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let mode = match std::fs::metadata(&target) {
-        Ok(meta) => Some(meta.permissions().mode() & 0o7777),
+        #[cfg(unix)]
+        Ok(meta) => Some(std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o7777),
+        // No mode to keep: the file inherits its directory's ACL.
+        #[cfg(windows)]
+        Ok(_) => None,
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e).with_context(|| format!("reading {}", target.display())),
     };
@@ -978,6 +989,8 @@ pub fn apply(plan: &InstallPlan, opts: &InstallOptions) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn quoting() {
@@ -1059,6 +1072,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn writing_keeps_key_order_mode_and_symlink() {
         let dir = tempfile::tempdir().unwrap();

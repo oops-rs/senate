@@ -92,7 +92,9 @@ pub fn notes(distro: &str, l: Locale) -> String {
     )
 }
 
+// WSL's paths are Linux paths, `:`-separated.
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 

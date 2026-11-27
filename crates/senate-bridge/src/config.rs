@@ -63,6 +63,10 @@
 //!
 //! Unknown keys are ignored so a newer file still loads.
 
+// A Windows PathBuf is wider than a Unix one, which takes ConfigError past
+// clippy's 128 bytes there; it is returned rarely, on a config load.
+#![cfg_attr(windows, allow(clippy::result_large_err))]
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};

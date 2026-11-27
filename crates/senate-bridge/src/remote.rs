@@ -6,9 +6,9 @@ mod limits;
 mod terminal;
 mod tls;
 
+use crate::fsmode::DirBuilderExt;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -195,7 +195,7 @@ fn create_private_dir(path: &Path) -> anyhow::Result<()> {
     }
     let metadata = std::fs::symlink_metadata(path)?;
     ensure!(
-        metadata.is_dir() && metadata.mode() & 0o077 == 0,
+        metadata.is_dir() && crate::fsmode::owner_only(&metadata),
         "remote state directory must be private"
     );
     Ok(())
@@ -225,12 +225,24 @@ fn test_root_for(
     ensure!(
         root.parent() == Some(tmp.as_path())
             && metadata.is_dir()
-            && metadata.uid() == crate::service::current_uid()
-            && metadata.mode() & 0o077 == 0
+            && owned_by_me(&metadata)
+            && crate::fsmode::owner_only(&metadata)
             && crate::testenv::confined(paths.home()),
         "remote test requires a private /tmp home and loopback"
     );
     Ok(Some(root))
+}
+
+#[cfg(unix)]
+fn owned_by_me(metadata: &std::fs::Metadata) -> bool {
+    std::os::unix::fs::MetadataExt::uid(metadata) == crate::service::current_uid()
+}
+
+/// Remote access needs Unix ownership checks (and senate-remote-admin's
+/// root-owned store): refused on Windows.
+#[cfg(windows)]
+fn owned_by_me(_: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn state_dir(paths: &Paths) -> PathBuf {
@@ -238,13 +250,10 @@ fn state_dir(paths: &Paths) -> PathBuf {
 }
 
 fn read<T: DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
+    let file = crate::fsmode::no_follow(std::fs::OpenOptions::new().read(true)).open(path)?;
     let meta = file.metadata()?;
     ensure!(
-        meta.is_file() && meta.mode() & 0o077 == 0,
+        meta.is_file() && crate::fsmode::owner_only(&meta),
         "remote state file must be private"
     );
     Ok(serde_json::from_reader(file)?)
