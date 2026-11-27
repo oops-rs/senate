@@ -504,6 +504,22 @@ is no log synchronisation between levels.**
   resolves to that person's child Senates: one → that Senate's Speaker's
   office; several → the parent's secretary picks or asks the person;
   none → the person.
+- An agent of the child reads, never writes, what the parent knows on the
+  committee it sits on (`parent_context`; `senate_bridge::parent`). The
+  machine's daemon reads the parent's brief, or searches its memory, on
+  demand with the person's token there (`GET /v1/me`, `.../brief`,
+  `.../memory`). The token stays in the daemon.
+  - Only the session's own committee is read, and only while the parent
+    lists it in `/v1/me`. Any other committee is refused in words that
+    name nothing else above.
+  - What it returns is the focus, the decisions in force, the facts and
+    the digest. It never includes open questions, checkpoints or
+    presence.
+  - Each item carries `(parent path, committee, epoch, seq)`, its event id
+    when the parent gives one, and whether it is active, corrected,
+    superseded or deleted.
+  - Nothing is cached or written on either side, so there is still no
+    synchronisation.
 
 ### One daemon, at every level
 

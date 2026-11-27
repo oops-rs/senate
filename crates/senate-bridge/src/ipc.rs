@@ -1629,6 +1629,15 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         committee: Option<CommitteeId>,
     },
+    /// The parent committee's context, read-only: the effective brief of
+    /// this session's committee in the Senate above, or a search of its
+    /// memory ([`crate::parent`]). It names no committee: the session's own
+    /// is the only one read.
+    ParentContext {
+        session: SessionSelector,
+        #[serde(flatten)]
+        ask: crate::parent::Ask,
+    },
     /// The person corrects (`text` set) or deletes memory points, in their
     /// own name.
     MemoryEdit {

@@ -45,7 +45,7 @@ use serde_json::Value;
 
 use crate::address::Address;
 use crate::event::{Event, Kind, meta};
-use crate::ids::Seq;
+use crate::ids::{EventId, Seq};
 
 /// At most this many points in a digest.
 pub const MAX_DIGEST_POINTS: usize = 7;
@@ -112,6 +112,10 @@ impl DigestPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Digest {
     pub seq: Seq,
+    /// The event's id, which names it across logs and epochs. Absent from
+    /// a server from before it was given (0.14.1 and older).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<EventId>,
     pub ts: DateTime<Utc>,
     #[serde(flatten)]
     pub payload: DigestPayload,
@@ -166,6 +170,10 @@ impl MemoryPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryPoint {
     pub seq: Seq,
+    /// The event's id, which names it across logs and epochs. Absent from
+    /// a server from before it was given (0.14.1 and older).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<EventId>,
     pub ts: DateTime<Utc>,
     pub text: String,
     /// The seqs it came from.
@@ -176,6 +184,23 @@ pub struct MemoryPoint {
     pub supersedes: Vec<Seq>,
     /// Who wrote it: the Speaker, or the person who corrected it.
     pub by: Address,
+    /// What it is: a fact, the current focus, or a digest. Absent from a
+    /// server from before it was given (0.14.1 and older).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PointKind>,
+}
+
+/// What a [`MemoryPoint`] is. A correction is of the kind it corrects
+/// while that is in force; otherwise a fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PointKind {
+    /// A fact the committee knows ([`MemoryPayload::Point`]).
+    Fact,
+    /// The Speaker's current focus ([`meta::BRIEF_TOP`]).
+    Focus,
+    /// A digest of the discussion ([`meta::DIGEST`]).
+    Digest,
 }
 
 impl MemoryPoint {
@@ -260,6 +285,7 @@ impl MemoryFold {
                 Vec::new(),
                 previous,
                 Address::Speaker,
+                PointKind::Focus,
             );
             self.focus = Some(event.seq);
             return;
@@ -283,9 +309,17 @@ impl MemoryFold {
             if text.trim().is_empty() {
                 return;
             }
-            self.add(event, text, refs, previous, Address::Speaker);
+            self.add(
+                event,
+                text,
+                refs,
+                previous,
+                Address::Speaker,
+                PointKind::Digest,
+            );
             self.digest = Some(Digest {
                 seq: event.seq,
+                id: Some(event.id.clone()),
                 ts: event.ts,
                 payload: digest,
             });
@@ -308,7 +342,14 @@ impl MemoryFold {
                 if event.from != Address::Speaker || event.on_behalf_of.is_some() {
                     return;
                 }
-                self.add(event, one_line(&event.body), refs, supersedes, by);
+                self.add(
+                    event,
+                    one_line(&event.body),
+                    refs,
+                    supersedes,
+                    by,
+                    PointKind::Fact,
+                );
             }
             MemoryPayload::Correct { target, refs } => {
                 if by == Address::Speaker {
@@ -339,6 +380,7 @@ impl MemoryFold {
                 }
                 if is_digest && let Some(digest) = &mut self.digest {
                     digest.seq = event.seq;
+                    digest.id = Some(event.id.clone());
                     digest.ts = event.ts;
                     digest.payload.points = vec![DigestPoint {
                         text: text.clone(),
@@ -346,7 +388,14 @@ impl MemoryFold {
                     }];
                 }
                 self.last_human_edit = event.seq;
-                self.add(event, text, refs, vec![target], by);
+                let kind = if is_focus {
+                    PointKind::Focus
+                } else if is_digest {
+                    PointKind::Digest
+                } else {
+                    PointKind::Fact
+                };
+                self.add(event, text, refs, vec![target], by, kind);
             }
             MemoryPayload::Delete { targets } => {
                 if by == Address::Speaker {
@@ -370,6 +419,7 @@ impl MemoryFold {
         refs: Vec<Seq>,
         supersedes: Vec<Seq>,
         by: Address,
+        kind: PointKind,
     ) {
         if text.is_empty() {
             return;
@@ -388,11 +438,13 @@ impl MemoryFold {
             event.seq,
             MemoryPoint {
                 seq: event.seq,
+                id: Some(event.id.clone()),
                 ts: event.ts,
                 text,
                 refs,
                 supersedes,
                 by,
+                kind: Some(kind),
             },
         );
     }

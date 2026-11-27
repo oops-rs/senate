@@ -3821,6 +3821,9 @@ impl Shared {
                 all,
                 committee,
             } => wrap(on_heap(|| self.on_memory(&session, committee, query, limit, all)).await),
+            Request::ParentContext { session, ask } => {
+                wrap(on_heap(|| self.on_parent_context(&session, &ask)).await)
+            }
             Request::MemoryEdit {
                 session,
                 committee,
@@ -6744,6 +6747,35 @@ impl Shared {
             query,
             points: results.points,
         })
+    }
+
+    /// The parent committee's context ([`crate::parent`]): this session's
+    /// own committee as the Senate above has it, read with the person's
+    /// token there, which stays here. Only an identified session asks, and
+    /// it names no committee.
+    async fn on_parent_context(
+        &self,
+        selector: &SessionSelector,
+        ask: &crate::parent::Ask,
+    ) -> Result<crate::parent::ParentContextReply, IpcError> {
+        if selector.session_id.is_none() && selector.claude_pid.is_none() {
+            return Err(IpcError::new(
+                codes::NO_SESSION,
+                self.locale.pick(
+                    "读取上级委员会的上下文要从一个已登记的会话发起。",
+                    "Parent committee context is read from a registered session only.",
+                ),
+            ));
+        }
+        let session = self.resolve(selector)?;
+        let committee = self.bound(&session)?;
+        let refused = |e: crate::parent::ParentError| IpcError::bad_request(e.message(self.locale));
+        let Some(above) = &self.uplink else {
+            return Err(refused(crate::parent::ParentError::NoParent));
+        };
+        crate::parent::read(above, &committee, ask)
+            .await
+            .map_err(refused)
     }
 
     /// A person's correction (one target and its new text) or deletion of

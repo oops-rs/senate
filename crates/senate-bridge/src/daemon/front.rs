@@ -1044,6 +1044,7 @@ macro_rules! request_selector {
             | Request::JoinAs { session, .. }
             | Request::Search { session, .. }
             | Request::Memory { session, .. }
+            | Request::ParentContext { session, .. }
             | Request::MemoryEdit { session, .. }
             | Request::Post { session, .. }
             | Request::Brief { session, .. }

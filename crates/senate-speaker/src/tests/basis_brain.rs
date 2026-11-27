@@ -1891,11 +1891,13 @@ async fn digest_is_one_typed_turn_that_cites_seqs_and_marks_a_persons_points() {
     correction.seq = Seq(8);
     let person_point = senate_core::MemoryPoint {
         seq: Seq(8),
+        id: Some(correction.id.clone()),
         ts: correction.ts,
         text: "Reviews need two approvals".into(),
         refs: vec![Seq(1)],
         supersedes: vec![],
         by: user("alice"),
+        kind: Some(senate_core::PointKind::Fact),
     };
     let out = digested
         .brain

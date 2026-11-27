@@ -325,6 +325,7 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
         | Request::Receipt { .. }
         | Request::JoinAs { .. }
         | Request::Memory { .. }
+        | Request::ParentContext { .. }
         | Request::Search { .. }
         | Request::Brief { .. }
         | Request::Bound { .. }

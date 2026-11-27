@@ -647,17 +647,36 @@ impl ApiClient {
         committee: &CommitteeId,
         query: &api::MemoryQuery,
     ) -> Result<api::MemoryResults, ApiClientError> {
+        Ok(self.memory_at(committee, query).await?.0)
+    }
+
+    /// [`Self::memory`], with the log epoch the answer named.
+    pub async fn memory_at(
+        &self,
+        committee: &CommitteeId,
+        query: &api::MemoryQuery,
+    ) -> Result<(api::MemoryResults, Option<String>), ApiClientError> {
         let _permit = self.short_request().await;
         let url = self.url(&api::memory_path(committee));
-        let resp = self.authed(self.http.get(url)).query(query).send().await?;
-        Ok(checked(resp).await?.json().await?)
+        let resp = checked(self.authed(self.http.get(url)).query(query).send().await?).await?;
+        let epoch = epoch_of(resp.headers());
+        Ok((resp.json().await?, epoch))
     }
 
     pub async fn brief(&self, committee: &CommitteeId) -> Result<Brief, ApiClientError> {
+        Ok(self.brief_at(committee).await?.0)
+    }
+
+    /// [`Self::brief`], with the log epoch the answer named.
+    pub async fn brief_at(
+        &self,
+        committee: &CommitteeId,
+    ) -> Result<(Brief, Option<String>), ApiClientError> {
         let _permit = self.short_request().await;
         let url = self.url(&api::brief_path(committee));
-        let resp = self.authed(self.http.get(url)).send().await?;
-        Ok(checked(resp).await?.json().await?)
+        let resp = checked(self.authed(self.http.get(url)).send().await?).await?;
+        let epoch = epoch_of(resp.headers());
+        Ok((resp.json().await?, epoch))
     }
 
     /// `GET .../checkpoints/latest?agent=`: that agent's latest checkpoint;
