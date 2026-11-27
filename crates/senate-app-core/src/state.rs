@@ -13,11 +13,12 @@ use senate_bridge::approvals::Approval;
 use senate_bridge::ipc::{SenateDocket, SessionRow, StatusReply, StreamState};
 use senate_bridge::session::Runtime;
 use senate_core::{
-    Address, Awaiting, DocketItem, Kind, Locale, Mention, SenatorName, SpeakerSeat, ThreadSummary,
+    Address, Awaiting, CommissionBucket, DocketItem, Kind, Locale, Mention, SenatorName,
+    SpeakerSeat, ThreadSummary,
 };
 use serde::Serialize;
 
-use crate::model::{Model, Waiting, escalated_to_now, presider_of};
+use crate::model::{CommissionEntry, Model, Waiting, escalated_to_now, presider_of};
 use crate::text;
 
 /// The app's whole picture of the daemon.
@@ -38,6 +39,9 @@ pub struct AppState {
     /// Threads waiting on the person, merged across agents, longest waiting
     /// first.
     pub inbox: Vec<InboxThread>,
+    /// Sponsored tasks across committees ("My Commissions" / 「委派追踪」),
+    /// sorted by `Blocked → PendingAcceptance → CompletedUnread → InProgress`.
+    pub commissions: Vec<CommissionThread>,
     /// Pending Codex approvals, oldest first.
     pub approvals: Vec<ApprovalRequest>,
     pub codex: Vec<CodexThreadInfo>,
@@ -294,6 +298,25 @@ pub struct AgentInfo {
     pub inbox: bool,
 }
 
+/// A task sponsored by the person (`My Commissions` / 「委派追踪」).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CommissionThread {
+    pub committee: String,
+    pub root: u64,
+    pub updated: u64,
+    pub title: String,
+    /// `"blocked"`, `"pending_acceptance"`, `"completed_unread"`, or `"in_progress"`.
+    pub bucket: String,
+    pub bucket_label: String,
+    pub state: String,
+    pub state_label: String,
+    pub owner: Option<String>,
+    pub summary_line: Option<String>,
+    pub unread: bool,
+    pub since: SystemTime,
+    pub origin_label: Option<String>,
+}
+
 /// An open thread waiting on the person. Addresses are bracketed mentions;
 /// enum-valued fields carry the wire spelling and a label.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -525,6 +548,15 @@ impl AppState {
             agents,
             menu,
             inbox: waiting.iter().map(|w| inbox_thread(w, locale)).collect(),
+            commissions: if model.online {
+                model
+                    .commissions()
+                    .into_iter()
+                    .map(|c| commission_thread(&c, locale))
+                    .collect()
+            } else {
+                Vec::new()
+            },
             approvals: approvals.into_iter().map(Into::into).collect(),
             codex,
             docket,
@@ -812,6 +844,67 @@ fn asker(w: &Waiting) -> String {
         return author(&d.from, d.on_behalf_of.as_ref());
     }
     author(&t.from, t.on_behalf_of.as_ref())
+}
+
+pub(crate) fn commission_thread(c: &CommissionEntry, locale: Locale) -> CommissionThread {
+    let t = &c.thread;
+    let bucket = match c.bucket {
+        CommissionBucket::Blocked => "blocked",
+        CommissionBucket::PendingAcceptance => "pending_acceptance",
+        CommissionBucket::CompletedUnread => "completed_unread",
+        CommissionBucket::InProgress => "in_progress",
+        CommissionBucket::CompletedRead => "completed_read",
+    };
+    let bucket_label = match (c.bucket, locale) {
+        (CommissionBucket::Blocked, Locale::Zh) => "阻塞中",
+        (CommissionBucket::Blocked, Locale::En) => "Blocked",
+        (CommissionBucket::PendingAcceptance, Locale::Zh) => "待验收",
+        (CommissionBucket::PendingAcceptance, Locale::En) => "Pending acceptance",
+        (CommissionBucket::CompletedUnread, Locale::Zh) => "已完成",
+        (CommissionBucket::CompletedUnread, Locale::En) => "Completed",
+        (CommissionBucket::InProgress, Locale::Zh) => "推进中",
+        (CommissionBucket::InProgress, Locale::En) => "In progress",
+        (CommissionBucket::CompletedRead, Locale::Zh) => "已完成",
+        (CommissionBucket::CompletedRead, Locale::En) => "Completed",
+    }
+    .to_string();
+    let origin_label = t.origin.as_ref().and_then(|o| {
+        o.locator.committee().map(|oc| match locale {
+            Locale::Zh => format!("来自 {oc} #{}", o.thread.0),
+            Locale::En => format!("from {oc} #{}", o.thread.0),
+        })
+    });
+    let summary_line = match c.bucket {
+        CommissionBucket::Blocked => t
+            .escalation
+            .as_ref()
+            .and_then(|e| e.reason.clone())
+            .or_else(|| t.reason.clone()),
+        CommissionBucket::CompletedUnread | CommissionBucket::CompletedRead => {
+            t.answer_line.clone()
+        }
+        CommissionBucket::PendingAcceptance | CommissionBucket::InProgress => {
+            t.steps.last().map(|s| s.label.clone())
+        }
+    };
+    CommissionThread {
+        committee: c.committee.to_string(),
+        root: t.root.0,
+        updated: t.updated.0,
+        title: t.title.clone(),
+        bucket: bucket.to_string(),
+        bucket_label,
+        state: wire(&t.state),
+        state_label: text::state(locale, t.state).to_string(),
+        owner: t
+            .owner
+            .as_ref()
+            .map(|o| Address::senator(&o.agent).in_text()),
+        summary_line,
+        unread: c.bucket == CommissionBucket::CompletedUnread,
+        since: t.since_ts.into(),
+        origin_label,
+    }
 }
 
 pub(crate) fn inbox_thread(w: &Waiting, locale: Locale) -> InboxThread {

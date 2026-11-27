@@ -1932,3 +1932,191 @@ async fn cross_committee_execution_auth_and_unsafe_mode_end_to_end() {
     assert!(!unsafe_off.enabled);
     desk.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sponsored_cross_committee_task_notifies_only_blocked_and_deduplicated_completed() {
+    use senate_bridge::ipc::{DeskDecision, DeskOutcome, IpcClient, WatchEvent};
+    use senate_core::{StatusPayload, StatusState};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut desk, _claude, copilot, _codex) = alices_machine(dir.path()).await;
+    let hub = desk.senate().daemon.hub.clone();
+
+    let mut watch = IpcClient::connect(&desk.paths.socket(), Duration::from_secs(2))
+        .await
+        .unwrap()
+        .watch(false, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    async fn drain_for_person(
+        watch: &mut senate_bridge::ipc::WatchStream,
+        wait_ms: u64,
+    ) -> Vec<(Box<senate_core::Event>, bool, String)> {
+        let mut events = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match tokio::time::timeout(deadline - now, watch.next()).await {
+                Ok(Ok(Some(WatchEvent::ForPerson {
+                    news,
+                    escalated,
+                    text,
+                    ..
+                }))) => events.push((news, escalated, text)),
+                Ok(Ok(Some(_))) => {}
+                _ => break,
+            }
+        }
+        events
+    }
+
+    // Sponsored task: codex sends request on ledger, alice directly authorizes cross-committee forward.
+    let sponsored_req: SendReply = desk
+        .ipc(Request::Send {
+            session: Laptop::session("s-codex"),
+            kind: SayKind::Request,
+            to: Vec::new(),
+            at: Some(senate_core::Locator::parse_short("refund-v2::copilot").unwrap()),
+            body: "Ship sponsored release v0.4.1".into(),
+            refs: None,
+            id: None,
+        })
+        .await;
+    on_the_desk(&desk, sponsored_req.posted.seq).await;
+    let sponsored_evt = hub
+        .get(&ledger(), sponsored_req.posted.seq)
+        .await
+        .unwrap()
+        .unwrap();
+    let outcome: DeskOutcome = desk
+        .ipc(Request::DeskDecide {
+            committee: ledger(),
+            seq: sponsored_req.posted.seq,
+            item_id: sponsored_evt.id,
+            id: senate_core::EventId::new(),
+            decision: DeskDecision::ForwardAndAuthorize {
+                note: Some("release window".into()),
+            },
+        })
+        .await;
+    assert!(matches!(outcome, DeskOutcome::Delivered { .. }));
+    let push1 = copilot.wait_for("Ship sponsored release v0.4.1").await;
+    let dst_root = thread_of(&push1, "Ship sponsored release v0.4.1");
+
+    // Discard any initial watch backlog before agent status transitions.
+    let _ = drain_for_person(&mut watch, 200).await;
+
+    // Intermediate Processing status -> 0 notifications.
+    desk.status(
+        "s-copilot",
+        dst_root,
+        StatusPayload::new(StatusState::Processing),
+    )
+    .await;
+    let proc_notices = drain_for_person(&mut watch, 350).await;
+    assert!(
+        proc_notices.is_empty(),
+        "Processing must produce 0 notifications: {proc_notices:?}"
+    );
+
+    // Downstream Suspended blocker -> exactly 1 Blocked notification.
+    let mut blocked = StatusPayload::new(StatusState::Suspended);
+    blocked.reason = Some("waiting on staging credentials".into());
+    desk.status("s-copilot", dst_root, blocked).await;
+    let blocked_notices = drain_for_person(&mut watch, 800).await;
+    assert_eq!(
+        blocked_notices.len(),
+        1,
+        "expected exactly 1 Blocked notification: {blocked_notices:?}"
+    );
+    assert!(blocked_notices[0].2.contains("staging credentials"));
+
+    // Another Processing status -> 0 notifications.
+    desk.status(
+        "s-copilot",
+        dst_root,
+        StatusPayload::new(StatusState::Processing),
+    )
+    .await;
+    let proc2_notices = drain_for_person(&mut watch, 350).await;
+    assert!(proc2_notices.is_empty(), "{proc2_notices:?}");
+
+    // Final non-provisional Answer -> relayed across destination & origin, deduplicated to 1 Completed notice.
+    desk.answer("s-copilot", dst_root, "Shipped v0.4.1 cleanly.")
+        .await;
+    let completed_notices = drain_for_person(&mut watch, 1000).await;
+    assert_eq!(
+        completed_notices.len(),
+        1,
+        "expected exactly 1 deduplicated Completed notification: {completed_notices:?}"
+    );
+    assert!(completed_notices[0].2.contains("Shipped v0.4.1 cleanly."));
+
+    // Inbox includes the sponsored thread for alice until she reads it.
+    let sponsored_inbox: senate_bridge::ipc::InboxReply = desk
+        .ipc(Request::Inbox {
+            session: senate_bridge::ipc::SessionSelector::default(),
+            committee: Some(CommitteeId::new("refund-v2").unwrap()),
+            agent: None,
+            all: false,
+        })
+        .await;
+    assert!(
+        sponsored_inbox.threads.iter().any(|t| {
+            t.root == dst_root && t.is_sponsored_by(&senate_core::Name::new("alice").unwrap())
+        }),
+        "expected sponsored thread {dst_root} in refund-v2 inbox: {:?}",
+        sponsored_inbox.threads
+    );
+
+    // Unrelated non-sponsored task (forwarded by secretary without authorize) -> 0 notices.
+    let other_req: SendReply = desk
+        .ipc(Request::Send {
+            session: Laptop::session("s-codex"),
+            kind: SayKind::Request,
+            to: Vec::new(),
+            at: Some(senate_core::Locator::parse_short("refund-v2::copilot").unwrap()),
+            body: "Unrelated agent check".into(),
+            refs: None,
+            id: None,
+        })
+        .await;
+    on_the_desk(&desk, other_req.posted.seq).await;
+    let _: Forwarded = desk
+        .ipc(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: other_req.posted.seq,
+            authorize: false,
+            note: None,
+            id: None,
+        })
+        .await;
+    let push2 = copilot.wait_for("Unrelated agent check").await;
+    // Drain the initial Speaker-desk arrival notice before checking downstream task execution.
+    let _ = drain_for_person(&mut watch, 300).await;
+    let other_root = thread_of(&push2, "Unrelated agent check");
+    desk.status(
+        "s-copilot",
+        other_root,
+        StatusPayload::new(StatusState::Processing),
+    )
+    .await;
+    let mut other_blocked = StatusPayload::new(StatusState::Suspended);
+    other_blocked.reason = Some("unrelated pause".into());
+    desk.status("s-copilot", other_root, other_blocked).await;
+    desk.answer("s-copilot", other_root, "Unrelated done.")
+        .await;
+    let unrelated_notices = drain_for_person(&mut watch, 800).await;
+    assert!(
+        unrelated_notices.is_empty(),
+        "unrelated non-sponsored task must trigger 0 notices: {unrelated_notices:?}"
+    );
+
+    desk.stop().await;
+}

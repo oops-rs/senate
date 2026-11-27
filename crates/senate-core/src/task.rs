@@ -393,6 +393,21 @@ pub struct ThreadSummary {
     /// answered by speaking in the thread themselves.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub directed: Vec<Directed>,
+    /// Person who authorized/approved the root on the Speaker's desk (`meta::DESK_PERSON`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desk_person: Option<Name>,
+    /// Execution authorization attached to the root (`meta::EXECUTION_AUTH`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_auth: Option<crate::ExecutionAuthPayload>,
+    /// Cross-committee origin carried on a forwarded root (`meta::ORIGIN`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<crate::Origin>,
+    /// Seq of the latest non-provisional `Answer` in the thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_seq: Option<Seq>,
+    /// First non-empty line of the latest non-provisional `Answer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_line: Option<String>,
 }
 
 /// Log metadata used by committee-wide readers.
@@ -591,6 +606,189 @@ impl ThreadSummary {
     pub fn is_settled(&self) -> bool {
         self.state != StatusState::Archived && self.waits().is_none()
     }
+
+    /// Whether `person` sponsored this task: initiated directly as themselves,
+    /// approved it in person on the Speaker's desk (`meta::DESK_PERSON`), or
+    /// authorized execution (`meta::EXECUTION_AUTH`, directly or via proxy).
+    pub fn is_sponsored_by(&self, person: &Name) -> bool {
+        is_root_sponsored_by(
+            &self.from,
+            self.desk_person.as_ref(),
+            self.execution_auth.as_ref(),
+            person,
+        )
+    }
+
+    /// Sort bucket for "My Commissions" / 「委派追踪」 given how far `person`
+    /// has seen this thread.
+    pub fn commission_bucket(&self, seen: Seq) -> CommissionBucket {
+        if self.state == StatusState::Suspended || self.escalation.is_some() {
+            CommissionBucket::Blocked
+        } else if self.answered && !self.reopened && self.state != StatusState::Processing {
+            let unread = self
+                .answer_seq
+                .map_or(self.updated > seen, |seq| seq > seen);
+            if unread {
+                CommissionBucket::CompletedUnread
+            } else {
+                CommissionBucket::CompletedRead
+            }
+        } else {
+            CommissionBucket::InProgress
+        }
+    }
+}
+
+fn is_root_sponsored_by(
+    from: &Address,
+    desk_person: Option<&Name>,
+    execution_auth: Option<&crate::ExecutionAuthPayload>,
+    person: &Name,
+) -> bool {
+    person_of(from).as_ref() == Some(person)
+        || desk_person == Some(person)
+        || execution_auth.is_some_and(|auth| &auth.authorized_by == person)
+}
+
+/// Unified commission priority bucket (`Blocked → PendingAcceptance → CompletedUnread → InProgress`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommissionBucket {
+    Blocked = 0,
+    /// Reserved hook for Phase C W3 (`awaiting_acceptance`).
+    PendingAcceptance = 1,
+    CompletedUnread = 2,
+    InProgress = 3,
+    CompletedRead = 4,
+}
+
+impl CommissionBucket {
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Blocked => "blocked",
+            Self::PendingAcceptance => "pending_acceptance",
+            Self::CompletedUnread => "completed_unread",
+            Self::InProgress => "in_progress",
+            Self::CompletedRead => "completed_read",
+        }
+    }
+}
+
+/// Notification signal kind emitted for a sponsored task thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommissionSignalKind {
+    Blocked,
+    Completed,
+}
+
+/// Root metadata cached by the bridge to classify sponsored task events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommissionRoot {
+    pub from: Address,
+    pub desk_person: Option<Name>,
+    pub execution_auth: Option<crate::ExecutionAuthPayload>,
+    pub origin: Option<crate::Origin>,
+    pub answered: bool,
+}
+
+impl CommissionRoot {
+    pub fn from_event(root: &Event) -> Self {
+        Self {
+            from: root.from.clone(),
+            desk_person: root_desk_person(root),
+            execution_auth: crate::ExecutionAuthPayload::of(root),
+            origin: crate::Origin::of(root),
+            answered: false,
+        }
+    }
+
+    pub fn is_sponsored_by(&self, person: &Name) -> bool {
+        is_root_sponsored_by(
+            &self.from,
+            self.desk_person.as_ref(),
+            self.execution_auth.as_ref(),
+            person,
+        )
+    }
+}
+
+/// A deduplicated notification signal for the human sponsor of a task thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommissionSignal {
+    pub kind: CommissionSignalKind,
+    /// Canonical thread key: origin `(committee, thread)` when forwarded across
+    /// committees, otherwise `(committee, root)`.
+    pub origin_committee: crate::CommitteeId,
+    pub origin_root: Seq,
+    /// Per-signal dedup key (blocker seq for `Blocked`, canonical downstream
+    /// answer `EventId` for `Completed`).
+    pub discriminator: String,
+    pub text: String,
+}
+
+/// Classify `event` in a thread rooted at `root` for `person`:
+/// - `StatusState::Suspended` (without takeover) -> `Blocked`
+/// - First non-provisional `Kind::Answer` -> `Completed`
+/// - Progress / `Processing` / unrelated threads -> `None`
+pub fn commission_signal(
+    event: &Event,
+    root: &CommissionRoot,
+    person: &Name,
+    already_answered: bool,
+) -> Option<CommissionSignal> {
+    if !root.is_sponsored_by(person)
+        || person_of(&event.from).as_ref() == Some(person)
+        || is_provisional(event)
+    {
+        return None;
+    }
+    let (origin_committee, origin_root) = root
+        .origin
+        .as_ref()
+        .and_then(|o| o.locator.committee().map(|c| (c.clone(), o.thread)))
+        .unwrap_or_else(|| (event.committee.clone(), event.thread.unwrap_or(event.seq)));
+
+    match event.kind {
+        Kind::Status => {
+            let status = StatusPayload::of(event)?;
+            if status.state == StatusState::Suspended && status.takeover.is_none() {
+                Some(CommissionSignal {
+                    kind: CommissionSignalKind::Blocked,
+                    origin_committee,
+                    origin_root,
+                    discriminator: event.seq.0.to_string(),
+                    text: status.reason.unwrap_or_default(),
+                })
+            } else {
+                None
+            }
+        }
+        Kind::Answer if !already_answered => {
+            let discriminator = event
+                .meta
+                .get(meta::RELAYED_EVENT_ID)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| event.id.to_string());
+            Some(CommissionSignal {
+                kind: CommissionSignalKind::Completed,
+                origin_committee,
+                origin_root,
+                discriminator,
+                text: event.body.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn root_desk_person(event: &Event) -> Option<Name> {
+    event
+        .meta
+        .get(meta::DESK_PERSON)
+        .and_then(Value::as_str)
+        .and_then(|raw| Name::new(raw).ok())
 }
 
 /// Characters of the root's body used as a title when the task has none.
@@ -774,6 +972,11 @@ impl TaskBoard {
                 reopened: false,
                 escalation: None,
                 directed: Vec::new(),
+                desk_person: root_desk_person(event),
+                execution_auth: crate::ExecutionAuthPayload::of(event),
+                origin: crate::Origin::of(event),
+                answer_seq: None,
+                answer_line: None,
             },
         );
     }
@@ -843,6 +1046,8 @@ impl TaskBoard {
                 thread.answered = true;
                 thread.answered_by = Some(event.from.clone());
                 thread.reopened = false;
+                thread.answer_seq = Some(event.seq);
+                thread.answer_line = Some(summarize_line(&event.body));
                 // An answer from the agent does not withdraw its own
                 // escalation.
                 if thread.state != StatusState::Archived && thread.escalation.is_none() {
@@ -1031,6 +1236,19 @@ pub fn seen_by_author(event: &Event) -> Option<Seq> {
 }
 
 /// Record `event` as the latest one addressed to `person`.
+fn summarize_line(text: &str) -> String {
+    let first = text.lines().map(str::trim).find(|l| !l.is_empty());
+    let mut line: String = first
+        .unwrap_or_default()
+        .chars()
+        .take(DIRECTED_LINE_CHARS)
+        .collect();
+    if first.is_some_and(|l| l.chars().count() > DIRECTED_LINE_CHARS) {
+        line.push('…');
+    }
+    line
+}
+
 fn note_directed(
     thread: &mut ThreadSummary,
     event: &Event,
@@ -1038,20 +1256,7 @@ fn note_directed(
     escalated: bool,
     text: &str,
 ) {
-    let line = text.lines().map(str::trim).find(|l| !l.is_empty());
-    let mut line: String = line
-        .unwrap_or_default()
-        .chars()
-        .take(DIRECTED_LINE_CHARS)
-        .collect();
-    if text
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .is_some_and(|l| l.chars().count() > DIRECTED_LINE_CHARS)
-    {
-        line.push('…');
-    }
+    let line = summarize_line(text);
     thread
         .directed
         .retain(|d| !(&d.person == person && d.escalated == escalated));
@@ -2015,5 +2220,148 @@ mod tests {
             .to(Address::Speaker)
             .into_event(Seq(9), Utc::now());
         assert!(attention(&to_speaker, &wendell).is_none());
+    }
+
+    #[test]
+    fn sponsored_rules_signals_and_buckets_follow_w2_spec() {
+        let wendell = name("wendell");
+        let bob = name("bob");
+        let mut board = TaskBoard::new(People::new([wendell.clone(), bob.clone()]));
+        let origin = crate::Origin {
+            locator: "/senate::office::senator::secretary".parse().unwrap(),
+            thread: Seq(194),
+        };
+
+        // 1. Direct person root
+        let direct_root = NewEvent::new(c(), Kind::Request, Address::senior(&wendell), "Do A")
+            .to(addr("senator::claude"))
+            .into_event(Seq(1), Utc::now());
+        board.observe(&direct_root);
+        assert!(board.get(Seq(1)).unwrap().is_sponsored_by(&wendell));
+        assert!(!board.get(Seq(1)).unwrap().is_sponsored_by(&bob));
+
+        // 2. DESK_PERSON root
+        let desk_root = NewEvent::new(c(), Kind::Request, Address::Speaker, "Do B")
+            .to(addr("senator::claude"))
+            .with_meta(meta::ORIGIN, origin.value())
+            .with_meta(meta::DESK_PERSON, serde_json::json!("wendell"))
+            .into_event(Seq(2), Utc::now());
+        board.observe(&desk_root);
+        assert!(board.get(Seq(2)).unwrap().is_sponsored_by(&wendell));
+
+        // 3. EXECUTION_AUTH authorized_by via SecretaryProxy
+        let proxy_root = NewEvent::new(c(), Kind::Request, Address::Speaker, "Do C")
+            .to(addr("senator::claude"))
+            .with_meta(meta::ORIGIN, origin.value())
+            .with_meta(
+                meta::EXECUTION_AUTH,
+                crate::ExecutionAuthPayload {
+                    authorized_by: wendell.clone(),
+                    mode: crate::ExecutionAuthMode::SecretaryProxy {
+                        secretary: path("secretary"),
+                    },
+                    note: None,
+                }
+                .value(),
+            )
+            .into_event(Seq(3), Utc::now());
+        board.observe(&proxy_root);
+        assert!(board.get(Seq(3)).unwrap().is_sponsored_by(&wendell));
+        assert!(!board.get(Seq(3)).unwrap().is_sponsored_by(&bob));
+
+        // 4. Unrelated agent forward (neither from, desk_person, nor execution_auth)
+        let unrelated_root = NewEvent::new(c(), Kind::Request, Address::Speaker, "Do D")
+            .to(addr("senator::claude"))
+            .with_meta(meta::ORIGIN, origin.value())
+            .into_event(Seq(4), Utc::now());
+        board.observe(&unrelated_root);
+        assert!(!board.get(Seq(4)).unwrap().is_sponsored_by(&wendell));
+
+        // Commission signals for proxy_root
+        let croot = CommissionRoot::from_event(&proxy_root);
+        let processing = NewEvent::new(c(), Kind::Status, addr("senator::claude"), "")
+            .in_thread(Seq(3))
+            .with_meta(
+                meta::STATUS,
+                StatusPayload::new(StatusState::Processing).value(),
+            )
+            .into_event(Seq(10), Utc::now());
+        assert_eq!(
+            commission_signal(&processing, &croot, &wendell, false),
+            None
+        );
+
+        let mut sp = StatusPayload::new(StatusState::Suspended);
+        sp.reason = Some("needs key".into());
+        let blocked = NewEvent::new(c(), Kind::Status, addr("senator::claude"), "")
+            .in_thread(Seq(3))
+            .with_meta(meta::STATUS, sp.value())
+            .into_event(Seq(11), Utc::now());
+        let sig_block = commission_signal(&blocked, &croot, &wendell, false).unwrap();
+        assert_eq!(sig_block.kind, CommissionSignalKind::Blocked);
+        assert_eq!(sig_block.origin_committee.as_str(), "office");
+        assert_eq!(sig_block.origin_root, Seq(194));
+
+        let ans = NewEvent::new(c(), Kind::Answer, addr("senator::claude"), "Done!")
+            .in_thread(Seq(3))
+            .into_event(Seq(12), Utc::now());
+        let sig_done = commission_signal(&ans, &croot, &wendell, false).unwrap();
+        assert_eq!(sig_done.kind, CommissionSignalKind::Completed);
+        assert_eq!(sig_done.discriminator, ans.id.to_string());
+        // Already answered -> no second Completed signal
+        assert_eq!(commission_signal(&ans, &croot, &wendell, true), None);
+
+        // Relayed answer on origin matches canonical discriminator
+        let origin_committee = CommitteeId::new("office").unwrap();
+        let relayed = NewEvent::new(
+            origin_committee.clone(),
+            Kind::Answer,
+            Address::Speaker,
+            "Done!",
+        )
+        .in_thread(Seq(194))
+        .with_meta(
+            meta::ANSWERED_BY,
+            serde_json::json!("refund-v2::senator::claude"),
+        )
+        .with_meta(
+            meta::RELAYED_EVENT_ID,
+            serde_json::json!(ans.id.to_string()),
+        )
+        .into_event(Seq(199), Utc::now());
+        let origin_root_ev = NewEvent::new(
+            origin_committee,
+            Kind::Request,
+            addr("senator::secretary"),
+            "Do C",
+        )
+        .to(Address::Speaker)
+        .into_event(Seq(194), Utc::now());
+        let mut oroot = CommissionRoot::from_event(&origin_root_ev);
+        oroot.desk_person = Some(wendell.clone());
+        let sig_relay = commission_signal(&relayed, &oroot, &wendell, false).unwrap();
+        assert_eq!(sig_relay.discriminator, sig_done.discriminator);
+        assert_eq!(sig_relay.origin_committee, sig_done.origin_committee);
+        assert_eq!(sig_relay.origin_root, sig_done.origin_root);
+
+        // Buckets
+        board.observe(&blocked);
+        assert_eq!(
+            board.get(Seq(3)).unwrap().commission_bucket(Seq(0)),
+            CommissionBucket::Blocked
+        );
+        board.observe(&ans);
+        assert_eq!(
+            board.get(Seq(3)).unwrap().commission_bucket(Seq(11)),
+            CommissionBucket::CompletedUnread
+        );
+        assert_eq!(
+            board.get(Seq(3)).unwrap().commission_bucket(Seq(12)),
+            CommissionBucket::CompletedRead
+        );
+        assert_eq!(
+            board.get(Seq(1)).unwrap().commission_bucket(Seq(0)),
+            CommissionBucket::InProgress
+        );
     }
 }

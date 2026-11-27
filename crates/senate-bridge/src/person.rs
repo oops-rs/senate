@@ -6,7 +6,7 @@
 //! bracketed mentions. Read state is this machine's: the highest seq of each
 //! thread the person has seen ([`crate::state::Store::mark_seen`]).
 
-use senate_core::{Address, Directed, Kind, Locale, Mention, ThreadSummary};
+use senate_core::{Address, CommissionBucket, Directed, Kind, Locale, Mention, ThreadSummary};
 
 use crate::format;
 use crate::ipc::InboxReply;
@@ -271,34 +271,121 @@ pub(crate) fn render_named_inbox(
     })
 }
 
+fn commission_bucket_label(bucket: CommissionBucket, locale: Locale) -> &'static str {
+    match (bucket, locale) {
+        (CommissionBucket::Blocked, Locale::Zh) => "阻塞中",
+        (CommissionBucket::Blocked, Locale::En) => "blocked",
+        (CommissionBucket::PendingAcceptance, Locale::Zh) => "待验收",
+        (CommissionBucket::PendingAcceptance, Locale::En) => "pending acceptance",
+        (CommissionBucket::CompletedUnread, Locale::Zh) => "已完成（未读）",
+        (CommissionBucket::CompletedUnread, Locale::En) => "completed (unread)",
+        (CommissionBucket::InProgress, Locale::Zh) => "推进中",
+        (CommissionBucket::InProgress, Locale::En) => "in progress",
+        (CommissionBucket::CompletedRead, Locale::Zh) => "已完成",
+        (CommissionBucket::CompletedRead, Locale::En) => "completed",
+    }
+}
+
+fn commission_line(
+    reply: &InboxReply,
+    t: &ThreadSummary,
+    bucket: CommissionBucket,
+    locale: Locale,
+    display_byline: &impl Fn(String) -> String,
+) -> String {
+    let title = format::one_line(&t.title);
+    let label = commission_bucket_label(bucket, locale);
+    let c = &reply.committee;
+    let mut out = format!("\n- [{label}] thread {} · {title}", t.root);
+    let detail = match bucket {
+        CommissionBucket::Blocked => t
+            .escalation
+            .as_ref()
+            .and_then(|e| e.reason.as_deref())
+            .or(t.reason.as_deref()),
+        CommissionBucket::CompletedUnread | CommissionBucket::CompletedRead => {
+            t.answer_line.as_deref()
+        }
+        CommissionBucket::PendingAcceptance | CommissionBucket::InProgress => {
+            t.steps.last().map(|s| s.label.as_str())
+        }
+    };
+    if let Some(detail) = detail {
+        let detail = display_byline(format::one_line(detail));
+        if !detail.is_empty() {
+            out.push_str(&format!("\n    {detail}"));
+        }
+    }
+    let root = t.root;
+    out.push_str(&match locale {
+        Locale::Zh => format!("\n    阅读：`senate thread {root} --committee {c}`"),
+        Locale::En => format!("\n    read: `senate thread {root} --committee {c}`"),
+    });
+    out
+}
+
 fn render_person_inbox(
     reply: &InboxReply,
     locale: Locale,
     how: ShowAll,
     display_byline: impl Fn(String) -> String,
 ) -> String {
-    let (mut mine, others): (Vec<&ThreadSummary>, Vec<&ThreadSummary>) = reply
+    let (mut mine, rest): (Vec<&ThreadSummary>, Vec<&ThreadSummary>) = reply
         .threads
         .iter()
         .partition(|t| reply.waits_on_person(t).is_some());
-    if mine.is_empty() {
+    let mut sponsored: Vec<(CommissionBucket, &ThreadSummary)> = Vec::new();
+    let mut others: Vec<&ThreadSummary> = Vec::new();
+    for t in rest {
+        let seen = reply.seen_of(t.root);
+        let bucket = t.commission_bucket(seen);
+        if t.is_sponsored_by(&reply.person) && bucket != CommissionBucket::CompletedRead {
+            sponsored.push((bucket, t));
+            if !t.is_settled() {
+                others.push(t);
+            }
+        } else {
+            others.push(t);
+        }
+    }
+    if mine.is_empty() && sponsored.is_empty() {
         return mcp::render_inbox(reply, locale, how);
     }
-    // News first; the order of the daemon's listing within each.
-    mine.sort_by_key(|t| reply.waits_on_person(t).is_none_or(|w| w.unread.is_none()));
-    let news = mine
-        .iter()
-        .filter(|t| reply.waits_on_person(t).is_some_and(|w| w.unread.is_some()))
-        .count();
-    let me = Address::senior(&reply.person).in_text();
-    let c = &reply.committee;
-    let n = mine.len();
-    let mut out = match locale {
-        Locale::Zh => format!("{c} 上有 {n} 个 thread 在等你（{me}），其中 {news} 个有新内容："),
-        Locale::En => format!("{n} thread(s) on {c} wait on you ({me}); {news} with news:"),
-    };
-    for t in &mine {
-        out.push_str(&person_thread(reply, t, locale, &display_byline));
+    let mut out = String::new();
+    if !mine.is_empty() {
+        // News first; the order of the daemon's listing within each.
+        mine.sort_by_key(|t| reply.waits_on_person(t).is_none_or(|w| w.unread.is_none()));
+        let news = mine
+            .iter()
+            .filter(|t| reply.waits_on_person(t).is_some_and(|w| w.unread.is_some()))
+            .count();
+        let me = Address::senior(&reply.person).in_text();
+        let c = &reply.committee;
+        let n = mine.len();
+        out.push_str(&match locale {
+            Locale::Zh => {
+                format!("{c} 上有 {n} 个 thread 在等你（{me}），其中 {news} 个有新内容：")
+            }
+            Locale::En => format!("{n} thread(s) on {c} wait on you ({me}); {news} with news:"),
+        });
+        for t in &mine {
+            out.push_str(&person_thread(reply, t, locale, &display_byline));
+        }
+    }
+    if !sponsored.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        sponsored.sort_by_key(|(bucket, t)| (*bucket, std::cmp::Reverse(t.updated), t.root));
+        let c = &reply.committee;
+        let n = sponsored.len();
+        out.push_str(&match locale {
+            Locale::Zh => format!("委派追踪（{c}，{n} 个）："),
+            Locale::En => format!("My Commissions ({c}, {n}):"),
+        });
+        for (bucket, t) in sponsored {
+            out.push_str(&commission_line(reply, t, bucket, locale, &display_byline));
+        }
     }
     if others.is_empty() {
         if let Some(line) = mcp::settled_line(reply.settled, how, locale) {
@@ -316,13 +403,18 @@ fn render_person_inbox(
     out
 }
 
-/// The threads [`render_inbox`] lists as waiting on the person, with the
-/// seq to mark each seen up to (its last event).
+/// The threads [`render_inbox`] lists as waiting on the person or completed
+/// commissions unread by them, with the seq to mark each seen up to (its last event).
 pub fn unread_marks(reply: &InboxReply) -> Vec<crate::ipc::ThreadSeen> {
     reply
         .threads
         .iter()
-        .filter(|t| reply.waits_on_person(t).is_some_and(|w| w.unread.is_some()))
+        .filter(|t| {
+            reply.waits_on_person(t).is_some_and(|w| w.unread.is_some())
+                || (t.is_sponsored_by(&reply.person)
+                    && t.commission_bucket(reply.seen_of(t.root))
+                        == CommissionBucket::CompletedUnread)
+        })
         .map(|t| crate::ipc::ThreadSeen {
             thread: t.root,
             seen: t.updated,
@@ -608,4 +700,92 @@ fn followed_news_is_laid_out_as_markdown_only_when_asked() {
         laid.contains("read: `senate thread 9 --committee refund`"),
         "{laid}"
     );
+}
+
+#[cfg(test)]
+#[test]
+fn sponsored_commissions_render_sorted_and_mark_unread_completions() {
+    use chrono::Utc;
+    use senate_core::{CommitteeId, Name, SenatorName, Seq, StatusState};
+
+    let alice = Name::new("alice").unwrap();
+    let alice_senator: SenatorName = "alice".parse().unwrap();
+    let codex: SenatorName = "codex".parse().unwrap();
+    let now = Utc::now();
+    let thread = |root: u64, state: StatusState, answer_seq: Option<u64>| {
+        let root_seq = Seq(root);
+        let updated = Seq(answer_seq.unwrap_or(root + 1));
+        ThreadSummary {
+            root: root_seq,
+            kind: Kind::Request,
+            from: Address::senator(&alice_senator),
+            on_behalf_of: None,
+            to: vec![Address::senator(&codex)],
+            agents: vec![codex.clone()],
+            title: format!("task {root}"),
+            state,
+            since: root_seq,
+            since_ts: now,
+            updated,
+            activity: None,
+            steps: Vec::new(),
+            links: Vec::new(),
+            owner: None,
+            triage: None,
+            escalated_to: None,
+            takeover: None,
+            reason: None,
+            answered: answer_seq.is_some(),
+            answered_by: answer_seq.map(|_| Address::senator(&codex)),
+            reopened: false,
+            escalation: None,
+            directed: Vec::new(),
+            desk_person: None,
+            execution_auth: None,
+            origin: None,
+            answer_seq: answer_seq.map(Seq),
+            answer_line: answer_seq.map(|_| "done".into()),
+        }
+    };
+    let reply = InboxReply {
+        committee: CommitteeId::new("refund").unwrap(),
+        agents: vec![alice_senator.clone()],
+        person: alice,
+        threads: vec![
+            thread(1, StatusState::Processing, None),
+            thread(2, StatusState::Active, Some(10)),
+            thread(3, StatusState::Suspended, None),
+            thread(4, StatusState::Active, Some(15)),
+        ],
+        settled: 0,
+        seen: vec![crate::ipc::ThreadSeen {
+            thread: Seq(4),
+            seen: Seq(15),
+        }],
+        at_desk: Vec::new(),
+    };
+    let rendered = render_inbox(&reply, Locale::En, ShowAll::Flag);
+    let commissions_section = rendered.split("\n\n").next().unwrap();
+    assert!(
+        commissions_section.contains("My Commissions (refund, 3):"),
+        "{rendered}"
+    );
+    let idx_blocked = commissions_section.find("[blocked] thread 3").unwrap();
+    let idx_completed = commissions_section
+        .find("[completed (unread)] thread 2")
+        .unwrap();
+    let idx_progress = commissions_section.find("[in progress] thread 1").unwrap();
+    assert!(
+        idx_blocked < idx_completed && idx_completed < idx_progress,
+        "{rendered}"
+    );
+    assert!(
+        !commissions_section.contains("thread 4"),
+        "CompletedRead should be hidden from My Commissions: {rendered}"
+    );
+
+    let marks = unread_marks(&reply);
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].thread, Seq(2));
+    assert_eq!(marks[0].seen, Seq(10));
 }

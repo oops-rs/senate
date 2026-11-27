@@ -173,6 +173,11 @@ pub fn suspended(root: u64, title: &str, agent: &str) -> ThreadSummary {
         reopened: false,
         escalation: None,
         directed: Vec::new(),
+        desk_person: None,
+        execution_auth: None,
+        origin: None,
+        answer_seq: None,
+        answer_line: None,
     }
 }
 

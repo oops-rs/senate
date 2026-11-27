@@ -119,6 +119,7 @@ struct MainWindow: View {
             case .section(.history): HistoryView(store: store)
             case let .past(id): PastSessionPage(store: store, sessionId: id)
             case .item, .section(.inbox): InboxView(store: store)
+            case .section(.commissions): CommissionsView(store: store)
             case .section(.approvals): ApprovalsView(store: store)
             case let .desk(item): DeskEntryDetail(store: store, item: item).id(item.id)
             case .section(.senates): SenatesView(store: store)
@@ -503,6 +504,7 @@ extension CoreStore.Section {
     var title: String {
         switch self {
         case .inbox: L("tab.inbox")
+        case .commissions: L("tab.commissions")
         case .approvals: L("tab.approvals")
         case .senates: L("tab.profile")
         case .history: L("tab.history")
@@ -512,6 +514,7 @@ extension CoreStore.Section {
     var symbol: String {
         switch self {
         case .inbox: "tray"
+        case .commissions: "list.bullet.clipboard"
         case .approvals: "checkmark.shield"
         case .senates: "person.crop.circle"
         case .history: "clock.arrow.circlepath"

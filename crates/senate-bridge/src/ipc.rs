@@ -2589,6 +2589,9 @@ pub enum WatchEvent {
         escalated: bool,
         /// The body, or an escalation's reason.
         text: String,
+        /// Sponsored commission lifecycle signal (`Blocked` or `Completed`), if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signal: Option<senate_core::CommissionSignalKind>,
     },
     /// The Speaker's office or a committee's chair is another one now, as
     /// this side knows them: what a session may do (`presides`, and so the

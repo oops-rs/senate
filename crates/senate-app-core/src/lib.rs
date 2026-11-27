@@ -67,8 +67,8 @@ pub use reads::{
 };
 pub use state::{
     AgentInfo, AppState, ApprovalRequest, ChairLine, ChildLine, ChildSeatLine, CodexThreadInfo,
-    CommitteeLine, Counts, DocketCommittee, DocketEntry, DocketSenate, HostedSession, InboxThread,
-    MenuState, RosterCommittee, RosterMember, SeatLine, SenateInfo,
+    CommissionThread, CommitteeLine, Counts, DocketCommittee, DocketEntry, DocketSenate,
+    HostedSession, InboxThread, MenuState, RosterCommittee, RosterMember, SeatLine, SenateInfo,
 };
 pub use timeline::{
     EntryBody, SenateLine, TimelineDelta, TimelineEntry, TimelinePage, TodoLine, ToolCall,

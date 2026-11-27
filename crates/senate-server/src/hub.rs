@@ -1597,6 +1597,10 @@ impl ServerHub {
             .with_meta(
                 meta::ANSWERED_BY,
                 serde_json::Value::String(answered_by.to_string()),
+            )
+            .with_meta(
+                meta::RELAYED_EVENT_ID,
+                serde_json::Value::String(event.id.to_string()),
             );
         relay.to = vec![origin.locator.address().clone()];
         relay.refs = event.refs.clone();

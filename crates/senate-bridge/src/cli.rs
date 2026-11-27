@@ -3333,6 +3333,7 @@ async fn watch(
             news,
             escalated,
             text,
+            ..
         } = &event
         else {
             continue;

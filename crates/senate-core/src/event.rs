@@ -778,6 +778,9 @@ pub mod meta {
     /// Senate): an [`Origin`](crate::locator::Origin), naming the seat that
     /// asked and the root of its thread, so an answer can go back there.
     pub const ORIGIN: &str = "origin";
+    /// Event id of the downstream `Answer` carried back by `relay_answer`,
+    /// written by the server so clients can deduplicate origin and destination receipts.
+    pub const RELAYED_EVENT_ID: &str = "relayed_event_id";
     /// A direct discussion between committees of this Senate. On the
     /// source root, the qualified name of the chair selected at delivery.
     /// On replies and copies, `true`. Written by the server only.

@@ -23,7 +23,7 @@ final class CoreStore {
     /// The window's fixed pages. Inbox and Approvals head the sidebar;
     /// Senates opens from the account menu at its foot.
     enum Section: String, CaseIterable, Hashable {
-        case inbox, approvals, senates, history
+        case inbox, commissions, approvals, senates, history
     }
 
     /// What the window shows: a page, a thread, a session, a committee.
@@ -490,13 +490,14 @@ final class CoreStore {
     }
 
     /// The fixed pages at the head of the sidebar.
-    var sections: [Section] { [.inbox, .approvals, .history] }
+    var sections: [Section] { [.inbox, .commissions, .approvals, .history] }
 
     /// What waits in a section, for its badge: the threads for you (not
-    /// those to decide), and everything waiting for a yes or a no.
+    /// those to decide), sponsored commissions needing attention or unread, and everything waiting for a yes or a no.
     func count(_ section: Section) -> Int {
         switch section {
         case .inbox: inboxThreads.count
+        case .commissions: state.commissions.filter { $0.bucket != "in_progress" }.count
         case .approvals: approvalsCount
         case .senates, .history: 0
         }
@@ -1063,6 +1064,7 @@ extension AppState {
             badge: nil
         ),
         inbox: [],
+        commissions: [],
         approvals: [],
         codex: [],
         docket: [],

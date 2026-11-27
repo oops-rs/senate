@@ -5825,6 +5825,74 @@
         }
       }
     },
+    "tab.commissions": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "My Commissions"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "委派追踪"
+          }
+        }
+      }
+    },
+    "commissions.heading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "My Commissions"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "委派追踪"
+          }
+        }
+      }
+    },
+    "commissions.empty": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No active commissions"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无委派追踪"
+          }
+        }
+      }
+    },
+    "commissions.empty_detail": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tasks you initiate, approve at the desk, or authorize will appear here."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你发起、在议长案头批准或授权执行的任务会显示在这里。"
+          }
+        }
+      }
+    },
     "tab.history": {
       "extractionState": "manual",
       "localizations": {

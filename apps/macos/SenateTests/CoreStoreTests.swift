@@ -181,7 +181,35 @@ import SenateCore
 
     @Test func theSidebarHeadsWithInboxApprovalsAndHistory() async throws {
         let store = store()
-        #expect(store.sections == [.inbox, .approvals, .history])
+        #expect(store.sections == [.inbox, .commissions, .approvals, .history])
+    }
+
+    @Test func commissionsCountExcludesInProgressAndOpensAuthoritativeThread() async throws {
+        let store = store()
+        var s = online()
+        s.commissions = [
+            CommissionThread(
+                committee: "refund-v2", root: 12, updated: 14, title: "Blocked task",
+                bucket: "blocked", bucketLabel: "Blocked", state: "suspended", stateLabel: "Suspended",
+                owner: "[senator::copilot]", summaryLine: "Needs rate limit decision",
+                unread: false, since: Date(), originLabel: "from ledger #4"
+            ),
+            CommissionThread(
+                committee: "refund-v2", root: 15, updated: 18, title: "Completed task",
+                bucket: "completed_unread", bucketLabel: "Completed", state: "active", stateLabel: "Active",
+                owner: nil, summaryLine: "Shipped", unread: true, since: Date(), originLabel: nil
+            ),
+            CommissionThread(
+                committee: "ledger", root: 19, updated: 19, title: "Working task",
+                bucket: "in_progress", bucketLabel: "In progress", state: "processing", stateLabel: "Processing",
+                owner: nil, summaryLine: nil, unread: false, since: Date(), originLabel: nil
+            ),
+        ]
+        core.push(s)
+        try await until(store) { $0.state.commissions.count == 3 }
+        #expect(store.count(.commissions) == 2)
+        store.openThread(committee: "refund-v2", root: 12)
+        #expect(store.place == .thread("refund-v2:12"))
     }
 
     @Test func openingAThreadFromANotificationSelectsIt() async throws {

@@ -3219,6 +3219,11 @@ mod tests {
             reopened: false,
             escalation: None,
             directed: Vec::new(),
+            desk_person: None,
+            execution_auth: None,
+            origin: None,
+            answer_seq: None,
+            answer_line: None,
         }
     }
 
