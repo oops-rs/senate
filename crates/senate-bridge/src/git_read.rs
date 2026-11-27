@@ -20,8 +20,27 @@
 //! would qualify because a tag, a remote or another ref shares it.
 
 use std::io::ErrorKind;
-use std::os::unix::fs::MetadataExt;
+
+use crate::fsmode::MetadataExt;
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+fn owned_by_me(path: &Path) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+    Some(std::fs::metadata(path).ok()?.uid() == rustix::process::geteuid().as_raw())
+}
+
+/// Git for Windows makes the same check against the owner's SID, and
+/// counts as the user's what an elevated administrator creates (owned by
+/// the Administrators group): this process's default owner.
+#[cfg(windows)]
+fn owned_by_me(path: &Path) -> Option<bool> {
+    let owner = crate::win::file_owner(path).ok()?;
+    Some(
+        owner == crate::win::current_user().ok()?
+            || owner == crate::win::current_default_owner().ok()?,
+    )
+}
 
 /// What the repository's files say.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,12 +215,11 @@ fn repository(worktree: &Path, git_dir: &Path, git_file: Option<&Path>) -> Optio
         return None;
     }
     // `git` refuses a repository someone else owns unless told it is safe.
-    let me = rustix::process::geteuid().as_raw();
     for path in [Some(worktree), Some(git_dir.as_path()), git_file]
         .into_iter()
         .flatten()
     {
-        if std::fs::metadata(path).ok()?.uid() != me {
+        if !owned_by_me(path)? {
             return None;
         }
     }

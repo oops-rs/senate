@@ -34,32 +34,39 @@
 //! installer or a failing test printed last is usually what the reader
 //! wants. How the program ended is in the `exit` file.
 
+use crate::fsmode::{DirBuilderExt, OpenOptionsExt};
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{self, Write as _};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::local::{Listener as UnixListener, Stream as UnixStream};
 use anyhow::{Context, ensure};
+#[cfg(unix)]
 use pty_process::Size;
+#[cfg(unix)]
 use rustix::fs::{FlockOperation, flock};
+#[cfg(unix)]
 use rustix::process::Pid;
 use senate_core::EventId;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+#[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
 use super::{
     Admission, DaemonIdentity, HOST_PID, HOSTED_AGY_ENV, HOSTED_CLAUDE_ENV, IO_CHUNK, READY,
-    RemoveDirectory, START_TIMEOUT, Tty, ViewTicket, Viewer, ViewerActivity, accept, control,
-    directory, emulation, hosts, input, keys, open_lock, running, serve, socket, stop_group,
-    vanished, watch, write_protocol,
+    RemoveDirectory, START_TIMEOUT, ViewTicket, Viewer, ViewerActivity, accept, control, directory,
+    emulation, hosts, input, keys, open_lock, running, socket, vanished, watch, write_protocol,
 };
+#[cfg(unix)]
+use super::{Tty, serve, stop_group};
 use crate::ipc::{self, IpcError};
 use crate::paths::{HOME_ENV, Paths, SOCKET_PATH_LIMIT};
 
@@ -107,6 +114,12 @@ pub(crate) enum State {
 
 /// Reserve `id` for a scratch terminal: its directory, with `record`. The
 /// daemon's doing; the opener then starts the host in it ([`start`]).
+#[cfg(windows)]
+pub(crate) fn reserve(_paths: &Paths, _id: &EventId, _record: &Record) -> anyhow::Result<()> {
+    anyhow::bail!("scratch terminals are not supported on Windows yet")
+}
+
+#[cfg(unix)]
 pub(crate) fn reserve(paths: &Paths, id: &EventId, record: &Record) -> anyhow::Result<()> {
     let dir = directory(paths, id);
     let socket = socket(paths, id);
@@ -220,6 +233,12 @@ pub struct Program<'a> {
 /// Start the host of the reserved scratch terminal `id` as a child of this
 /// process, and wait until its program runs. This process is the opener:
 /// what it may do is what the program may do.
+#[cfg(windows)]
+pub async fn start(_paths: &Paths, _id: &EventId, _program: &Program<'_>) -> anyhow::Result<()> {
+    anyhow::bail!("scratch terminals are not supported on Windows yet")
+}
+
+#[cfg(unix)]
 pub async fn start(paths: &Paths, id: &EventId, program: &Program<'_>) -> anyhow::Result<()> {
     let dir = directory(paths, id);
     let errors = dir.join("errors");
@@ -268,6 +287,7 @@ pub async fn start(paths: &Paths, id: &EventId, program: &Program<'_>) -> anyhow
     anyhow::bail!("the terminal did not start: {detail}")
 }
 
+#[cfg(unix)]
 fn describe(status: std::process::ExitStatus) -> String {
     use std::os::unix::process::ExitStatusExt as _;
     match (status.code(), status.signal()) {
@@ -279,6 +299,12 @@ fn describe(status: std::process::ExitStatus) -> String {
 
 /// Run the host of scratch terminal `id`: `senate terminal-host`, started
 /// by [`start`].
+#[cfg(windows)]
+pub async fn run(_paths: &Paths, _id: &EventId, _program: &Program<'_>) -> anyhow::Result<()> {
+    anyhow::bail!("scratch terminals are not supported on Windows yet")
+}
+
+#[cfg(unix)]
 pub async fn run(paths: &Paths, id: &EventId, program: &Program<'_>) -> anyhow::Result<()> {
     ensure!(
         record(paths, id).is_some(),
@@ -422,6 +448,7 @@ pub async fn run(paths: &Paths, id: &EventId, program: &Program<'_>) -> anyhow::
 
 /// End the program's process group, unless the program already ended:
 /// what it left behind is hung up on when the host drops the PTY.
+#[cfg(unix)]
 async fn stop(
     child: &mut tokio::process::Child,
     pid: Pid,
@@ -471,6 +498,7 @@ pub(crate) enum Sent {
 
 /// Serve the daemon's requests for as long as the host runs: tickets for
 /// viewers and watchers, as any host, and [`Control`].
+#[cfg(unix)]
 async fn serve_control(
     listener: &UnixListener,
     tty: &Tty,
@@ -479,7 +507,7 @@ async fn serve_control(
     exited: &AtomicBool,
 ) {
     loop {
-        let (mut stream, _) = accept(listener).await;
+        let mut stream = accept(listener).await;
         if !admission.is_daemon(&stream, host).await {
             tracing::warn!(%host, "refused a terminal control request from an unverified daemon peer");
             continue;
@@ -505,6 +533,7 @@ async fn serve_control(
     }
 }
 
+#[cfg(unix)]
 async fn apply(tty: &Tty, exited: &AtomicBool, control: Control) -> u8 {
     // The keyboard and the size are the attached person's while they hold
     // the terminal.

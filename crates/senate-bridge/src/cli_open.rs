@@ -147,6 +147,8 @@ mod tests {
         }
     }
 
+    // Unix paths and programs; remote authority is Unix only.
+    #[cfg(unix)]
     #[test]
     fn the_launcher_gets_the_link_as_one_argument_and_failures_are_explained() {
         let link = canonical("thread/senate/42").unwrap();

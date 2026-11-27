@@ -506,22 +506,20 @@ pub(crate) fn agent_refusal_guidance(request: &Request) -> &'static str {
 /// Host upgrades and viewers still use the operator's available proof
 /// when this build has no device-owner authentication path.
 pub(super) fn advisory_host_action(request: &Request) -> bool {
-    if !matches!(
+    let host_action = matches!(
         request,
         Request::RestartHost { .. } | Request::OpenViewer { .. }
-    ) {
-        return false;
-    }
+    );
     #[cfg(target_os = "macos")]
-    if signed_local_daemon() {
+    if host_action && signed_local_daemon() {
         return false;
     }
-    true
+    host_action
 }
 
 /// Operations documented as operator-only which previously relied on their CLI
 /// entry point. Enforce these at a protected scope boundary as well.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 pub(crate) fn operator_only(request: &Request) -> bool {
     match request {
         Request::Replace { .. }
@@ -1174,6 +1172,17 @@ fn hook_owner_mismatch() -> IpcError {
 
 #[cfg(test)]
 mod tests {
+    /// The OS errors for a process of another user, and for running out
+    /// of descriptors or handles.
+    #[cfg(unix)]
+    const FOREIGN: i32 = libc::EPERM;
+    #[cfg(windows)]
+    const FOREIGN: i32 = 5;
+    #[cfg(unix)]
+    const EXHAUSTED: [i32; 2] = [libc::EMFILE, libc::ENFILE];
+    #[cfg(windows)]
+    const EXHAUSTED: [i32; 1] = [4];
+
     #[tokio::test]
     async fn request_effect_and_final_author_do_not_inherit_session_authority() {
         let session = serde_json::json!({"session_id":"fixture"});
@@ -1780,17 +1789,17 @@ mod tests {
             match pid {
                 40 => Ok((30, "senate".to_owned())),
                 30 => Ok((20, "zsh".to_owned())),
-                _ => Err(std::io::Error::from_raw_os_error(libc::EPERM).into()),
+                _ => Err(std::io::Error::from_raw_os_error(FOREIGN).into()),
             }
         };
         assert_eq!(pids(ancestry(40, read).await.unwrap()), vec![40, 30]);
-        let read = |_| async move { Err(std::io::Error::from_raw_os_error(libc::EPERM).into()) };
+        let read = |_| async move { Err(std::io::Error::from_raw_os_error(FOREIGN).into()) };
         assert_eq!(ancestry(40, read).await, Err(ProcessLookup::Foreign));
     }
 
     #[tokio::test]
     async fn descriptor_exhaustion_is_reported_as_a_daemon_error() {
-        for errno in [libc::EMFILE, libc::ENFILE] {
+        for errno in EXHAUSTED {
             let read = |_| async move { Err(std::io::Error::from_raw_os_error(errno).into()) };
             assert_eq!(ancestry(40, read).await, Err(ProcessLookup::Descriptors));
         }
@@ -1808,6 +1817,7 @@ mod tests {
         assert_eq!(chain.first().map(|(pid, _)| *pid), Some(me));
         // To launchd, or to a root `login` when run from a terminal app.
         let (top, _) = chain.last().unwrap();
-        assert!(*top == 1 || process(*top).await.is_ok());
+        // Windows: to a parent that has gone (0), a pid since reused.
+        assert!(*top <= 1 || process(*top).await.is_ok());
     }
 }

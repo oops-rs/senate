@@ -296,6 +296,7 @@ mod tests {
         assert_eq!(report.attempts.len(), 2);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_inbox_that_answers_falls_through_to_the_hook_queue() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

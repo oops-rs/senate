@@ -1,12 +1,12 @@
 //! History is available to the local person, without changing the session list.
 
 use super::*;
+use crate::fsmode::MetadataExt;
 use crate::ipc::{
     SessionHistoryReply, SessionHistoryRow, SessionIndexProgress, SessionSearchReply,
 };
 use crate::timeline::{self, Index};
 use serde::{Deserialize, Serialize};
-use std::os::unix::fs::MetadataExt;
 
 #[derive(PartialEq, Eq)]
 struct FileVersion {

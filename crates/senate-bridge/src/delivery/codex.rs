@@ -118,7 +118,11 @@ impl CodexConfig {
     pub fn transport(&self) -> Result<Transport, String> {
         match self.listen.as_deref().map(str::trim) {
             None | Some("") => Ok(Transport::Proxy {
-                program: self.bin.clone().unwrap_or_else(|| PathBuf::from("codex")),
+                program: self
+                    .bin
+                    .clone()
+                    .map(native_program)
+                    .unwrap_or_else(default_program),
             }),
             Some(url) => match url.strip_prefix("unix://") {
                 Some(path) if path.starts_with('/') => Ok(Transport::Unix(PathBuf::from(path))),
@@ -128,6 +132,49 @@ impl CodexConfig {
             },
         }
     }
+}
+
+/// `codex` on `PATH`. On Unix the name, resolved when it runs. On Windows
+/// the program found on `PATH`: `codex.exe`, or the Codex binary inside the
+/// npm package that `codex.cmd` starts, since `CreateProcess` runs no
+/// `.cmd`.
+fn default_program() -> PathBuf {
+    #[cfg(windows)]
+    if let Some(found) = crate::install::find_on_path("codex") {
+        return native_program(found);
+    }
+    PathBuf::from("codex")
+}
+
+/// The executable behind `program`. npm installs Codex on Windows as
+/// `codex.cmd`, a batch file that runs `node …\@openai\codex\bin\codex.js`,
+/// which in turn runs the platform package's `codex.exe`: that binary is
+/// the one to start (a batch file cannot be spawned directly, and through
+/// `cmd /c` its arguments would be reparsed), and the one a running
+/// session's process is. Anything else is returned as it is.
+pub(crate) fn native_program(program: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    if program
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("codex.cmd"))
+        && let Some(dir) = program.parent()
+    {
+        let package = dir.join(r"node_modules\@openai\codex\node_modules\@openai");
+        for (platform, triple) in [
+            ("codex-win32-x64", "x86_64-pc-windows-msvc"),
+            ("codex-win32-arm64", "aarch64-pc-windows-msvc"),
+        ] {
+            let exe = package
+                .join(platform)
+                .join("vendor")
+                .join(triple)
+                .join(r"bin\codex.exe");
+            if exe.is_file() {
+                return exe;
+            }
+        }
+    }
+    program
 }
 
 /// How the bridge reaches the app-server.
@@ -295,6 +342,17 @@ impl AppServer {
             transport: transport.clone(),
         };
         let (ws, child) = match transport {
+            // Codex's own control socket is AF_UNIX on Windows too, which
+            // tokio does not offer there: Windows reaches the daemon
+            // through `codex app-server proxy` only.
+            #[cfg(windows)]
+            Transport::Unix(_) => {
+                return Err(connect_error(
+                    "codex.listen needs a Unix socket; on Windows remove it and use the managed daemon"
+                        .into(),
+                ));
+            }
+            #[cfg(unix)]
             Transport::Unix(path) => {
                 let stream = tokio::net::UnixStream::connect(path).await.map_err(|e| {
                     if matches!(
@@ -869,15 +927,50 @@ impl DeliveryAdapter for CodexAppServerAdapter {
 mod tests {
     use super::*;
 
+    /// npm's `codex.cmd` starts the platform package's `codex.exe`: that
+    /// is the program. Any other path is kept as it is.
+    #[cfg(windows)]
+    #[test]
+    fn an_npm_codex_cmd_resolves_to_its_codex_exe() {
+        let npm = tempfile::tempdir().unwrap();
+        let cmd = npm.path().join("codex.cmd");
+        std::fs::write(&cmd, "@echo off\r\n").unwrap();
+        assert_eq!(native_program(cmd.clone()), cmd, "no package beside it");
+        let exe = npm.path().join(
+            r"node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe",
+        );
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "").unwrap();
+        assert_eq!(native_program(cmd), exe);
+        let direct = npm.path().join("codex.exe");
+        assert_eq!(native_program(direct.clone()), direct);
+        let c: ConfigFile = toml::from_str(&format!(
+            "[codex]\nbin = '{}'\n",
+            npm.path().join("codex.cmd").display()
+        ))
+        .unwrap();
+        assert_eq!(
+            c.codex.transport().unwrap(),
+            Transport::Proxy { program: exe }
+        );
+    }
+
     #[test]
     fn config_and_transport() {
         let c: ConfigFile = toml::from_str("server_url = \"x\"\n").unwrap();
+        // Windows resolves the default on PATH (`default_program`).
+        #[cfg(unix)]
         assert_eq!(
             c.codex.transport().unwrap(),
             Transport::Proxy {
                 program: "codex".into()
             }
         );
+        #[cfg(windows)]
+        assert!(matches!(
+            c.codex.transport().unwrap(),
+            Transport::Proxy { .. }
+        ));
         let c: ConfigFile =
             toml::from_str("[codex]\nlisten = \"unix:///tmp/cx.sock\"\nbin = \"/opt/codex\"\n")
                 .unwrap();

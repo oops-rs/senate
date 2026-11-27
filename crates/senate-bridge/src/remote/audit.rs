@@ -1,11 +1,11 @@
 //! Bounded best-effort diagnostics. Disk failures cannot authorize a request
 //! or prevent a revoke. Only admitted actions can enter this queue.
 
+use crate::fsmode::OpenOptionsExt;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -141,14 +141,11 @@ impl Audit {
 }
 
 fn open(path: &Path) -> io::Result<File> {
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true).mode(0o600);
+    let file = crate::fsmode::no_follow(&mut options).open(path)?;
     let meta = file.metadata()?;
-    if !meta.is_file() || meta.mode() & 0o077 != 0 {
+    if !meta.is_file() || !crate::fsmode::owner_only(&meta) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "remote audit must be a private file",
@@ -248,6 +245,8 @@ mod tests {
         Ok(())
     }
 
+    // Unix paths and programs; remote authority is Unix only.
+    #[cfg(unix)]
     #[test]
     fn audit_retains_at_most_two_bounded_files() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;

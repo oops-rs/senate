@@ -338,11 +338,18 @@ pub struct Lock {
     _file: File,
 }
 
+#[cfg(unix)]
 #[allow(unsafe_code)]
 fn try_flock(file: &File) -> bool {
     use std::os::fd::AsRawFd;
     // SAFETY: flock(2) on a file descriptor we own, for the life of `file`.
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+/// LockFileEx, held as long as `file`.
+#[cfg(windows)]
+fn try_flock(file: &File) -> bool {
+    file.try_lock().is_ok()
 }
 
 /// Take the lock of `tree`'s repository, waiting a few seconds; `None` when

@@ -5,10 +5,10 @@
 
 use std::sync::Weak;
 
+use crate::local::{OwnedReadHalf, OwnedWriteHalf};
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::broadcast;
 
 use super::*;

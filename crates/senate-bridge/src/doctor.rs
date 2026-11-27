@@ -303,8 +303,7 @@ fn copy_check(spec: &service::Spec, senated: &Path, l: Locale) -> Check {
 }
 
 fn executable(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    std::fs::metadata(p).is_ok_and(|m| crate::fsmode::runnable(p, &m))
 }
 
 /// The service file is what `setup service install` writes now, the
@@ -801,4 +800,5 @@ pub fn binding_checks(rows: &[binding::Row], l: Locale) -> Vec<Check> {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests;

@@ -26,7 +26,6 @@ axum = { workspace = true, optional = true }
 senate-observe-client = { workspace = true, optional = true }
 senate-observe.workspace = true
 senate-observe-protocol.workspace = true
-senate-scene.workspace = true
 senate-remote-admin.workspace = true
 senate-core = { workspace = true }
 senate-markdown = { workspace = true }
@@ -73,15 +72,35 @@ tempfile = { workspace = true }
 # Unix-only for now: hosted terminals (PTY, process groups, termios),
 # peer credentials and pid probing. See docs/windows-plan.md.
 [target.'cfg(unix)'.dependencies]
+# `senate scene`: its folder checks are Unix only.
+senate-scene.workspace = true
 libc = { workspace = true }
 pty-process = { workspace = true }
 rustix = { workspace = true }
+
+# Named pipes, SIDs and security descriptors, process facts: src/win.rs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Performance",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3.7", default-features = false }
 
 [build-dependencies]
 cc = "1"
+
+# A native Codex session end to end; also its own fake `codex` (no libtest).
+[[test]]
+name = "native_codex"
+harness = false
 
 [dev-dependencies]
 axum = { workspace = true }

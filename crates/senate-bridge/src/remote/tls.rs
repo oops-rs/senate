@@ -128,8 +128,11 @@ pub(super) fn enrollment_name(name: Option<&str>) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::remote::{State, audit, authority, locked, now};
 
+    // Remote authority is Unix only.
+    #[cfg(unix)]
     #[tokio::test]
     async fn listener_refuses_legacy_tls_missing_and_unenrolled_certificates() -> anyhow::Result<()>
     {

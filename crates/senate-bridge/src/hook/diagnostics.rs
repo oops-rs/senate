@@ -4,7 +4,6 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use rustix::fs::{FlockOperation, Mode, OFlags, flock, open};
 
 use super::HookKind;
 use crate::ipc::{self, HookDropReport, Request};
@@ -61,7 +60,7 @@ fn report(kind: HookKind, runtime_hint: Option<Runtime>) {
             (kind == HookKind::HostedApproval || host_id.is_some()).then_some(Runtime::Claude)
         }),
         host_id,
-        parent_pid: std::os::unix::process::parent_id(),
+        parent_pid: crate::kernel_process::parent_id(),
     };
     let delivered = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -98,14 +97,24 @@ fn fallback(paths: &Paths, report: &HookDropReport) -> io::Result<()> {
     }))?;
     line.push(b'\n');
 
-    let create =
-        OFlags::WRONLY | OFlags::CREATE | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
-    let mode = Mode::RUSR | Mode::WUSR;
+    // Write-only, created 0600, never through a link or onto a FIFO.
+    let create = |append: bool, new: bool| {
+        use crate::fsmode::OpenOptionsExt as _;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).append(append).mode(0o600);
+        if new {
+            options.create_new(true);
+        } else {
+            options.create(true);
+        }
+        crate::fsmode::no_follow(&mut options);
+        options
+    };
     // Hold one lock across append and replacement. Opening it fails if the
     // Senate home does not exist.
-    let lock = open(path.with_extension("lock"), create, mode)?;
-    flock(&lock, FlockOperation::LockExclusive)?;
-    let mut file = File::from(open(&path, create | OFlags::APPEND, mode)?);
+    let lock = create(false, false).open(path.with_extension("lock"))?;
+    lock.lock()?;
+    let mut file: File = create(true, false).open(&path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Ok(());
@@ -122,7 +131,7 @@ fn fallback(paths: &Paths, report: &HookDropReport) -> io::Result<()> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
         Err(err) => return Err(err),
     }
-    let mut replacement = File::from(open(&staging, create | OFlags::EXCL, mode)?);
+    let mut replacement = create(false, true).open(&staging)?;
     replacement.write_all(&line)?;
     std::fs::rename(staging, path)
 }

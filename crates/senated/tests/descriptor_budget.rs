@@ -1,4 +1,6 @@
 #![allow(clippy::unwrap_used)]
+// File descriptor limits are a Unix budget; Windows has handles.
+#![cfg(unix)]
 
 use std::process::Stdio;
 use std::time::Duration;

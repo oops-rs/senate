@@ -59,10 +59,15 @@
 //! | `senates/top/OFFICE-NOTE` | the compatibility note on `[local] speaker`, said once |
 //! | `senates/top/uplink.json` | the registration with the Senate above, for `senate status` |
 
+// A Windows PathBuf is wider than a Unix one, which takes MachineError past
+// clippy's 128 bytes there; it is returned rarely, while setting up.
+#![cfg_attr(windows, allow(clippy::result_large_err))]
+
 pub mod uplink;
 
 use std::io::Write;
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::Arc;
@@ -578,17 +583,18 @@ async fn plan(
         let path = path.to_path_buf();
         move |source| MachineError::Io { path, source }
     };
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)
-        .map_err(io(&dir))?;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    // Windows: inside the Senate home, whose DACL is the person's alone.
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(&dir).map_err(io(&dir))?;
     let token_file = dir.join("token");
     senate_bridge::config::check_legacy_person_token_consumers(paths)
         .map_err(MachineError::Invalid)?;
     let migrating = token_file.exists();
     if migrating
-        && tokio::net::UnixStream::connect(paths.socket())
+        && senate_bridge::local::Stream::connect(paths.socket())
             .await
             .is_ok()
     {
@@ -782,12 +788,11 @@ fn notice_office(dir: &Path, note: &OfficeNote, locale: Locale) {
 }
 
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path)?;
     writeln!(file, "{text}")
 }
 
@@ -1817,6 +1822,8 @@ mod tests {
         assert_eq!(after, before);
     }
 
+    // A named pipe has no path limit (senate_bridge::local).
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_home_too_long_for_the_socket_fails_once_and_hosts_nothing() {
         let dir = tempfile::tempdir().unwrap();

@@ -3,8 +3,10 @@
 //! inbound message, since handling it can itself call the remote surface.
 
 mod framing;
+#[cfg_attr(windows, path = "transport/socket_windows.rs")]
 mod socket;
 #[cfg(test)]
+#[cfg(unix)]
 mod tests;
 
 use std::collections::{HashMap, HashSet};
@@ -15,6 +17,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail, ensure};
 use async_trait::async_trait;
+#[cfg(windows)]
+use senate_bridge::local::Stream as UnixStream;
 use senate_core::{
     AdoptedGroup, AnnouncementSection, Card, ChatSurface, CreatedGroup, NewGroup, PostTarget,
     Posted, SurfaceError,
@@ -24,6 +28,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncWrite, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;

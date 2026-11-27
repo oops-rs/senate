@@ -1,5 +1,89 @@
 # Windows support: survey and plan
 
+## Slice 2, 2026-11-27: native `senate` and `senated` for Codex
+
+Approved on Senate thread 163. Tested on win-ci (Windows 11 26200, VS
+2022, rustc 1.100). The whole workspace now builds on Windows with all
+targets and no warnings. A native, non-hosted Codex session works end to
+end: `tests/native_codex.rs` runs it.
+
+**Local IPC** (`src/local.rs`). On Unix, `local::{Listener, Stream}` are
+tokio's Unix socket types, so nothing changes there. On Windows they are
+a named pipe whose name is a digest of the socket path
+(`\\.\pipe\senate-<hash>`). While the listener lives, the socket path
+holds a marker file. The pipe:
+
+- has a protected DACL granting the person's SID alone (`src/win.rs`
+  `OwnerOnly`);
+- has `first_pipe_instance`, so nobody can hold the name in front of the
+  daemon, and rejects remote clients;
+- names its client through `GetNamedPipeClientProcessId`. The listener
+  drops a client that runs as another user, and a client drops a server
+  that runs as another user.
+
+Tests in `local.rs`:
+
+- a client and the server name each other;
+- eight concurrent clients each get their own instance;
+- a held name cannot be bound or squatted;
+- a pipe whose DACL grants only SYSTEM refuses this user with
+  PermissionDenied, while the person's own pipe admits them.
+
+**Caller identity**:
+
+- `kernel_process` has a Windows arm. The boot identity is the kernel's
+  boot time (`NtQuerySystemInformation`). A process's birth is its
+  creation time. Its parent comes from a Toolhelp snapshot, and a parent
+  born after its child ends the chain, as pid reuse would. Images are
+  named without `.exe`.
+- A session binds to the `codex` process its hook and MCP server run
+  under, as on Linux without a scope.
+- Person-only and operator-only requests are refused on Windows: the
+  daemon's `person_peer` is `None` outside the debug test fixture, and
+  `operator_only` is enforced there. Ancestry never stands in for a
+  person.
+
+**Files**:
+
+- `ensure_home` gives `~\.senate` an owner-only, inherited DACL.
+- `fsmode` makes modes a no-op on Windows. The checks that need privacy
+  read the DACL (`win::admits_only_me`) or fail closed.
+- `safe_path_windows.rs` holds an open, delete-denying handle on every
+  directory from the root down, opened without following reparse points,
+  and refuses hard-linked files.
+- File locks use `std::fs::File` locks.
+
+**Codex** (`delivery/codex.rs`):
+
+- The default transport stays `codex app-server proxy`.
+- On Windows, a `codex.cmd` from npm resolves to the platform package's
+  `codex.exe`, because a batch file cannot be spawned.
+- `codex.listen` (a Unix socket) is refused on Windows.
+
+**Gated off on Windows**, each with a clear refusal:
+
+- hosted sessions, scratch terminals and the attach, watch and picker
+  viewers (ConPTY is a later phase);
+- Claude Code's inbox;
+- scene folder checks;
+- remote authority;
+- the launchd/systemd service.
+
+The Unix-fixture integration suites (bridge `suite`, e2e `suite`,
+app-core) are Unix only for now. Windows runs every crate's unit tests
+and `native_codex`.
+
+**Binaries**. Windows gives a main thread 1 MiB of stack, against Unix's
+8 MiB, and the CLI overflowed it. `senate` and `senated` now link with
+`/STACK:8388608`.
+
+**Open**:
+
+- Running a real Codex (model turns) needs an isolated Codex credential.
+- Real Codex hooks need their Windows shell checked.
+- The `shim/senate` package also needs the stack flag.
+- A Windows service: Task Scheduler.
+
 ## Update, 2026-11-27: native re-baseline at main fbee6529
 
 Machine: Windows 11 Pro 10.0.26100.7623, x64, over SSH into native

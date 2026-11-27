@@ -37,11 +37,18 @@ pub async fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<String,
         .kill_on_drop(true);
     // SAFETY: the child only makes the async-signal-safe fchdir syscall
     // before exec. The captured descriptor lives through the syscall.
+    #[cfg(unix)]
     #[allow(unsafe_code)]
     unsafe {
         command.pre_exec(move || rustix::process::fchdir(directory.fd()).map_err(Into::into));
     }
+    // Windows: the held directory cannot be renamed or replaced while
+    // `directory` lives, so its path still names it.
+    #[cfg(windows)]
+    command.current_dir(directory.path());
     let run = command.output();
+    #[cfg(windows)]
+    let _held = directory;
     match tokio::time::timeout(timeout, run).await {
         Err(_) => Err(format!("git {} timed out", args.join(" "))),
         Ok(Err(e)) => Err(format!("running git: {e}")),
@@ -112,9 +119,15 @@ fn read_in(
     dir: &Path,
     pinned: &crate::safe_path::Directory,
 ) -> Option<Option<crate::git_read::Repository>> {
-    use std::os::unix::fs::MetadataExt;
-
+    // Windows: the held chain of directories cannot change under `dir`.
+    #[cfg(windows)]
     let same = || {
+        let _ = pinned;
+        Some(())
+    };
+    #[cfg(unix)]
+    let same = || {
+        use std::os::unix::fs::MetadataExt;
         let held = rustix::fs::fstat(pinned.fd()).ok()?;
         let named = std::fs::metadata(dir).ok()?;
         // The casts only widen: the fields' types differ by platform.
@@ -375,9 +388,15 @@ mod tests {
             return;
         }
         assert!(matches!(read_in(&root, &pinned), Some(Some(_))));
-        std::fs::rename(&root, base.join("moved")).unwrap();
-        std::fs::rename(&other, &root).unwrap();
-        assert!(read_in(&root, &pinned).is_none());
+        // Windows: the held directory cannot be moved at all.
+        #[cfg(windows)]
+        assert!(std::fs::rename(&root, base.join("moved")).is_err());
+        #[cfg(unix)]
+        {
+            std::fs::rename(&root, base.join("moved")).unwrap();
+            std::fs::rename(&other, &root).unwrap();
+            assert!(read_in(&root, &pinned).is_none());
+        }
     }
 
     #[test]
@@ -414,6 +433,7 @@ mod tests {
         assert_eq!(p.files.decisions.as_deref(), Some("dddddddddd"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn automatic_notes_refuse_links_and_linked_note_directories() {
         use std::os::unix::fs::symlink;

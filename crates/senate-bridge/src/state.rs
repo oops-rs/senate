@@ -54,7 +54,6 @@
 //! one transaction ([`Store::ingest`]), so the cursor never passes an event
 //! that was not kept and the queue is never left over its cap.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -919,7 +918,7 @@ impl Store {
     /// Open (creating if needed) the daemon's database, mode 0600.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        crate::fsmode::set_mode(path, 0o600)?;
         Self::init_at(conn, Some(path))
     }
 
@@ -1907,6 +1906,7 @@ impl Store {
 
     /// The host records acceptance before shutting down, even if its daemon
     /// connection is lost. The daemon has already initialized this database.
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) fn accept_host_stop(
         path: &Path,
         host: &EventId,
@@ -4072,6 +4072,7 @@ mod tests {
         assert_eq!((item.status, item.session_id), (ItemStatus::Pending, None));
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_host_row_does_not_stop_pruning_other_sessions() {
         let store = Store::in_memory().unwrap();

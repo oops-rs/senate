@@ -194,10 +194,11 @@ mod tests {
     #[test]
     fn cached_title_search_reads_only_appends_and_drops_removed_sessions() {
         let mut cache = TitleCache::default();
-        let mut file = tempfile::NamedTempFile::new().unwrap();
+        // Kept, so the writer can close it before it is replaced: Windows
+        // replaces no file another handle holds.
+        let (mut file, path) = tempfile::NamedTempFile::new().unwrap().keep().unwrap();
         let record = r#"{"type":"user","isMeta":true,"message":{"content":"injected"}}"#;
         writeln!(file, "{record}").unwrap();
-        let path = file.path().to_owned();
         let session = || vec![("test".to_string(), Runtime::Claude, path.clone())];
 
         assert!(cache.refresh(session())["test"].title.is_none());
@@ -240,6 +241,7 @@ mod tests {
         );
         assert_eq!(cache.entries[&path].bytes_scanned, titled);
 
+        drop(file);
         let mut replacement = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
         writeln!(
             replacement,
@@ -254,5 +256,6 @@ mod tests {
 
         assert!(cache.refresh(Vec::new()).is_empty());
         assert!(cache.entries.is_empty());
+        std::fs::remove_file(&path).unwrap();
     }
 }

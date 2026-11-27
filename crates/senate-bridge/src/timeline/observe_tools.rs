@@ -1,10 +1,10 @@
 //! Bounded tail of native structured records. Tool previews use only the
 //! runtime's call type and correlation key, never a transcript DTO.
 
+use crate::fsmode::{FileExt, MetadataExt};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
-use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;

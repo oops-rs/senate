@@ -121,12 +121,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use crate::local;
 use anyhow::{Context, bail, ensure};
 use senate_core::alias::{AliasMatch, AliasName};
 use senate_core::api::{self, Heartbeat};
@@ -138,7 +138,6 @@ use senate_core::{
     TaskOwner, TriagePayload, TriageVerdict, is_provisional, meta, needs_triage,
 };
 use serde::Serialize;
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Notify, RwLock, RwLockReadGuard, broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -766,10 +765,19 @@ impl ShutdownPauser {
 /// Run until SIGINT or SIGTERM.
 pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
     let handle = start(options).await?;
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let terminated = tokio::select! {
-        r = tokio::signal::ctrl_c() => { r?; false }
-        _ = term.recv() => true,
+    #[cfg(unix)]
+    let terminated = {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => { r?; false }
+            _ = term.recv() => true,
+        }
+    };
+    // A Windows console process gets ctrl-c (and ctrl-break, close).
+    #[cfg(windows)]
+    let terminated = {
+        tokio::signal::ctrl_c().await?;
+        false
     };
     tracing::info!("shutting down");
     if terminated {
@@ -887,7 +895,7 @@ async fn start_bridge(
 
     let socket = paths.socket();
     if std::fs::symlink_metadata(&socket).is_ok() {
-        if UnixStream::connect(&socket).await.is_ok() {
+        if local::Stream::connect(&socket).await.is_ok() {
             bail!("a bridge daemon is already running on {}", socket.display());
         }
         std::fs::remove_file(&socket)
@@ -1010,8 +1018,8 @@ async fn start_bridge(
     }
 
     let listener =
-        UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
-    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+        local::Listener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
+    crate::fsmode::set_mode(&socket, 0o600)?;
 
     let (shutdown, rx) = watch::channel(false);
     let mut tasks = vec![
@@ -6976,7 +6984,7 @@ impl Front {
         session: &str,
         attach: bool,
         device_name: &str,
-    ) -> anyhow::Result<UnixStream> {
+    ) -> anyhow::Result<local::Stream> {
         let shared = self.primary();
         // The input is a native session ID. Resolve the host exclusively
         // through this daemon's local session table.
@@ -7088,7 +7096,7 @@ impl Front {
 
 async fn serve_ipc(
     shared: Arc<Front>,
-    listener: UnixListener,
+    listener: local::Listener,
     mut shutdown: watch::Receiver<bool>,
 ) {
     loop {
@@ -7111,10 +7119,7 @@ async fn serve_ipc(
     }
 }
 
-async fn send_ipc_line<T: Serialize>(
-    write: &mut tokio::net::unix::OwnedWriteHalf,
-    value: &T,
-) -> bool {
+async fn send_ipc_line<T: Serialize>(write: &mut crate::local::OwnedWriteHalf, value: &T) -> bool {
     use tokio::io::AsyncWriteExt;
 
     let Ok(mut line) = serde_json::to_vec(value) else {
@@ -7124,7 +7129,7 @@ async fn send_ipc_line<T: Serialize>(
     write.write_all(&line).await.is_ok()
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn protected_operator_class(request: &Request) -> bool {
     #[cfg(target_os = "linux")]
     if !crate::linux_scope::available() {
@@ -7133,18 +7138,30 @@ fn protected_operator_class(request: &Request) -> bool {
     approval_guard::operator_only(request)
 }
 
-async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watch::Receiver<bool>) {
+async fn serve_connection(
+    shared: Arc<Front>,
+    stream: local::Stream,
+    shutdown: watch::Receiver<bool>,
+) {
     use tokio::io::AsyncWriteExt;
 
     // Who is calling, from the socket: for the requests only a person makes.
-    let credentials = stream.peer_cred().ok();
-    let same_owner = credentials
-        .as_ref()
-        .is_some_and(|cred| cred.uid() == rustix::process::geteuid().as_raw());
-    let peer = credentials
-        .filter(|_| same_owner)
-        .and_then(|cred| cred.pid())
-        .and_then(|pid| u32::try_from(pid).ok());
+    #[cfg(unix)]
+    let (same_owner, peer) = {
+        let credentials = stream.peer_cred().ok();
+        let same_owner = credentials
+            .as_ref()
+            .is_some_and(|cred| cred.uid() == rustix::process::geteuid().as_raw());
+        let peer = credentials
+            .filter(|_| same_owner)
+            .and_then(|cred| cred.pid())
+            .and_then(|pid| u32::try_from(pid).ok());
+        (same_owner, peer)
+    };
+    // The pipe's client as the kernel named it at accept, which also
+    // checked that it runs as this user (crate::local).
+    #[cfg(windows)]
+    let (same_owner, peer) = (true, Some(stream.peer_pid()));
     #[cfg(target_os = "linux")]
     let linux_peer = if crate::linux_scope::available() {
         peer.and_then(|pid| crate::linux_scope::Peer::capture(&stream, pid).ok())
@@ -7216,7 +7233,14 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         known.map(|(pid, _)| pid),
                     )
                 };
-                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                // Windows: the peer may bind a session's claims to its own
+                // process, but nothing proves a person, so person-only
+                // requests are refused. Ancestry alone never stands in
+                // for that proof.
+                #[cfg(windows)]
+                let (line, person_peer, session_peer) =
+                    (line.as_str(), peer.filter(|_| fixture), peer);
+                #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
                 let (line, person_peer, session_peer) = (line.as_str(), peer, peer);
                 #[cfg(not(target_os = "macos"))]
                 let (signed_app, remote_operator) = (false, false);
@@ -7554,7 +7578,7 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
                         .await,
                         false,
                     ),
-                    #[cfg(any(target_os = "macos", target_os = "linux"))]
+                    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
                     Ok(request) if !shared.scope_fixture && protected_operator_class(&request) => (
                         Box::pin(approval_guard::VERIFIED_ORIGIN.scope(
                             origin,
@@ -7621,13 +7645,13 @@ async fn serve_connection(shared: Arc<Front>, stream: UnixStream, shutdown: watc
 /// daemon stops. Anything the client sends is ignored.
 async fn serve_watch(
     shared: &Front,
-    mut reader: tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
-    mut write: tokio::net::unix::OwnedWriteHalf,
+    mut reader: tokio::io::BufReader<crate::local::OwnedReadHalf>,
+    mut write: crate::local::OwnedWriteHalf,
     mut shutdown: watch::Receiver<bool>,
 ) {
     use tokio::io::AsyncWriteExt;
 
-    async fn send<T: Serialize>(write: &mut tokio::net::unix::OwnedWriteHalf, value: &T) -> bool {
+    async fn send<T: Serialize>(write: &mut crate::local::OwnedWriteHalf, value: &T) -> bool {
         let Ok(mut line) = serde_json::to_string(value) else {
             return false;
         };

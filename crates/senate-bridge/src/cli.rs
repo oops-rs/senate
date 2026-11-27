@@ -21,6 +21,8 @@ mod cli_legacy;
 mod cli_observe;
 #[path = "cli_open.rs"]
 mod cli_open;
+// Scene bundles are checked with openat and O_NOFOLLOW: Unix only.
+#[cfg(unix)]
 #[path = "cli_scene.rs"]
 mod cli_scene;
 #[path = "cli_secretary.rs"]
@@ -194,6 +196,7 @@ enum Cmd {
   senate scene inspect dist/              Check a build folder
   senate scene inspect town.senatescene   Check an archive
   senate scene pack dist/ -o town.senatescene")]
+    #[cfg(unix)]
     Scene(cli_scene::Scene),
     /// Show your recorded local Senate activity by day.
     Stats {
@@ -3591,9 +3594,9 @@ fn hosted_launch_commands_parse_attach_in_both_spellings() {
 #[cfg(test)]
 #[tokio::test]
 async fn service_readiness_requires_a_pong_before_the_deadline() {
+    use crate::local::Listener as UnixListener;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixListener;
-    let home = tempfile::tempdir_in("/tmp").expect("test home");
+    let home = crate::testenv::short_tempdir().expect("test home");
     let paths = Paths::new(home.path());
     let server = async {
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -3798,6 +3801,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         Cmd::Observe(args) => cli_observe::run(args),
         Cmd::Card(args) => cli_observe::run_card(args),
         Cmd::Open(args) => cli_open::run(args),
+        #[cfg(unix)]
         Cmd::Scene(args) => cli_scene::run(args),
         Cmd::Setup { command } => run_setup(command, output),
         Cmd::Join {

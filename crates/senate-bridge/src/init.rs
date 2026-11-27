@@ -14,8 +14,8 @@
 //! `bridge.toml`) is left as it is and the command fails; a `secretary.toml`
 //! already there is kept.
 
+use crate::fsmode::OpenOptionsExt;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use senate_core::{Locale, Name, SenatorId, SenatorName};
@@ -222,6 +222,7 @@ pub fn init_local(paths: &Paths, profile: &LocalProfile) -> Result<PathBuf, Init
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
@@ -244,8 +245,11 @@ mod tests {
         let path = init_local(&paths, &profile()).unwrap();
         assert_eq!(path, paths.senate_toml());
         assert_eq!(paths.config(), path);
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         // Nothing else is written but the secretary's file, all comments.
         let mut entries: Vec<_> = std::fs::read_dir(paths.home())
             .unwrap()

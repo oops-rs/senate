@@ -580,10 +580,7 @@ fn run_all(manager: &dyn Manager, steps: &[Cmd]) -> anyhow::Result<()> {
 /// Where `senated` is: next to the running `senate` (as installed, and as
 /// the symlink target when `senate` is a link), else on `PATH`.
 pub fn locate_senated(current_exe: &Path, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let executable = |p: &Path| {
-        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    };
+    let executable = |p: &Path| std::fs::metadata(p).is_ok_and(|m| crate::fsmode::runnable(p, &m));
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(dir) = current_exe.parent() {
         dirs.push(dir.to_path_buf());
@@ -598,7 +595,7 @@ pub fn locate_senated(current_exe: &Path, path_var: Option<&std::ffi::OsStr>) ->
         dirs.extend(std::env::split_paths(path));
     }
     dirs.into_iter()
-        .map(|d| d.join("senated"))
+        .map(|d| d.join(format!("senated{}", std::env::consts::EXE_SUFFIX)))
         .find(|p| executable(p))
 }
 
@@ -691,8 +688,8 @@ pub fn program_copies(spec: &Spec, senated: &Path) -> Vec<ProgramCopy> {
 /// whatever runs from the old file keeps it, and `to` is never seen half
 /// written.
 fn replace_program(copy: &ProgramCopy) -> anyhow::Result<()> {
+    use crate::fsmode::OpenOptionsExt as _;
     use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     let dir = copy
         .to
         .parent()
@@ -715,7 +712,7 @@ fn replace_program(copy: &ProgramCopy) -> anyhow::Result<()> {
             .open(&staged)
             .with_context(|| format!("writing {}", staged.display()))?;
         file.write_all(&bytes)?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+        crate::fsmode::set_mode(&staged, 0o755)?;
         file.sync_all()?;
         std::fs::rename(&staged, &copy.to)
             .with_context(|| format!("replacing {}", copy.to.display()))?;
@@ -833,14 +830,11 @@ pub fn plan_install(spec: &Spec, senated: &Path) -> InstallPlan {
 /// its configured name (or its own) looked up on `path`. A symlink is kept
 /// as found: a shim may dispatch on the name it was started under.
 pub fn agent_programs(config: &Path, path: Option<&str>) -> Vec<AgentProgram> {
-    use std::os::unix::fs::PermissionsExt;
     let doc: toml_edit::DocumentMut = std::fs::read_to_string(config)
         .ok()
         .and_then(|text| text.parse().ok())
         .unwrap_or_default();
-    let executable = |p: &Path| {
-        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    };
+    let executable = |p: &Path| std::fs::metadata(p).is_ok_and(|m| crate::fsmode::runnable(p, &m));
     AGENTS
         .iter()
         .map(|agent| {
@@ -855,11 +849,21 @@ pub fn agent_programs(config: &Path, path: Option<&str>) -> Vec<AgentProgram> {
                 Some(program) if program.is_absolute() => Found::Configured(program),
                 configured => {
                     let program = configured.unwrap_or_else(|| PathBuf::from(agent.name));
+                    // Windows: `codex` is `codex.exe`, or npm's `codex.cmd`.
+                    let names: Vec<PathBuf> = if cfg!(windows) && program.extension().is_none() {
+                        ["exe", "cmd"]
+                            .iter()
+                            .map(|ext| program.with_extension(ext))
+                            .collect()
+                    } else {
+                        vec![program]
+                    };
                     path.into_iter()
                         .flat_map(std::env::split_paths)
                         .filter(|dir| dir.is_absolute())
-                        .map(|dir| dir.join(&program))
+                        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
                         .find(|candidate| executable(candidate))
+                        .map(crate::delivery::codex::native_program)
                         .map_or(Found::Missing, Found::Resolved)
                 }
             };
@@ -1429,7 +1433,15 @@ pub fn render_status(s: &Status, l: Locale) -> String {
     out
 }
 
+/// No numeric user ids on Windows. Nothing uses one there: the service
+/// spec and the remote store are refused before.
+#[cfg(windows)]
+pub fn current_uid() -> u32 {
+    u32::MAX
+}
+
 /// The current user's numeric id.
+#[cfg(unix)]
 #[allow(unsafe_code)]
 pub fn current_uid() -> u32 {
     // SAFETY: getuid(2) takes no arguments, cannot fail and touches no
@@ -1438,6 +1450,7 @@ pub fn current_uid() -> u32 {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use std::cell::RefCell;

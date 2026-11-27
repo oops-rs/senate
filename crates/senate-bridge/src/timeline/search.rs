@@ -1,10 +1,10 @@
 //! Rebuildable person-only index. The runtime's transcript is authoritative.
 //! This database is local, separate from bridge state and server traffic.
 
+use crate::fsmode::{DirBuilderExt, MetadataExt};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -94,13 +94,18 @@ impl Index {
     pub(crate) fn open(home: &Path) -> anyhow::Result<Self> {
         let dir = home.join("history");
         match fs::DirBuilder::new().mode(0o700).create(&dir) {
+            // Windows: the owner-only DACL is the mode, and the index
+            // inherits it.
+            #[cfg(windows)]
+            Ok(()) => crate::win::OwnerOnly::current()?.apply(&dir)?,
+            #[cfg(unix)]
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.into()),
         }
         let meta = fs::symlink_metadata(&dir)?;
         ensure!(
-            meta.is_dir() && meta.mode() & 0o077 == 0,
+            meta.is_dir() && crate::fsmode::private(&dir, &meta),
             "session search directory must be private"
         );
         let path = dir.canonicalize()?.join(DB);
@@ -119,7 +124,7 @@ impl Index {
         }
         let meta = fs::symlink_metadata(&path)?;
         ensure!(
-            meta.is_file() && meta.mode() & 0o077 == 0,
+            meta.is_file() && crate::fsmode::private(&path, &meta),
             "session search index must be private"
         );
         let conn = Connection::open_with_flags(
@@ -167,13 +172,13 @@ impl Index {
         let dir = home.join("history");
         let meta = fs::symlink_metadata(&dir)?;
         ensure!(
-            meta.is_dir() && meta.mode() & 0o077 == 0,
+            meta.is_dir() && crate::fsmode::private(&dir, &meta),
             "session search directory must be private"
         );
         let path = dir.canonicalize()?.join(DB);
         let meta = fs::symlink_metadata(&path)?;
         ensure!(
-            meta.is_file() && meta.mode() & 0o077 == 0,
+            meta.is_file() && crate::fsmode::private(&path, &meta),
             "session search index must be private"
         );
         let conn = Connection::open_with_flags(

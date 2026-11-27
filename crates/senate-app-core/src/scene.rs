@@ -173,7 +173,9 @@ pub fn scene_parse_manifest(bytes: Vec<u8>) -> Result<SceneManifestInfo, ScenePr
     Ok(manifest_info(senate_scene::Manifest::parse(&bytes)?))
 }
 
-/// Check the bundle folder at `root` and everything in it.
+/// Check the bundle folder at `root` and everything in it. Unix only, as
+/// senate_scene's folder checks are.
+#[cfg(unix)]
 #[uniffi::export]
 pub fn scene_scan(root: String) -> Result<SceneBundleInfo, SceneProblem> {
     let bundle = senate_scene::Bundle::scan(Path::new(&root))?;
@@ -207,7 +209,8 @@ pub fn scene_unpack(archive: String, staging: String) -> Result<String, ScenePro
     Ok(root.to_string_lossy().into_owned())
 }
 
-/// One file of a bundle, read without following any link.
+/// One file of a bundle, read without following any link. Unix only.
+#[cfg(unix)]
 #[uniffi::export]
 pub fn scene_read(root: String, path: String) -> Result<Vec<u8>, SceneReadError> {
     use senate_scene::ReadError as R;

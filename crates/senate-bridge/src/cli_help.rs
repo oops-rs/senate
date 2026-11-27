@@ -115,7 +115,11 @@ fn grouped(command: &Command) -> String {
     let mut out = String::new();
     for (heading, names) in GROUPS {
         let _ = writeln!(out, "{heading}:");
-        for name in *names {
+        // A command this platform has not (`scene` off Unix) is left out.
+        for name in names
+            .iter()
+            .filter(|name| command.find_subcommand(name).is_some())
+        {
             let about = command
                 .find_subcommand(name)
                 .and_then(Command::get_about)
@@ -248,7 +252,7 @@ mod tests {
                 "the summary of `{name}` must fit one line of an 80-column terminal: {about}"
             );
         }
-        for name in &listed {
+        for name in listed.iter().filter(|name| cfg!(unix) || **name != "scene") {
             assert!(
                 command.find_subcommand(name).is_some(),
                 "GROUPS lists `{name}`, which is not a command"

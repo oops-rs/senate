@@ -237,12 +237,11 @@ use senate_core::{
 };
 
 use crate::approvals::{Approval, Decision, ResolvedBy};
+use crate::local::{OwnedReadHalf, OwnedWriteHalf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use crate::catch_up::CatchUpItem;
 use crate::hook::HookKind;
@@ -3400,7 +3399,8 @@ pub struct IpcClient {
 
 impl IpcClient {
     pub async fn connect(path: &Path, timeout: Duration) -> Result<Self, ClientError> {
-        let stream = match tokio::time::timeout(timeout, UnixStream::connect(path)).await {
+        let stream = match tokio::time::timeout(timeout, crate::local::Stream::connect(path)).await
+        {
             Ok(Ok(s)) => s,
             Ok(Err(source)) => {
                 return Err(ClientError::Connect {

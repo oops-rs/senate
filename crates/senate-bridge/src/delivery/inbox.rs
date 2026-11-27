@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 
 /// Most bytes of a reply kept.
@@ -118,17 +119,7 @@ pub async fn push(
     }
     payload.push_str(&user_frame(text));
 
-    let mut stream = match tokio::time::timeout(options.timeout, UnixStream::connect(socket)).await
-    {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(source)) => {
-            return Err(InboxError::Connect {
-                path: socket.to_path_buf(),
-                source,
-            });
-        }
-        Err(_) => return Err(InboxError::ConnectTimeout(socket.to_path_buf())),
-    };
+    let mut stream = connect(socket, options.timeout).await?;
     let write = async {
         stream.write_all(payload.as_bytes()).await?;
         stream.flush().await?;
@@ -163,7 +154,30 @@ pub async fn push(
     Ok((!reply.is_empty()).then_some(reply))
 }
 
+#[cfg(unix)]
+async fn connect(socket: &Path, timeout: Duration) -> Result<UnixStream, InboxError> {
+    match tokio::time::timeout(timeout, UnixStream::connect(socket)).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(source)) => Err(InboxError::Connect {
+            path: socket.to_path_buf(),
+            source,
+        }),
+        Err(_) => Err(InboxError::ConnectTimeout(socket.to_path_buf())),
+    }
+}
+
+/// Claude Code's inbox is a Unix socket; Claude is not supported on
+/// Windows yet.
+#[cfg(windows)]
+async fn connect(socket: &Path, _timeout: Duration) -> Result<crate::local::Stream, InboxError> {
+    Err(InboxError::Connect {
+        path: socket.to_path_buf(),
+        source: io::Error::new(io::ErrorKind::Unsupported, "Claude Code's inbox on Windows"),
+    })
+}
+
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use serde_json::json;
     use tokio::io::AsyncBufReadExt;

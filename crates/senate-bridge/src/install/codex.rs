@@ -530,9 +530,9 @@ mod tests {
             &path,
             format!(
                 r#"hooks.Stop = [{{ hooks = [{{ type = "command", command = "other" }}] }}]
-[hooks.state."{old}"]
+[hooks.state.'{old}']
 trusted_hash = "keep"
-[hooks.state."{key}"]
+[hooks.state.'{key}']
 enabled = false
 "#
             ),

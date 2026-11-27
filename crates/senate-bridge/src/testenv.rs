@@ -100,6 +100,16 @@ pub fn isolate_async<'a>(
     cmd
 }
 
+/// A temporary directory with a short path, for sockets: under `/tmp` on
+/// Unix (a socket path has a length limit), the user's temp directory on
+/// Windows (a pipe's name is a digest of the path).
+pub fn short_tempdir() -> std::io::Result<tempfile::TempDir> {
+    #[cfg(unix)]
+    return tempfile::tempdir_in("/tmp");
+    #[cfg(windows)]
+    return tempfile::tempdir();
+}
+
 /// Whether this process may use the inbox socket `socket`: always, unless
 /// it was started confined ([`CONFINE_ENV`]), and then only one inside that
 /// directory.

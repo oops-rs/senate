@@ -15,6 +15,10 @@
 //! that runs this executable again to get a second process names its
 //! helper by its full name, module included (`timeline::agy_writer_child`).
 
+// Built on Unix fixtures (`#!/bin/sh` fakes, PTYs, Unix sockets). Windows runs
+// the native Codex path in ../native_codex.rs.
+#![cfg(unix)]
+
 #[allow(clippy::unwrap_used)]
 #[path = "../support/agy_timeline.rs"]
 mod agy;

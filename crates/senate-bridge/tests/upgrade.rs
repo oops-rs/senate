@@ -9,6 +9,8 @@
 //! database still succeed on the database this daemon has touched.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// 0.12.3 never ran on Windows: nothing there to upgrade from.
+#![cfg(unix)]
 
 #[path = "support/common.rs"]
 mod common;
