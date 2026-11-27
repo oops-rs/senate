@@ -333,6 +333,8 @@
         const head = el("div", "event-head");
         if (!row.mine) head.appendChild(el("span", "by", row.by));
         head.appendChild(el("span", "meta", row.kindLabel + " · " + row.when));
+        // Words the Speaker's office carried: how they came, under who.
+        if (row.via) head.appendChild(el("div", "via", row.via));
         const content = el("div", "event-body");
         content.appendChild(body(row.md));
         if (row.mine) { r.appendChild(content); r.appendChild(head); } else { r.appendChild(head); r.appendChild(content); }
@@ -348,6 +350,12 @@
         line.appendChild(el("span", "meta", row.when));
         r.classList.add("st-" + s.state);
         r.appendChild(line);
+        // Why, in full (an escalation's reason): Markdown, as a message.
+        if (row.md) {
+          const why = el("div", "status-reason");
+          why.appendChild(body(row.md));
+          r.appendChild(why);
+        }
         if (s.steps.length) {
           const list = el("ul", "status-steps");
           for (const st of s.steps) {

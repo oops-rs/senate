@@ -556,6 +556,165 @@ async fn across_committees_a_person_goes_directly_and_an_agent_by_way_of_the_des
     desk.stop().await;
 }
 
+/// The flow of `senate#145`–`#147`: a request from another committee comes
+/// by way of the desk, the assignee escalates it to the person, and the
+/// person replies as themselves in the receiving thread. The decision
+/// reaches the assignee that is waiting on it, and goes back once to the
+/// asking thread on the other committee; neither side gets it twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_persons_reply_to_a_forwarded_request_reaches_the_assignee_that_escalated_it() {
+    use senate_bridge::ipc::{Posted, SessionSelector, ThreadReply};
+    let dir = tempfile::tempdir().unwrap();
+    let (mut desk, _claude, copilot, codex) = alices_machine(dir.path()).await;
+    let hub = desk.senate().daemon.hub.clone();
+
+    // codex, on ledger, asks copilot on refund-v2 to do something: the desk
+    // forwards it, a new root from the office.
+    let asked: SendReply = desk
+        .ipc(Request::Send {
+            session: Laptop::session("s-codex"),
+            kind: SayKind::Request,
+            to: Vec::new(),
+            at: Some(senate_core::Locator::parse_short("refund-v2::copilot").unwrap()),
+            body: "Merge phase 1 and publish a release.".into(),
+            refs: None,
+            id: None,
+        })
+        .await;
+    on_the_desk(&desk, asked.posted.seq).await;
+    let _: Forwarded = desk
+        .ipc(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: asked.posted.seq,
+            id: None,
+        })
+        .await;
+    let push = copilot.wait_for("Merge phase 1").await;
+    let root = thread_of(&push, "Merge phase 1");
+
+    // copilot, the assignee, puts the decision to alice.
+    desk.escalate(
+        "s-copilot",
+        root,
+        "Before I tag:\n1. Version: **0.14.3**?\n2. Scope: `main` as is?",
+    )
+    .await;
+
+    // alice opens the thread (the app shows it) and replies as herself.
+    let _: ThreadReply = desk
+        .ipc(Request::Thread {
+            session: SessionSelector::default(),
+            committee: Some(committee()),
+            thread: root,
+            mark_seen: true,
+        })
+        .await;
+    let posted: Posted = desk
+        .ipc(Request::Answer {
+            session: SessionSelector::default(),
+            thread: root,
+            body: "1. 0.14.3\n2. yes, main".into(),
+            id: None,
+            committee: Some(committee()),
+            agent: None,
+            as_person: true,
+        })
+        .await;
+    let stored = hub.get(&committee(), posted.seq).await.unwrap().unwrap();
+    assert_eq!(
+        stored.from,
+        person("alice"),
+        "her own words, not the office's"
+    );
+    assert_eq!(
+        stored.to,
+        [Address::Speaker, senator("copilot")],
+        "the asker, and the assignee waiting on her decision"
+    );
+
+    // copilot has it; codex's thread has it, relayed once, as hers.
+    copilot.wait_for("1. 0.14.3").await;
+    codex.wait_for("1. 0.14.3").await;
+    let relays = eventually_async("the answer in codex's thread", || async {
+        let relays: Vec<_> = desk
+            .events_of(&ledger())
+            .await
+            .into_iter()
+            .filter(|e| e.body == "1. 0.14.3\n2. yes, main")
+            .collect();
+        (!relays.is_empty()).then_some(relays)
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let [relayed] = &relays[..] else {
+        panic!("relayed more than once: {relays:?}")
+    };
+    assert_eq!(relayed.thread, Some(asked.posted.seq));
+    assert_eq!(relayed.to, [senator("codex")]);
+    assert_eq!(
+        relayed.meta[meta::ANSWERED_BY],
+        serde_json::json!("/alice-desk::refund-v2::senator::alice")
+    );
+    let pushed = |inbox: &FakeInbox| {
+        inbox
+            .messages()
+            .iter()
+            .filter(|m| m.contains("1. 0.14.3"))
+            .count()
+    };
+    assert_eq!(pushed(&copilot), 1, "{:?}", copilot.messages());
+    assert_eq!(pushed(&codex), 1, "{:?}", codex.messages());
+    desk.stop().await;
+}
+
+/// The control: with nothing escalated to her, the person's reply to a
+/// forwarded request goes to the asker alone (back to the asking thread),
+/// as before; the assignee is not sent it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_persons_reply_to_a_forwarded_request_with_no_escalation_goes_to_the_asker_only() {
+    use senate_bridge::ipc::{Posted, SessionSelector};
+    let dir = tempfile::tempdir().unwrap();
+    let (mut desk, _claude, copilot, codex) = alices_machine(dir.path()).await;
+    let hub = desk.senate().daemon.hub.clone();
+    let asked = send(&desk, "s-codex", "refund-v2::copilot", "Is 0.14.3 out?").await;
+    on_the_desk(&desk, asked.posted.seq).await;
+    let _: Forwarded = desk
+        .ipc(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: asked.posted.seq,
+            id: None,
+        })
+        .await;
+    let push = copilot.wait_for("Is 0.14.3 out?").await;
+    let root = thread_of(&push, "Is 0.14.3 out?");
+    let posted: Posted = desk
+        .ipc(Request::Answer {
+            session: SessionSelector::default(),
+            thread: root,
+            body: "not yet, tomorrow".into(),
+            id: None,
+            committee: Some(committee()),
+            agent: None,
+            as_person: true,
+        })
+        .await;
+    let stored = hub.get(&committee(), posted.seq).await.unwrap().unwrap();
+    assert_eq!(stored.to, [Address::Speaker]);
+    codex.wait_for("not yet, tomorrow").await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !copilot
+            .messages()
+            .iter()
+            .any(|m| m.contains("not yet, tomorrow")),
+        "{:?}",
+        copilot.messages()
+    );
+    desk.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_speaker_of_a_root_still_presides_with_and_without_a_secretary() {
     // `speaker = "senator::claude"`: today's alone, named in full.

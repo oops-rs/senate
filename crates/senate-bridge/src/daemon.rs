@@ -5709,8 +5709,21 @@ impl Shared {
             .flatten()
             .filter(|target| target.address() == &Address::Chair)
             .and_then(|target| target.committee().cloned());
+        let seen = self.seen_before(&committee, &[thread])?;
         let to = if companion || acting.as_person || from != asker {
-            vec![asker]
+            let mut to = vec![asker];
+            // A person's reply also answers whoever put the thread to them
+            // and is waiting on their word: the escalation in force, when
+            // they had seen it (one written before it does not end it).
+            if acting.as_person
+                && let Some(by) = self
+                    .escalated_to_person_by(&committee, &root, seen_in(&seen, thread))
+                    .await?
+                && !to.contains(&by)
+            {
+                to.push(by);
+            }
+            to
         } else if root.is_chair_discussion() && root.from == from {
             // A discussion started here has a server-pinned peer on the
             // other committee and no local recipient.
@@ -5738,7 +5751,6 @@ impl Shared {
             }
             to
         };
-        let seen = self.seen_before(&committee, &[thread])?;
         // The companion is a secretary of the agent: its answer is the
         // agent's, given by its secretary.
         let (from, behalf) = match (companion, from) {
@@ -5779,6 +5791,35 @@ impl Shared {
             posted.unseen_escalation = self.mark_after_speaking(&posted, &[thread], &seen).await?;
         }
         Ok(posted)
+    }
+
+    /// The agent whose escalation to this bridge's person is in force on
+    /// the thread of `root`, when the person has seen it (`seen` at or
+    /// above it): their reply is the word that agent waits on. `None` when
+    /// nothing is escalated to them, it came from the Speaker or a person,
+    /// or the reply crossed it.
+    async fn escalated_to_person_by(
+        &self,
+        committee: &CommitteeId,
+        root: &Event,
+        seen: Seq,
+    ) -> Result<Option<Address>, IpcError> {
+        let (_, mut events) = self.thread_events(committee, root.clone()).await?;
+        events.sort_by_key(|e| e.seq);
+        let people = self.people();
+        let mut board = senate_core::TaskBoard::new(people.clone());
+        for event in &events {
+            board.observe(event);
+        }
+        let Some(escalation) = board.get(root.seq).and_then(|t| t.escalation.as_ref()) else {
+            return Ok(None);
+        };
+        if escalation.to != self.config.person || escalation.seq > seen {
+            return Ok(None);
+        }
+        Ok(people
+            .as_agent(&escalation.by)
+            .map(|_| escalation.by.clone()))
     }
 
     /// A reply in a discussion opened with the chair of `there` went to the

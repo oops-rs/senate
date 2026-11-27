@@ -287,6 +287,50 @@ impl Event {
         })
     }
 
+    /// Whose words this message from the Speaker's office carries, when
+    /// they are not the office's own ([`Carried`]): read from what the
+    /// server stored (only the office writes these keys), never written
+    /// back into the event.
+    pub fn carried(&self) -> Option<Carried> {
+        if self.from != Address::Speaker || self.on_behalf_of.is_some() {
+            return None;
+        }
+        let acted_by = self.meta_name(meta::ACTED_BY);
+        let desk_person = self.meta_name(meta::DESK_PERSON);
+        if let Some(by) = self.meta.get(meta::ANSWERED_BY).and_then(Value::as_str) {
+            let author = by
+                .parse::<crate::Locator>()
+                .map_or_else(|_| format!("[{by}]"), |l| l.in_text());
+            return Some(Carried {
+                author,
+                how: CarriedHow::Relayed,
+                acted_by,
+                desk_person,
+            });
+        }
+        if self.thread.is_some() || self.is_chair_discussion() {
+            return None;
+        }
+        let origin = crate::Origin::of(self)?;
+        Some(Carried {
+            author: origin.locator.in_text(),
+            how: CarriedHow::Forwarded {
+                committee: origin.locator.committee().cloned(),
+                thread: origin.thread,
+            },
+            acted_by,
+            desk_person,
+        })
+    }
+
+    fn meta_name(&self, key: &str) -> Option<String> {
+        self.meta
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned)
+    }
+
     /// An answer a secretary gave on its principal's behalf while the
     /// principal was away: `from` the secretary, `on_behalf_of` the
     /// principal, flagged [`meta::TAKEOVER`]. The principal and the
@@ -306,6 +350,74 @@ impl Event {
         self.meta
             .get(meta::BINDING)
             .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+}
+
+/// Someone else's words, carried by the Speaker's office ([`Event::carried`]):
+/// who wrote them, how the office carried them, and who acted for the
+/// office. A forwarded request is its asker's, not the Speaker's, though
+/// the Speaker's seat is a person's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Carried {
+    /// Who wrote the words, bracketed: the asker on the other committee,
+    /// or whoever gave a relayed answer.
+    pub author: String,
+    pub how: CarriedHow,
+    /// The senator who acted for the office ([`meta::ACTED_BY`]): the
+    /// Speaker, or a secretary working the desk.
+    pub acted_by: Option<String>,
+    /// The person who chose the desk action in person
+    /// ([`meta::DESK_PERSON`]).
+    pub desk_person: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CarriedHow {
+    /// A root the desk forwarded here from another committee's thread.
+    Forwarded {
+        committee: Option<CommitteeId>,
+        thread: Seq,
+    },
+    /// An answer given in the thread it was forwarded to, relayed back
+    /// into the asking thread.
+    Relayed,
+}
+
+impl Carried {
+    /// The provenance as one line under the byline: how the office carried
+    /// it, and who acted for it (and who approved, when someone else did):
+    /// `forwarded from commons #109 by the Speaker's desk ([senator::wendell])`.
+    pub fn line(&self, locale: Locale) -> String {
+        let bracket = |name: &str| format!("[senator::{name}]");
+        let actors = match (self.acted_by.as_deref(), self.desk_person.as_deref()) {
+            (Some(a), Some(p)) if a != p => Some(match locale {
+                Locale::Zh => format!("{}，经 {} 批准", bracket(a), bracket(p)),
+                Locale::En => format!("{}, approved by {}", bracket(a), bracket(p)),
+            }),
+            (Some(a), _) | (None, Some(a)) => Some(bracket(a)),
+            (None, None) => None,
+        };
+        let desk = match (&actors, locale) {
+            (Some(who), Locale::Zh) => format!("议长办公桌（{who}）"),
+            (Some(who), Locale::En) => format!("the Speaker's desk ({who})"),
+            (None, Locale::Zh) => "议长办公桌".to_string(),
+            (None, Locale::En) => "the Speaker's desk".to_string(),
+        };
+        match (&self.how, locale) {
+            (CarriedHow::Forwarded { committee, thread }, _) => {
+                let at = match committee {
+                    Some(c) => format!("{c} #{thread}"),
+                    None => format!("#{thread}"),
+                };
+                locale.pick(
+                    format!("由{desk}转自 {at}"),
+                    format!("forwarded from {at} by {desk}"),
+                )
+            }
+            (CarriedHow::Relayed, _) => {
+                locale.pick(format!("由{desk}转回"), format!("relayed back by {desk}"))
+            }
+        }
     }
 }
 

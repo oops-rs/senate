@@ -242,6 +242,11 @@ struct DeskEntryDetail: View {
                             Spacer()
                             Text(verbatim: "#\(event.seq)").font(Theme.Fonts.meta)
                         }
+                        if let via = event.via {
+                            MentionText(via)
+                                .font(Theme.Fonts.meta)
+                                .foregroundStyle(Theme.onSurfaceVariant)
+                        }
                         MentionText(event.body)
                             .font(Theme.Fonts.text)
                             .textSelection(.enabled)

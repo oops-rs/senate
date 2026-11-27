@@ -541,3 +541,49 @@ extension ConversationPageTests {
         #expect(src?.hasPrefix("senate-app://thumb/") == true)
     }
 }
+
+extension ConversationPageTests {
+    /// `senate#145`–`#146` as the core projects them: a request the desk
+    /// forwarded (its asker as the byline, how it came under it) and the
+    /// chair's escalation (a compact line, its reason in full as Markdown,
+    /// hostile markup in it as text).
+    @Test func aForwardedRequestAndAnEscalationShowProvenanceAndTheWholeReason() async throws {
+        let page = ConversationPage(store: nil)
+        for _ in 0..<500 where !page.isReady { try await Task.sleep(for: .milliseconds(20)) }
+        let reason = "Current state:\n- `main` is at `7af3c689`\n- **clean** tree\n\n1. Version?\n2. Scope?\n\n"
+            + "See [docs](https://example.test/r) and [x](javascript:window.hacked=1).\n\n"
+            + "<script>window.hacked = 1</script>"
+        let root = ThreadEvent(seq: 145, kind: "request", kindLabel: "request",
+                               by: "[/senate/dark-conclave::commons::senator::agy-442d]",
+                               via: "forwarded from commons #109 by the Speaker's desk ([senator::wendell])",
+                               to: ["[senator::agy-68aa]"], body: "Please merge and release.", at: Date(), mine: false, status: nil)
+        let esc = ThreadEvent(seq: 146, kind: "status", kindLabel: "status", by: "[senator::agy-68aa]", via: nil,
+                              to: [], body: "", at: Date(), mine: false,
+                              status: StatusLine(state: "suspended", line: "waiting on wendell", reason: reason, steps: [], links: []))
+        ConversationPage.fixtureThreads["forwarded"] = ThreadView(
+            committee: "senate", root: 145, title: "Please merge and release.", state: "suspended",
+            stateLabel: "suspended", kindLabel: "request", events: [root, esc])
+        page.show(.fixtureThread("forwarded"))
+        for _ in 0..<200 {
+            if await page.evaluate("return document.querySelectorAll('.row').length") as? Int == 2 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        _ = await page.evaluate("await window.senate.renderAll(); return true")
+        let via = await page.evaluate("return document.querySelector('.k-event .event-head .via').textContent") as? String ?? ""
+        #expect(via.contains("forwarded from commons #109"), "\(via)")
+        let what = await page.evaluate("return document.querySelector('.k-status .status-line .what').textContent") as? String ?? ""
+        #expect(what == "waiting on wendell", "the chip stays one line: \(what)")
+        let report = await page.evaluate("""
+            const r = document.querySelector('.k-status .status-reason');
+            if (!r) return "no reason";
+            return [r.querySelectorAll('ul li').length, r.querySelectorAll('ol li').length,
+                    r.querySelectorAll('strong').length, r.querySelectorAll('code').length,
+                    r.querySelectorAll('script').length,
+                    [...r.querySelectorAll('a')].map(a => a.getAttribute('href')).join(','),
+                    r.textContent.includes('<script>')].join('|')
+            """) as? String
+        #expect(report == "2|2|1|2|0|https://example.test/r|true", "\(report ?? "no answer")")
+        let hacked = try await page.web.callAsyncJavaScript("return typeof window.hacked", arguments: [:], contentWorld: .page)
+        #expect(hacked as? String == "undefined")
+    }
+}

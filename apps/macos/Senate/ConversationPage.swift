@@ -12,6 +12,9 @@ enum ConversationSource: Hashable {
     case fixture([String])
     /// Tests: the rows set under this name (`fixtureRows`), as a session's.
     case fixtureRows(String)
+    /// Tests: the thread set under this name (`fixtureThreads`), as a
+    /// thread's events.
+    case fixtureThread(String)
     #endif
 }
 
@@ -91,6 +94,8 @@ final class ConversationPage: NSObject {
     #if DEBUG
     /// Tests: rows to show under a name (`ConversationSource.fixtureRows`).
     static var fixtureRows: [String: [ConversationRow]] = [:]
+    /// Tests: threads to show under a name (`ConversationSource.fixtureThread`).
+    static var fixtureThreads: [String: ThreadView] = [:]
     #endif
 
     /// The find bar's state, which its view reads.
@@ -198,7 +203,7 @@ final class ConversationPage: NSObject {
             case .thread:
                 _ = (store.thread, store.threadError)
             #if DEBUG
-            case .fixture, .fixtureRows:
+            case .fixture, .fixtureRows, .fixtureThread:
                 break
             #endif
             }
@@ -253,6 +258,11 @@ final class ConversationPage: NSObject {
             let rows = Self.fixtureRows[name] ?? []
             return (rows.map { row in Row(id: row.id, value: row) { [unowned self] in encode(row, session: "fixture", committee: nil) } },
                     ["hasOlder": false, "loadingOlder": false, "working": false])
+        case let .fixtureThread(name):
+            guard let view = Self.fixtureThreads[name] else { return ([], [:]) }
+            return (view.events.map { event in
+                Row(id: event.seq, value: event) { [unowned self] in encode(event, committee: view.committee, root: view.root) }
+            }, ["hasOlder": false, "loadingOlder": false, "working": false])
         case let .fixture(texts):
             return (texts.enumerated().map { i, text in
                 Row(id: UInt64(i + 1), value: text) { [unowned self] in
@@ -417,26 +427,36 @@ final class ConversationPage: NSObject {
     }
 
     private func encode(_ event: ThreadEvent, committee: String, root: UInt64) -> [String: Any] {
-        // A task status: one activity line, its checklist and links.
+        // A task status: one activity line, its checklist and links; why
+        // (an escalation's reason) in full under it, as Markdown like any
+        // message body: the same renderer, raw HTML as text, links only
+        // through the page's handler.
         if let s = event.status {
-            return [
+            var row: [String: Any] = [
                 "id": event.seq, "kind": "status",
                 "by": Mentions.shared.plain(event.by, committee: committee),
                 "when": event.at.formatted(.relative(presentation: .named)),
                 "status": [
-                    "state": s.state, "line": s.line,
+                    "state": s.state, "line": Mentions.shared.plain(s.line, committee: committee),
                     "steps": s.steps.map { ["label": $0.label, "done": $0.done] },
                     "links": s.links.map { ["label": $0.label, "url": $0.url] },
                 ] as [String: Any],
             ]
+            if let reason = s.reason {
+                row["md"] = markdown("t/\(committee)/\(root)/\(event.seq)", Mentions.shared.plain(reason, committee: committee))
+            }
+            return row
         }
-        return [
+        var row: [String: Any] = [
             "id": event.seq, "kind": "event", "mine": event.mine,
             "by": Mentions.shared.plain(event.by, committee: committee),
             "kindLabel": event.kindLabel,
             "when": event.at.formatted(.relative(presentation: .named)),
             "md": markdown("t/\(committee)/\(root)/\(event.seq)", Mentions.shared.plain(event.body, committee: committee)),
         ]
+        // Words the Speaker's office carried: how they came, and who acted.
+        if let via = event.via { row["via"] = Mentions.shared.plain(via, committee: committee) }
+        return row
     }
 
     /// What a reset shows first (it opens at the foot): the last messages'
@@ -457,7 +477,7 @@ final class ConversationPage: NSObject {
             prefix = "t/\(committee)/\(root)/"
             ids = (store?.thread?.events ?? []).suffix(3).map(\.seq)
         #if DEBUG
-        case .fixture, .fixtureRows:
+        case .fixture, .fixtureRows, .fixtureThread:
             return []
         #endif
         }

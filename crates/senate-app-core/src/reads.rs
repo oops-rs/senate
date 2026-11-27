@@ -36,7 +36,15 @@ pub struct ThreadEvent {
     pub kind: String,
     pub kind_label: String,
     /// Who wrote it, as shown to people (`[speaker::claude] takeover`).
+    /// For words the Speaker's office carried (a request it forwarded from
+    /// another committee, an answer it relayed back), whose words they
+    /// are: the asker there, or who answered; `via` says how they came.
     pub by: String,
+    /// How the office carried them and who acted for it, when `by` is not
+    /// the office: `forwarded from commons #109 by the Speaker's desk
+    /// ([senator::wendell])`. The stored event is unchanged: it is still
+    /// `from` the Speaker.
+    pub via: Option<String>,
     /// Who it was addressed to.
     pub to: Vec<String>,
     /// What was said, as written.
@@ -55,8 +63,13 @@ pub struct ThreadEvent {
 pub struct StatusLine {
     /// `processing`, `active`, `suspended`, `archived`.
     pub state: String,
-    /// The line: the state in words, then the title.
+    /// The line: the state in words, then the title. One line, whatever
+    /// the status said at length (that is `reason`).
     pub line: String,
+    /// Why, in full and as written (Markdown, newlines kept): an
+    /// escalation's or a suspension's reason, shown under the line and
+    /// rendered like any message body.
+    pub reason: Option<String>,
     pub steps: Vec<StatusStep>,
     pub links: Vec<StatusLink>,
 }
@@ -358,13 +371,7 @@ impl Task {
                 locale.pick(format!("由 {who} 接手"), format!("taken over by {who}"))
             }
             (S::Suspended, None, Some(who)) => {
-                match s.reason.as_deref().filter(|r| !r.trim().is_empty()) {
-                    Some(why) => locale.pick(
-                        format!("等待 {who}：{why}"),
-                        format!("waiting on {who}: {why}"),
-                    ),
-                    None => locale.pick(format!("等待 {who}"), format!("waiting on {who}")),
-                }
+                locale.pick(format!("等待 {who}"), format!("waiting on {who}"))
             }
             (S::Suspended, None, None) => locale.pick("已暂停", "suspended").to_string(),
             (S::Processing, ..) => locale.pick("处理中", "working on it").to_string(),
@@ -375,9 +382,16 @@ impl Task {
             Some(title) => format!("{words} — {title}"),
             None => words,
         };
+        let reason = s
+            .reason
+            .as_deref()
+            .filter(|r| !r.trim().is_empty() && s.takeover.is_none())
+            .filter(|_| matches!(s.state, S::Suspended))
+            .map(str::to_owned);
         StatusLine {
             state: s.state.as_str().to_string(),
             line,
+            reason,
             steps: self
                 .steps
                 .iter()
@@ -399,11 +413,16 @@ impl Task {
 }
 
 fn thread_event(e: &Event, me: Option<&Address>, locale: Locale) -> ThreadEvent {
+    let carried = e.carried();
     ThreadEvent {
         seq: e.seq.0,
         kind: e.kind.as_str().to_string(),
         kind_label: text::kind(locale, &e.kind),
-        by: e.byline(locale).unwrap_or_else(|| e.from.in_text()),
+        by: carried.as_ref().map_or_else(
+            || e.byline(locale).unwrap_or_else(|| e.from.in_text()),
+            |c| c.author.clone(),
+        ),
+        via: carried.map(|c| c.line(locale)),
         to: e.to.iter().map(Address::in_text).collect(),
         body: e.body.clone(),
         at: e.ts.into(),
@@ -496,6 +515,208 @@ mod tests {
         assert_eq!(line.line, reason);
     }
 
+    /// `senate#145`–`#147` as stored: a request the desk forwarded from
+    /// commons (`from` the Speaker, wendell at the desk), the chair's
+    /// escalation to wendell with a long Markdown reason, wendell's reply.
+    fn forwarded_thread() -> Vec<Event> {
+        use senate_core::{Origin, StatusPayload, StatusState, meta};
+        let mut root = event(
+            1,
+            Kind::Request,
+            Address::Speaker,
+            "Please merge `feat/phase1-parent-memory` and publish a release.",
+        );
+        root.committee = CommitteeId::new("senate").unwrap();
+        root.to = vec![Address::senator(&"agy-68aa".parse().unwrap())];
+        let origin = Origin {
+            locator: "/senate/dark-conclave::commons::senator::agy-442d"
+                .parse()
+                .unwrap(),
+            thread: Seq(109),
+        };
+        root.meta.insert(meta::ORIGIN.into(), origin.value());
+        root.meta
+            .insert(meta::ACTED_BY.into(), serde_json::json!("wendell"));
+        root.meta
+            .insert(meta::DESK_PERSON.into(), serde_json::json!("wendell"));
+        let mut esc = StatusPayload::new(StatusState::Suspended);
+        esc.escalated_to = Some(Name::new("wendell").unwrap());
+        esc.reason = Some(ESCALATION.into());
+        let mut status = status(2, Address::senator(&"agy-68aa".parse().unwrap()), &esc);
+        status.committee = root.committee.clone();
+        let mut reply = event(
+            3,
+            Kind::Answer,
+            Address::senior(&Name::new("wendell").unwrap()),
+            "1. 0.14.3\n2. yes, main",
+        );
+        reply.committee = root.committee.clone();
+        reply.to = vec![Address::Speaker];
+        vec![root, status, reply]
+    }
+
+    const ESCALATION: &str = "Thread 145 asks to merge and publish.\n\n\
+        Current state:\n- `main` is at `7af3c689`\n- **clean** tree\n\n\
+        1. Version: `0.14.3`?\n2. Scope: release `main`?\n\
+        <script>alert(1)</script> [docs](javascript:alert(1))";
+
+    #[test]
+    fn a_forwarded_request_is_its_askers_with_the_desk_that_carried_it() {
+        let wendell = Name::new("wendell").unwrap();
+        let events = forwarded_thread();
+        let view = thread_view(
+            ThreadReply {
+                committee: CommitteeId::new("senate").unwrap(),
+                root: Seq(1),
+                events: events.clone(),
+            },
+            Some(&wendell),
+            Locale::En,
+        );
+        let root = &view.events[0];
+        assert_eq!(
+            root.by, "[/senate/dark-conclave::commons::senator::agy-442d]",
+            "the asker on commons, not the Speaker"
+        );
+        assert_eq!(
+            root.via.as_deref(),
+            Some("forwarded from commons #109 by the Speaker's desk ([senator::wendell])")
+        );
+        assert!(!root.mine, "wendell forwarded it; he did not write it");
+        assert_eq!(root.body, events[0].body);
+        // wendell's own reply is his, and nobody else's words.
+        let reply = &view.events[2];
+        assert!(reply.mine);
+        assert_eq!(reply.via, None);
+        assert_eq!(reply.by, "[senator::wendell]");
+        // Nothing was rewritten: the stored root is still the office's.
+        assert_eq!(events[0].from, Address::Speaker);
+
+        let zh = thread_view(
+            ThreadReply {
+                committee: CommitteeId::new("senate").unwrap(),
+                root: Seq(1),
+                events,
+            },
+            Some(&wendell),
+            Locale::Zh,
+        );
+        assert_eq!(
+            zh.events[0].via.as_deref(),
+            Some("由议长办公桌（[senator::wendell]）转自 commons #109")
+        );
+    }
+
+    #[test]
+    fn a_secretary_forwarding_with_a_persons_approval_names_both() {
+        use senate_core::meta;
+        let mut root = forwarded_thread().remove(0);
+        root.meta
+            .insert(meta::ACTED_BY.into(), serde_json::json!("claude"));
+        let line = thread_event(&root, None, Locale::En).via.unwrap();
+        assert_eq!(
+            line,
+            "forwarded from commons #109 by the Speaker's desk ([senator::claude], approved by \
+             [senator::wendell])"
+        );
+    }
+
+    #[test]
+    fn a_relayed_answer_is_its_answerers_relayed_by_the_desk() {
+        use senate_core::meta;
+        // commons#111: the reply, back in the asking thread.
+        let mut relay = event(2, Kind::Answer, Address::Speaker, "1. 0.14.3");
+        relay.meta.insert(
+            meta::ANSWERED_BY.into(),
+            serde_json::json!("/senate/dark-conclave::senate::senator::wendell"),
+        );
+        relay
+            .meta
+            .insert(meta::ACTED_BY.into(), serde_json::json!("wendell"));
+        let shown = thread_event(&relay, None, Locale::En);
+        assert_eq!(
+            shown.by,
+            "[/senate/dark-conclave::senate::senator::wendell]"
+        );
+        assert_eq!(
+            shown.via.as_deref(),
+            Some("relayed back by the Speaker's desk ([senator::wendell])")
+        );
+    }
+
+    #[test]
+    fn only_the_office_carries_anothers_words() {
+        use senate_core::meta;
+        // An agent's event with the office's keys is shown as the agent's:
+        // nobody is made to look like someone else.
+        let claude = Address::senator(&"claude".parse().unwrap());
+        let mut forged = forwarded_thread().remove(0);
+        forged.from = claude.clone();
+        let mut relay = event(2, Kind::Answer, claude, "yes");
+        relay.meta.insert(
+            meta::ANSWERED_BY.into(),
+            serde_json::json!("/senate::senate::senator::wendell"),
+        );
+        for e in [forged, relay] {
+            let shown = thread_event(&e, None, Locale::En);
+            assert_eq!(shown.by, "[senator::claude]");
+            assert_eq!(shown.via, None);
+        }
+        // The office's own words (a note, no origin) are the office's.
+        let note = event(2, Kind::Note, Address::Speaker, "forwarded");
+        let shown = thread_event(&note, None, Locale::En);
+        assert_eq!(shown.by, "[speaker]");
+        assert_eq!(shown.via, None);
+    }
+
+    #[test]
+    fn an_escalations_reason_is_kept_whole_under_a_compact_line() {
+        let events = thread_events(&forwarded_thread(), None, Locale::En);
+        let line = events[1].status.as_ref().unwrap();
+        assert_eq!(line.state, "suspended");
+        assert_eq!(line.line, "waiting on wendell", "the chip is one line");
+        assert!(!line.line.contains('\n'));
+        assert_eq!(
+            line.reason.as_deref(),
+            Some(ESCALATION),
+            "newlines, lists, code and bold as written"
+        );
+        let zh = thread_events(&forwarded_thread(), None, Locale::Zh);
+        assert_eq!(zh[1].status.as_ref().unwrap().line, "等待 wendell");
+        // Its Markdown is the message renderer's: structure kept, raw
+        // HTML as text, the unsafe link not a link.
+        use senate_markdown::{Color, Document, Format, RenderCache, Terminal};
+        let doc = Document::parse(ESCALATION);
+        let mut cache = RenderCache::new(Terminal::new(80, Color::None));
+        cache.render_document(&doc, Format::Html, &mut String::new());
+        let mut html = String::new();
+        for entry in doc.blocks() {
+            assert!(cache.write_block(entry.id, Format::Html, &mut html));
+        }
+        assert!(html.contains("<li>"), "{html}");
+        assert!(html.contains("<strong>clean</strong>"), "{html}");
+        assert!(html.contains("<code>7af3c689</code>"), "{html}");
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(!html.contains("href=\"javascript:"), "{html}");
+    }
+
+    #[test]
+    fn a_progress_status_has_no_reason_block() {
+        use senate_core::{StatusPayload, StatusState};
+        let by = Address::senator(&"claude".parse().unwrap());
+        let mut p = StatusPayload::new(StatusState::Processing);
+        p.title = Some("Release".into());
+        p.reason = Some("ignored".into());
+        let events = thread_events(
+            &[event(1, Kind::Request, by.clone(), "go"), status(2, by, &p)],
+            None,
+            Locale::En,
+        );
+        let line = events[1].status.as_ref().unwrap();
+        assert_eq!(line.line, "working on it — Release");
+        assert_eq!(line.reason, None);
+    }
+
     /// Thread 1565's shape: a request, then statuses from the agent working
     /// it, one of which repeats the one before.
     #[test]
@@ -585,8 +806,10 @@ mod tests {
         assert_eq!(line(5).state, "suspended");
         assert_eq!(
             line(5).line,
-            "waiting on alice: which uplink to keep? — Cover the uplink reconnect cycle"
+            "waiting on alice — Cover the uplink reconnect cycle"
         );
+        assert_eq!(line(5).reason.as_deref(), Some("which uplink to keep?"));
+        assert_eq!(line(6).reason, None, "a takeover is no reason to show");
         assert_eq!(
             line(6).line,
             "taken over by alice — Cover the uplink reconnect cycle"

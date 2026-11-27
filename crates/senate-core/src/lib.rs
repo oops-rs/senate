@@ -122,8 +122,8 @@ pub use docket::{
 };
 pub use duty::{DutyFold, DutyPayload};
 pub use event::{
-    BindingAction, BindingPayload, Event, GroupRole, Kind, Mirror, NewEvent, PROPOSAL_DECISION,
-    Refs, Source, StatusState, is_companion, is_provisional, is_takeover, meta,
+    BindingAction, BindingPayload, Carried, CarriedHow, Event, GroupRole, Kind, Mirror, NewEvent,
+    PROPOSAL_DECISION, Refs, Source, StatusState, is_companion, is_provisional, is_takeover, meta,
     thread_participants,
 };
 pub use hub::{

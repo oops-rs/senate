@@ -50,7 +50,7 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
 
     func deskItem(committee: String, seq: UInt64) async throws -> DeskItemView {
         try record("desk-item \(committee) \(seq)")
-        let item = ThreadEvent(seq: seq, kind: "request", kindLabel: "Request", by: "tester",
+        let item = ThreadEvent(seq: seq, kind: "request", kindLabel: "Request", by: "tester", via: nil,
                                to: ["speaker"], body: "Full request", at: Date(), mine: false, status: nil)
         let thread = ThreadView(committee: committee, root: seq, title: "Full request",
                                 state: nil, stateLabel: nil, kindLabel: "Request", events: [item])

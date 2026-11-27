@@ -1597,3 +1597,128 @@ async fn the_apps_answer_says_what_the_person_had_seen_too() {
     assert_eq!(posted.unseen_escalation, None);
     assert!(last(&h).meta.get(meta::SEEN).and_then(Value::as_u64) >= Some(esc.seq.0));
 }
+
+/// `senate#145`–`#147`: a request the desk forwarded here (`from` the
+/// Speaker, its origin on another committee), the assignee's escalation to
+/// the person, and the person's reply as themselves in that thread.
+mod forwarded_reply {
+    use super::*;
+    use senate_bridge::ipc::{self, Request};
+
+    fn forwarded(h: &Harness) -> Seq {
+        let origin = senate_core::Origin {
+            locator: "/top::commons::senator::agy".parse().unwrap(),
+            thread: Seq(109),
+        };
+        h.server
+            .append(
+                NewEvent::new(
+                    committee(),
+                    Kind::Request,
+                    Address::Speaker,
+                    "merge and release?",
+                )
+                .to(claude("alice"))
+                .with_meta(meta::ORIGIN, origin.value())
+                .with_meta(meta::ACTED_BY, serde_json::json!("alice")),
+            )
+            .seq
+    }
+
+    async fn read(h: &Harness, root: Seq) {
+        let o = senate(
+            h,
+            &["thread", &root.to_string(), "--committee", "refund-v2"],
+            None,
+            None,
+        )
+        .await;
+        assert!(o.status.success(), "{}", err(&o));
+    }
+
+    async fn reply(h: &Harness, root: Seq, body: &str) -> senate_core::Event {
+        let _: ipc::Posted = ipc::request(
+            &h.socket(),
+            &Request::Answer {
+                session: ipc::SessionSelector::default(),
+                thread: root,
+                body: body.into(),
+                id: None,
+                committee: Some(committee()),
+                agent: None,
+                as_person: true,
+            },
+            WAIT,
+            WAIT,
+        )
+        .await
+        .unwrap();
+        let stored = last(h);
+        assert_eq!(stored.body, body);
+        assert_eq!(stored.from, person("alice"), "her own words");
+        assert!(stored.on_behalf_of.is_none());
+        stored
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_decision_goes_to_the_asker_and_the_assignee_waiting_on_it() {
+        let h = machine(false).await;
+        let root = forwarded(&h);
+        h.server
+            .append(escalation_from_claude(root, "1. version?\n2. scope?"));
+        read(&h, root).await;
+        let stored = reply(&h, root, "1. 0.14.3\n2. yes, main").await;
+        assert_eq!(stored.to, [Address::Speaker, claude("alice")]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn with_nothing_escalated_it_goes_to_the_asker_only() {
+        let h = machine(false).await;
+        let root = forwarded(&h);
+        read(&h, root).await;
+        let stored = reply(&h, root, "not yet").await;
+        assert_eq!(stored.to, [Address::Speaker]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_reply_that_crossed_the_escalation_does_not_answer_it() {
+        let h = machine(false).await;
+        let root = forwarded(&h);
+        read(&h, root).await;
+        // Escalated after she last read it: her reply was not to that.
+        h.server.append(escalation_from_claude(root, "which one?"));
+        let stored = reply(&h, root, "unrelated").await;
+        assert_eq!(stored.to, [Address::Speaker]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_withdrawn_escalation_waits_on_no_one() {
+        let h = machine(false).await;
+        let root = forwarded(&h);
+        h.server.append(escalation_from_claude(root, "which one?"));
+        let mut back = StatusPayload::new(StatusState::Processing);
+        back.withdraw = true;
+        h.server.append(status_ev(root, back));
+        read(&h, root).await;
+        let stored = reply(&h, root, "fine").await;
+        assert_eq!(stored.to, [Address::Speaker]);
+    }
+
+    /// The control: a local question from the agent that also escalated
+    /// it is answered to it, once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_local_question_is_answered_to_its_asker_once() {
+        let h = machine(false).await;
+        let root = h
+            .server
+            .append(
+                NewEvent::new(committee(), Kind::Question, claude("alice"), "which env?")
+                    .to(person("alice")),
+            )
+            .seq;
+        h.server.append(escalation_from_claude(root, "which env?"));
+        read(&h, root).await;
+        let stored = reply(&h, root, "staging").await;
+        assert_eq!(stored.to, [claude("alice")]);
+    }
+}
