@@ -379,6 +379,20 @@
           }
           r.appendChild(links);
         }
+        if (s.phase || s.awaitingAcceptance || s.nextOwner) {
+          const metaRow = el("div", "status-meta");
+          if (s.awaitingAcceptance) metaRow.appendChild(el("span", "status-pill acceptance", "pending acceptance"));
+          if (s.phase) metaRow.appendChild(el("span", "status-pill phase", s.phase));
+          if (s.nextOwner) metaRow.appendChild(el("span", "status-owner", "next: " + s.nextOwner));
+          r.appendChild(metaRow);
+        }
+        if (s.artifacts && s.artifacts.length) {
+          const arts = el("div", "status-artifacts");
+          for (const a of s.artifacts) {
+            arts.appendChild(el("span", "status-artifact", a.label + ": " + a.value));
+          }
+          r.appendChild(arts);
+        }
         break;
       }
       case "group": {

@@ -432,15 +432,22 @@ final class ConversationPage: NSObject {
         // message body: the same renderer, raw HTML as text, links only
         // through the page's handler.
         if let s = event.status {
+            var statusDict: [String: Any] = [
+                "state": s.state, "line": Mentions.shared.plain(s.line, committee: committee),
+                "steps": s.steps.map { ["label": $0.label, "done": $0.done] },
+                "links": s.links.map { ["label": $0.label, "url": $0.url] },
+                "artifacts": s.artifacts.map { ["label": $0.label, "value": $0.value] },
+                "awaitingAcceptance": s.awaitingAcceptance,
+            ]
+            if let phase = s.phase { statusDict["phase"] = phase }
+            if let nextOwner = s.nextOwner {
+                statusDict["nextOwner"] = Mentions.shared.plain(nextOwner, committee: committee)
+            }
             var row: [String: Any] = [
                 "id": event.seq, "kind": "status",
                 "by": Mentions.shared.plain(event.by, committee: committee),
                 "when": event.at.formatted(.relative(presentation: .named)),
-                "status": [
-                    "state": s.state, "line": Mentions.shared.plain(s.line, committee: committee),
-                    "steps": s.steps.map { ["label": $0.label, "done": $0.done] },
-                    "links": s.links.map { ["label": $0.label, "url": $0.url] },
-                ] as [String: Any],
+                "status": statusDict,
             ]
             if let reason = s.reason {
                 row["md"] = markdown("t/\(committee)/\(root)/\(event.seq)", Mentions.shared.plain(reason, committee: committee))

@@ -422,6 +422,16 @@ impl AppCore {
         .await
     }
 
+    /// Accept a delivered task thread awaiting verification and archive/close it.
+    pub async fn accept(&self, committee: String, thread: u64) -> Result<(), CoreError> {
+        let committee = self.committee_id(&committee)?;
+        self.act(Action::Accept {
+            committee,
+            thread: Seq(thread),
+        })
+        .await
+    }
+
     /// Answer an approval request. The first answer wins across the TUI,
     /// the app and any chat platform; a late one fails with the daemon's
     /// reason.

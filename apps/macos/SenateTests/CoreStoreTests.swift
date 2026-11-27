@@ -192,17 +192,21 @@ import SenateCore
                 committee: "refund-v2", root: 12, updated: 14, title: "Blocked task",
                 bucket: "blocked", bucketLabel: "Blocked", state: "suspended", stateLabel: "Suspended",
                 owner: "[senator::copilot]", summaryLine: "Needs rate limit decision",
-                unread: false, since: Date(), originLabel: "from ledger #4"
+                unread: false, since: Date(), originLabel: "from ledger #4",
+                phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, linkedDownstream: nil
             ),
             CommissionThread(
                 committee: "refund-v2", root: 15, updated: 18, title: "Completed task",
                 bucket: "completed_unread", bucketLabel: "Completed", state: "active", stateLabel: "Active",
-                owner: nil, summaryLine: "Shipped", unread: true, since: Date(), originLabel: nil
+                owner: nil, summaryLine: "Shipped", unread: true, since: Date(), originLabel: nil,
+                phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, linkedDownstream: nil
             ),
             CommissionThread(
                 committee: "ledger", root: 19, updated: 19, title: "Working task",
                 bucket: "in_progress", bucketLabel: "In progress", state: "processing", stateLabel: "Processing",
-                owner: nil, summaryLine: nil, unread: false, since: Date(), originLabel: nil
+                owner: nil, summaryLine: nil, unread: false, since: Date(), originLabel: nil,
+                phase: "build", artifacts: [ArtifactItem(label: "commit", value: "abc1234")],
+                nextOwner: nil, awaitingAcceptance: false, linkedDownstream: nil
             ),
         ]
         core.push(s)
@@ -210,6 +214,8 @@ import SenateCore
         #expect(store.count(.commissions) == 2)
         store.openThread(committee: "refund-v2", root: 12)
         #expect(store.place == .thread("refund-v2:12"))
+        await store.accept(committee: "refund-v2", root: 15)
+        #expect(core.calls.contains("accept refund-v2 15"))
     }
 
     @Test func openingAThreadFromANotificationSelectsIt() async throws {
@@ -238,7 +244,7 @@ import SenateCore
         let store = store()
         core.threadView = ThreadView(
             committee: "refund-v2", root: 140, title: "Reviewed; fine by me.", state: nil, stateLabel: nil,
-            kindLabel: "note", events: [])
+            kindLabel: "note", phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, events: [])
         core.push(online())
         try await until(store) { $0.state.online }
         store.openThread(committee: "refund-v2", root: 140)

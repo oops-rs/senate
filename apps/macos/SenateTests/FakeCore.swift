@@ -54,7 +54,8 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
                                to: ["speaker"], body: "Full request", at: Date(), mine: false, status: nil,
                                executionAuthBadge: nil, executionAuthMode: nil)
         let thread = ThreadView(committee: committee, root: seq, title: "Full request",
-                                state: nil, stateLabel: nil, kindLabel: "Request", events: [item])
+                                state: nil, stateLabel: nil, kindLabel: "Request",
+                                phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, events: [item])
         // As the fake daemon: 60 and 61 a request between committees (all
         // options), 62 nothing to do here, 63 a question (answer, close).
         let actions: [DeskAction] = switch seq {
@@ -238,17 +239,20 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     func take(committee: String, thread: UInt64) async throws {
         try record("take \(committee) \(thread)")
     }
+    func accept(committee: String, thread: UInt64) async throws {
+        try record("accept \(committee) \(thread)")
+    }
     /// Threads the daemon cannot read (deleted, or not the person's).
     var missingThreads: Set<UInt64> = []
     func thread(committee: String, thread: UInt64) async throws -> ThreadView {
         try record("thread \(committee) \(thread)")
         if missingThreads.contains(thread) { throw CoreError.Failed(message: "no thread \(thread)") }
-        return threadView ?? ThreadView(committee: committee, root: thread, title: "", state: nil, stateLabel: nil, kindLabel: "", events: [])
+        return threadView ?? ThreadView(committee: committee, root: thread, title: "", state: nil, stateLabel: nil, kindLabel: "", phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, events: [])
     }
     func threadPeek(committee: String, thread: UInt64) async throws -> ThreadView {
         try record("peek \(committee) \(thread)")
         if missingThreads.contains(thread) { throw CoreError.Failed(message: "no thread \(thread)") }
-        return threadView ?? ThreadView(committee: committee, root: thread, title: "", state: nil, stateLabel: nil, kindLabel: "", events: [])
+        return threadView ?? ThreadView(committee: committee, root: thread, title: "", state: nil, stateLabel: nil, kindLabel: "", phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, events: [])
     }
     var observeGrantList: [ObserveGrantInfo] = []
     func observeEndpoint() async throws -> ObserveEndpoint {
@@ -372,7 +376,7 @@ func thread(
         since: .now, owner: nil, triage: nil, triageLabel: nil, reason: nil, escalatedTo: nil,
         takeover: nil, answered: false, forPerson: forPerson, asker: "[senator::claude]", forAgents: agents, escalated: escalated, toDecide: toDecide ?? (forPerson && escalated), unread: news != nil,
         newsFrom: news.map { _ in "[senator::claude]" }, newsKind: nil, newsKindLabel: nil,
-        newsLine: news
+        newsLine: news, phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, linkedDownstream: nil
     )
 }
 

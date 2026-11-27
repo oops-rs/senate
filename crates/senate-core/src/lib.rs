@@ -150,10 +150,11 @@ pub use surface::{
     Posted, SurfaceError, UnboundMention,
 };
 pub use task::{
-    Attention, CommissionBucket, CommissionRoot, CommissionSignal, CommissionSignalKind, Directed,
-    Escalation, Link, OutputLevel, PersonWait, StatusPayload, Step, TaskBoard, TaskOwner,
-    ThreadSummary, TriagePayload, TriageVerdict, WaitsOn, attention, commission_signal,
-    needs_triage, seen_by_author,
+    ArtifactRef, Attention, CommissionBucket, CommissionRoot, CommissionSignal,
+    CommissionSignalKind, Directed, Escalation, Link, LinkedTaskSummary, MAX_ARTIFACT_LABEL_CHARS,
+    MAX_ARTIFACT_VALUE_CHARS, MAX_ARTIFACTS, MAX_PHASE_CHARS, OutputLevel, PersonWait,
+    StatusPayload, Step, TaskBoard, TaskOwner, ThreadSummary, TriagePayload, TriageVerdict,
+    WaitsOn, attention, commission_signal, needs_triage, seen_by_author,
 };
 pub use work::{BranchNaming, DEFAULT_BRANCH_PREFIX, WorkRun, WorkState, is_work_root};
 

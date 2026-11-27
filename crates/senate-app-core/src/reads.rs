@@ -8,6 +8,7 @@ use std::time::SystemTime;
 use senate_bridge::ipc::{DeskItemDetail, DeskOutcome, ThreadReply};
 use senate_core::{Address, Event, Locale, Name};
 
+use crate::state::ArtifactItem;
 use crate::text;
 
 /// One thread, root first.
@@ -25,6 +26,10 @@ pub struct ThreadView {
     pub state_label: Option<String>,
     /// What kind its root is, in words.
     pub kind_label: String,
+    pub phase: Option<String>,
+    pub artifacts: Vec<ArtifactItem>,
+    pub next_owner: Option<String>,
+    pub awaiting_acceptance: bool,
     pub events: Vec<ThreadEvent>,
 }
 
@@ -76,6 +81,10 @@ pub struct StatusLine {
     pub reason: Option<String>,
     pub steps: Vec<StatusStep>,
     pub links: Vec<StatusLink>,
+    pub phase: Option<String>,
+    pub artifacts: Vec<ArtifactItem>,
+    pub next_owner: Option<String>,
+    pub awaiting_acceptance: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -288,6 +297,12 @@ pub(crate) fn thread_view(reply: ThreadReply, person: Option<&Name>, locale: Loc
         kind_label: root.map_or_else(String::new, |e| text::kind(locale, &e.kind)),
         committee: reply.committee.to_string(),
         root: reply.root.0,
+        phase: summary.and_then(|t| t.phase.clone()),
+        artifacts: summary.map_or_else(Vec::new, |t| crate::state::artifact_items(&t.artifacts)),
+        next_owner: summary
+            .and_then(|t| t.next_owner.as_ref())
+            .map(Address::in_text),
+        awaiting_acceptance: summary.is_some_and(|t| t.awaiting_acceptance),
         events: thread_events(&reply.events, me.as_ref(), locale),
     }
 }
@@ -328,18 +343,31 @@ fn thread_events(events: &[Event], me: Option<&Address>, locale: Locale) -> Vec<
 
 /// What a thread's statuses have said so far: each field as the last
 /// status that set it left it (a status's missing field is no change).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct Task {
     state: Option<senate_core::StatusState>,
     title: Option<String>,
     steps: Vec<(String, bool)>,
     links: Vec<(String, String)>,
+    phase: Option<String>,
+    artifacts: Vec<(String, String)>,
+    next_owner: Option<String>,
+    awaiting_acceptance: bool,
     escalated_to: Option<String>,
     takeover: Option<String>,
 }
 
 impl Task {
     fn after(&self, s: &senate_core::StatusPayload) -> Self {
+        let archives = s.state == senate_core::StatusState::Archived;
+        let escalated_to = if s.withdraw {
+            None
+        } else {
+            s.escalated_to
+                .as_ref()
+                .map(ToString::to_string)
+                .or_else(|| self.escalated_to.clone())
+        };
         Self {
             state: Some(s.state),
             title: s.title.clone().or_else(|| self.title.clone()),
@@ -356,14 +384,30 @@ impl Task {
                         .collect()
                 },
             ),
-            escalated_to: if s.withdraw {
-                None
+            phase: s.phase.clone().or_else(|| self.phase.clone()),
+            artifacts: if s.artifacts.is_empty() {
+                self.artifacts.clone()
             } else {
-                s.escalated_to
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .or_else(|| self.escalated_to.clone())
+                s.artifacts
+                    .iter()
+                    .map(|a| (a.label.clone(), a.value.clone()))
+                    .collect()
             },
+            next_owner: s
+                .next_owner
+                .as_ref()
+                .map(Address::in_text)
+                .or_else(|| self.next_owner.clone()),
+            awaiting_acceptance: if archives {
+                false
+            } else if s.awaiting_acceptance {
+                true
+            } else if s.state == senate_core::StatusState::Processing && escalated_to.is_none() {
+                false
+            } else {
+                self.awaiting_acceptance
+            },
+            escalated_to,
             takeover: s
                 .takeover
                 .as_ref()
@@ -418,6 +462,17 @@ impl Task {
                     url: url.clone(),
                 })
                 .collect(),
+            phase: self.phase.clone(),
+            artifacts: self
+                .artifacts
+                .iter()
+                .map(|(label, value)| ArtifactItem {
+                    label: label.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+            next_owner: self.next_owner.clone(),
+            awaiting_acceptance: self.awaiting_acceptance,
         }
     }
 }

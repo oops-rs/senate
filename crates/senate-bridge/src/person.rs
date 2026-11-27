@@ -297,6 +297,16 @@ fn commission_line(
     let label = commission_bucket_label(bucket, locale);
     let c = &reply.committee;
     let mut out = format!("\n- [{label}] thread {} · {title}", t.root);
+    if let Some(phase) = t.phase.as_deref() {
+        out.push_str(&format!(" · {phase}"));
+    }
+    if let Some(next_owner) = &t.next_owner {
+        let who = display_byline(next_owner.in_text());
+        out.push_str(&match locale {
+            Locale::Zh => format!(" · 下一责任人：{who}"),
+            Locale::En => format!(" · next owner: {who}"),
+        });
+    }
     let detail = match bucket {
         CommissionBucket::Blocked => t
             .escalation
@@ -306,15 +316,51 @@ fn commission_line(
         CommissionBucket::CompletedUnread | CommissionBucket::CompletedRead => {
             t.answer_line.as_deref()
         }
-        CommissionBucket::PendingAcceptance | CommissionBucket::InProgress => {
-            t.steps.last().map(|s| s.label.as_str())
-        }
+        CommissionBucket::PendingAcceptance => t
+            .answer_line
+            .as_deref()
+            .or_else(|| t.steps.last().map(|s| s.label.as_str())),
+        CommissionBucket::InProgress => t.steps.last().map(|s| s.label.as_str()),
     };
     if let Some(detail) = detail {
         let detail = display_byline(format::one_line(detail));
         if !detail.is_empty() {
             out.push_str(&format!("\n    {detail}"));
         }
+    }
+    if !t.artifacts.is_empty() {
+        let list = t
+            .artifacts
+            .iter()
+            .map(|a| format!("{}={}", a.label, a.value))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&match locale {
+            Locale::Zh => format!("\n    产物：{list}"),
+            Locale::En => format!("\n    artifacts: {list}"),
+        });
+    }
+    if let Some(downstream) = &t.linked_downstream {
+        let ds_phase = downstream
+            .phase
+            .as_deref()
+            .map(|p| format!(" · {p}"))
+            .unwrap_or_default();
+        let ds_steps = if downstream.steps_total > 0 {
+            format!(" · {}/{}", downstream.steps_done, downstream.steps_total)
+        } else {
+            String::new()
+        };
+        out.push_str(&match locale {
+            Locale::Zh => format!(
+                "\n    下游状态：{} #{} · {}{ds_phase}{ds_steps}",
+                downstream.committee, downstream.root, downstream.state
+            ),
+            Locale::En => format!(
+                "\n    downstream: {} #{} · {}{ds_phase}{ds_steps}",
+                downstream.committee, downstream.root, downstream.state
+            ),
+        });
     }
     let root = t.root;
     out.push_str(&match locale {
@@ -745,6 +791,11 @@ fn sponsored_commissions_render_sorted_and_mark_unread_completions() {
             origin: None,
             answer_seq: answer_seq.map(Seq),
             answer_line: answer_seq.map(|_| "done".into()),
+            phase: None,
+            artifacts: Vec::new(),
+            next_owner: None,
+            awaiting_acceptance: false,
+            linked_downstream: None,
         }
     };
     let reply = InboxReply {
@@ -788,4 +839,48 @@ fn sponsored_commissions_render_sorted_and_mark_unread_completions() {
     assert_eq!(marks.len(), 1);
     assert_eq!(marks[0].thread, Seq(2));
     assert_eq!(marks[0].seen, Seq(10));
+
+    // PendingAcceptance + structured metadata + linked_downstream rendering
+    let mut pa = thread(5, StatusState::Active, Some(18));
+    pa.phase = Some("staging-verified".into());
+    pa.next_owner = Some(Address::senator(&alice_senator));
+    pa.awaiting_acceptance = true;
+    pa.artifacts = vec![senate_core::ArtifactRef {
+        label: "commit".into(),
+        value: "792bbadf".into(),
+    }];
+    pa.linked_downstream = Some(senate_core::LinkedTaskSummary {
+        committee: CommitteeId::new("feishu-botd").unwrap(),
+        root: Seq(99),
+        state: StatusState::Suspended,
+        phase: Some("wait-secret".into()),
+        steps_done: 2,
+        steps_total: 3,
+        escalation: None,
+        artifacts: Vec::new(),
+        next_owner: None,
+        awaiting_acceptance: false,
+        updated: Seq(105),
+    });
+    let pa_reply = InboxReply {
+        threads: vec![pa],
+        seen: vec![crate::ipc::ThreadSeen {
+            thread: Seq(5),
+            seen: Seq(18),
+        }],
+        ..reply
+    };
+    let pa_rendered = render_inbox(&pa_reply, Locale::En, ShowAll::Flag);
+    assert!(
+        pa_rendered.contains("[pending acceptance] thread 5 · task 5 · staging-verified · next owner: [senator::alice]"),
+        "{pa_rendered}"
+    );
+    assert!(
+        pa_rendered.contains("artifacts: commit=792bbadf"),
+        "{pa_rendered}"
+    );
+    assert!(
+        pa_rendered.contains("downstream: feishu-botd #99 · suspended · wait-secret · 2/3"),
+        "{pa_rendered}"
+    );
 }

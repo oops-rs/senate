@@ -140,6 +140,9 @@ pub struct Principal {
     pub names: Vec<String>,
     #[serde(default)]
     pub accounts: Vec<Account>,
+    /// Optional committee read/write scope. `None` allows all committees (legacy default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committees: Option<BTreeSet<crate::CommitteeId>>,
 }
 
 impl Principal {
@@ -150,6 +153,7 @@ impl Principal {
             kind: PrincipalKind::Person,
             names: Vec::new(),
             accounts: Vec::new(),
+            committees: None,
         }
     }
 
@@ -159,6 +163,15 @@ impl Principal {
             kind,
             ..Self::new(handle)
         }
+    }
+
+    /// Restrict this principal's committee access list.
+    pub fn with_committees(
+        mut self,
+        committees: impl IntoIterator<Item = crate::CommitteeId>,
+    ) -> Self {
+        self.committees = Some(committees.into_iter().collect());
+        self
     }
 
     /// The principal as a senator.
@@ -1046,6 +1059,18 @@ impl Roster {
 
     pub fn principal(&self, handle: &Name) -> Option<&Principal> {
         self.principals.iter().find(|s| &s.handle == handle)
+    }
+
+    /// Fail-closed check whether `person` may read `committee`:
+    /// `false` if unknown, or if `principal.committees` is set and excludes `committee`.
+    pub fn can_read_committee(&self, person: &Name, committee: &crate::CommitteeId) -> bool {
+        let Some(principal) = self.principal(person) else {
+            return false;
+        };
+        principal
+            .committees
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(committee))
     }
 
     /// The only person listed, when there is exactly one: whom a message

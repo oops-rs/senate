@@ -164,6 +164,7 @@ fn thread_row(committee: &CommitteeId, t: senate_core::task::ThreadSummary) -> C
         waits_on: t.waits().map(|waits| match waits {
             senate_core::task::WaitsOn::Agents => "agents".into(),
             senate_core::task::WaitsOn::Person => "person".into(),
+            senate_core::task::WaitsOn::Acceptance { .. } => "acceptance".into(),
         }),
         escalated_to: t.escalated_to.as_ref().map(ToString::to_string),
         takeover: t.takeover.as_ref().map(ToString::to_string),

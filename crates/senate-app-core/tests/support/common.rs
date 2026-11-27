@@ -178,6 +178,11 @@ pub fn suspended(root: u64, title: &str, agent: &str) -> ThreadSummary {
         origin: None,
         answer_seq: None,
         answer_line: None,
+        phase: None,
+        artifacts: Vec::new(),
+        next_owner: None,
+        awaiting_acceptance: false,
+        linked_downstream: None,
     }
 }
 

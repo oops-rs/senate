@@ -846,6 +846,16 @@ final class CoreStore {
         }
     }
 
+    func accept(_ thread: InboxThread) async {
+        await accept(committee: thread.committee, root: thread.root)
+    }
+
+    func accept(committee: String, root: UInt64) async {
+        await run("\(committee):\(root)") { core in
+            try await core.accept(committee: committee, thread: root)
+        }
+    }
+
     func decide(_ approval: ApprovalRequest, _ decision: ApprovalDecision) async {
         await run("approval:\(approval.id)") { core in
             try await core.approve(id: approval.id, decision: decision)
@@ -1088,7 +1098,9 @@ extension InboxThread {
             from: root?.by ?? "", onBehalfOf: nil, to: root?.to ?? [], since: root?.at ?? .now,
             owner: nil, triage: nil, triageLabel: nil, reason: nil, escalatedTo: nil, takeover: nil,
             answered: false, forPerson: false, asker: root?.by ?? "", forAgents: [], escalated: false,
-            toDecide: false, unread: false, newsFrom: nil, newsKind: nil, newsKindLabel: nil, newsLine: nil)
+            toDecide: false, unread: false, newsFrom: nil, newsKind: nil, newsKindLabel: nil, newsLine: nil,
+            phase: view.phase, artifacts: view.artifacts, nextOwner: view.nextOwner,
+            awaitingAcceptance: view.awaitingAcceptance, linkedDownstream: nil)
     }
 }
 

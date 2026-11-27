@@ -298,6 +298,29 @@ pub struct AgentInfo {
     pub inbox: bool,
 }
 
+/// Structured delivery artifact exposed over UniFFI.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ArtifactItem {
+    pub label: String,
+    pub value: String,
+}
+
+/// Read-only downstream status mirror projected from an origin thread.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct LinkedDownstreamView {
+    pub committee: String,
+    pub root: u64,
+    pub state: String,
+    pub state_label: String,
+    pub phase: Option<String>,
+    pub steps_done: u32,
+    pub steps_total: u32,
+    pub escalated_to: Option<String>,
+    pub artifacts: Vec<ArtifactItem>,
+    pub next_owner: Option<String>,
+    pub awaiting_acceptance: bool,
+}
+
 /// A task sponsored by the person (`My Commissions` / 「委派追踪」).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct CommissionThread {
@@ -315,6 +338,11 @@ pub struct CommissionThread {
     pub unread: bool,
     pub since: SystemTime,
     pub origin_label: Option<String>,
+    pub phase: Option<String>,
+    pub artifacts: Vec<ArtifactItem>,
+    pub next_owner: Option<String>,
+    pub awaiting_acceptance: bool,
+    pub linked_downstream: Option<LinkedDownstreamView>,
 }
 
 /// An open thread waiting on the person. Addresses are bracketed mentions;
@@ -375,6 +403,11 @@ pub struct InboxThread {
     pub news_kind_label: Option<String>,
     /// Its first line (an escalation's reason).
     pub news_line: Option<String>,
+    pub phase: Option<String>,
+    pub artifacts: Vec<ArtifactItem>,
+    pub next_owner: Option<String>,
+    pub awaiting_acceptance: bool,
+    pub linked_downstream: Option<LinkedDownstreamView>,
 }
 
 /// A Codex app-server approval request the daemon relays.
@@ -846,6 +879,38 @@ fn asker(w: &Waiting) -> String {
     author(&t.from, t.on_behalf_of.as_ref())
 }
 
+pub(crate) fn artifact_items(items: &[senate_core::ArtifactRef]) -> Vec<ArtifactItem> {
+    items
+        .iter()
+        .map(|a| ArtifactItem {
+            label: a.label.clone(),
+            value: a.value.clone(),
+        })
+        .collect()
+}
+
+fn linked_downstream_view(
+    linked: Option<&senate_core::LinkedTaskSummary>,
+    locale: Locale,
+) -> Option<LinkedDownstreamView> {
+    linked.map(|d| LinkedDownstreamView {
+        committee: d.committee.to_string(),
+        root: d.root.0,
+        state: wire(&d.state),
+        state_label: text::state(locale, d.state).to_string(),
+        phase: d.phase.clone(),
+        steps_done: d.steps_done,
+        steps_total: d.steps_total,
+        escalated_to: d
+            .escalation
+            .as_ref()
+            .map(|e| Address::senior(&e.to).in_text()),
+        artifacts: artifact_items(&d.artifacts),
+        next_owner: d.next_owner.as_ref().map(Address::in_text),
+        awaiting_acceptance: d.awaiting_acceptance,
+    })
+}
+
 pub(crate) fn commission_thread(c: &CommissionEntry, locale: Locale) -> CommissionThread {
     let t = &c.thread;
     let bucket = match c.bucket {
@@ -883,9 +948,11 @@ pub(crate) fn commission_thread(c: &CommissionEntry, locale: Locale) -> Commissi
         CommissionBucket::CompletedUnread | CommissionBucket::CompletedRead => {
             t.answer_line.clone()
         }
-        CommissionBucket::PendingAcceptance | CommissionBucket::InProgress => {
-            t.steps.last().map(|s| s.label.clone())
-        }
+        CommissionBucket::PendingAcceptance => t
+            .answer_line
+            .clone()
+            .or_else(|| t.steps.last().map(|s| s.label.clone())),
+        CommissionBucket::InProgress => t.steps.last().map(|s| s.label.clone()),
     };
     CommissionThread {
         committee: c.committee.to_string(),
@@ -904,6 +971,11 @@ pub(crate) fn commission_thread(c: &CommissionEntry, locale: Locale) -> Commissi
         unread: c.bucket == CommissionBucket::CompletedUnread,
         since: t.since_ts.into(),
         origin_label,
+        phase: t.phase.clone(),
+        artifacts: artifact_items(&t.artifacts),
+        next_owner: t.next_owner.as_ref().map(Address::in_text),
+        awaiting_acceptance: t.awaiting_acceptance,
+        linked_downstream: linked_downstream_view(t.linked_downstream.as_ref(), locale),
     }
 }
 
@@ -964,6 +1036,11 @@ pub(crate) fn inbox_thread(w: &Waiting, locale: Locale) -> InboxThread {
             }
         }),
         news_line: w.unread.as_ref().map(|d| d.line.clone()),
+        phase: t.phase.clone(),
+        artifacts: artifact_items(&t.artifacts),
+        next_owner: t.next_owner.as_ref().map(Address::in_text),
+        awaiting_acceptance: t.awaiting_acceptance,
+        linked_downstream: linked_downstream_view(t.linked_downstream.as_ref(), locale),
     }
 }
 

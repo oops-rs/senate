@@ -487,7 +487,10 @@ impl Shared {
                 on_behalf_of: thread.on_behalf_of.as_ref(),
                 to: &thread.to,
                 waits_on_agents: thread.waits() == Some(WaitsOn::Agents),
-                waits_on_person: thread.waits() == Some(WaitsOn::Person),
+                waits_on_person: matches!(
+                    thread.waits(),
+                    Some(WaitsOn::Person | WaitsOn::Acceptance { .. })
+                ),
                 last_at,
             };
             let Some(cause) = cleanup::thread_cause(&facts, gone, older_than, now) else {

@@ -2120,3 +2120,170 @@ async fn sponsored_cross_committee_task_notifies_only_blocked_and_deduplicated_c
 
     desk.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_acceptance_and_downstream_mirror_e2e() {
+    use senate_bridge::ipc::{DeskDecision, DeskOutcome};
+    use senate_core::api::{ThreadsPage, threads_path};
+    use senate_core::{ArtifactRef, CommissionBucket, StatusPayload, StatusState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut desk, _claude, copilot, _codex) = alices_machine(dir.path()).await;
+    let live = desk.senate();
+    let url = live.url.clone();
+    let token = live.token.clone();
+    let hub = live.daemon.hub.clone();
+
+    let origin_req: SendReply = desk
+        .ipc(Request::Send {
+            session: Laptop::session("s-codex"),
+            kind: SayKind::Request,
+            to: Vec::new(),
+            at: Some(senate_core::Locator::parse_short("refund-v2::copilot").unwrap()),
+            body: "Ship W3 staged deploy".into(),
+            refs: None,
+            id: None,
+        })
+        .await;
+    on_the_desk(&desk, origin_req.posted.seq).await;
+    let origin_evt = hub
+        .get(&ledger(), origin_req.posted.seq)
+        .await
+        .unwrap()
+        .unwrap();
+    let outcome: DeskOutcome = desk
+        .ipc(Request::DeskDecide {
+            committee: ledger(),
+            seq: origin_req.posted.seq,
+            item_id: origin_evt.id,
+            id: senate_core::EventId::new(),
+            decision: DeskDecision::ForwardAndAuthorize {
+                note: Some("deploy and await acceptance".into()),
+            },
+        })
+        .await;
+    assert!(matches!(outcome, DeskOutcome::Delivered { .. }));
+    let push = copilot.wait_for("Ship W3 staged deploy").await;
+    let dst_root = thread_of(&push, "Ship W3 staged deploy");
+
+    // Step 1: Progress with steps + phase + artifacts on downstream -> reflected in origin linked_downstream.
+    let mut progress = StatusPayload::new(StatusState::Processing);
+    progress.phase = Some("canary-rollout".into());
+    progress.steps = Some(vec![
+        senate_core::Step {
+            id: "s1".into(),
+            label: "build".into(),
+            done: true,
+        },
+        senate_core::Step {
+            id: "s2".into(),
+            label: "verify".into(),
+            done: false,
+        },
+    ]);
+    progress.artifacts = vec![ArtifactRef {
+        label: "commit".into(),
+        value: "792bbadf".into(),
+    }];
+    desk.status("s-copilot", dst_root, progress).await;
+
+    let orig_page: ThreadsPage = reqwest::Client::new()
+        .get(format!(
+            "{url}{}?include_discussions=true",
+            threads_path(&ledger())
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mirror = orig_page
+        .threads
+        .iter()
+        .find(|t| t.root == origin_req.posted.seq)
+        .and_then(|t| t.linked_downstream.as_ref())
+        .expect("origin thread must mirror downstream progress");
+    assert_eq!(mirror.committee, committee());
+    assert_eq!(mirror.root, dst_root);
+    assert_eq!(mirror.phase.as_deref(), Some("canary-rollout"));
+    assert_eq!(mirror.steps_done, 1);
+    assert_eq!(mirror.steps_total, 2);
+    assert_eq!(mirror.artifacts.len(), 1);
+
+    // Step 2: Downstream delivers answer AND marks awaiting_acceptance=true -> stays unsettled in PendingAcceptance.
+    desk.answer(
+        "s-copilot",
+        dst_root,
+        "Canary live on staging; ready for verification.",
+    )
+    .await;
+    let mut handoff = StatusPayload::new(StatusState::Active);
+    handoff.phase = Some("staging-verified".into());
+    handoff.next_owner = Some(senate_core::Address::senior(
+        &senate_core::Name::new("alice").unwrap(),
+    ));
+    handoff.awaiting_acceptance = true;
+    desk.status("s-copilot", dst_root, handoff).await;
+
+    let dst_inbox: senate_bridge::ipc::InboxReply = desk
+        .ipc(Request::Inbox {
+            session: senate_bridge::ipc::SessionSelector::default(),
+            committee: Some(committee()),
+            agent: None,
+            all: true,
+        })
+        .await;
+    let dst_summary = dst_inbox
+        .threads
+        .iter()
+        .find(|t| t.root == dst_root)
+        .unwrap();
+    assert!(!dst_summary.is_settled());
+    assert_eq!(
+        dst_summary.commission_bucket(dst_summary.updated),
+        CommissionBucket::PendingAcceptance
+    );
+    assert_eq!(dst_summary.phase.as_deref(), Some("staging-verified"));
+
+    // Control: normal answer without awaiting_acceptance settles cleanly.
+    hub.append(
+        NewEvent::new(
+            committee(),
+            Kind::Question,
+            Address::senior(&senate_core::Name::new("alice").unwrap()),
+            "Normal control question",
+        )
+        .to(Address::senator(&path("copilot"))),
+    )
+    .await
+    .unwrap();
+    let ctrl_push = copilot.wait_for("Normal control question").await;
+    let ctrl_root = thread_of(&ctrl_push, "Normal control question");
+    desk.answer("s-copilot", ctrl_root, "Normal answer.").await;
+    let ctrl_board = hub.tasks(&committee()).await.unwrap();
+    let ctrl_summary = ctrl_board.get(ctrl_root).unwrap();
+    assert!(ctrl_summary.is_settled());
+
+    // Step 3: Explicit acceptance/archive closes PendingAcceptance.
+    let mut accept = StatusPayload::new(StatusState::Archived);
+    accept.reason = Some("Accepted and closed".into());
+    let _: senate_bridge::ipc::Posted = desk
+        .ipc(Request::Task {
+            session: senate_bridge::ipc::SessionSelector::default(),
+            thread: dst_root,
+            status: accept,
+            id: None,
+            committee: Some(committee()),
+            agent: None,
+            as_person: true,
+        })
+        .await;
+    let closed_board = hub.tasks(&committee()).await.unwrap();
+    let closed_summary = closed_board.get(dst_root).unwrap();
+    assert!(!closed_summary.awaiting_acceptance);
+    assert_eq!(closed_summary.waits(), None);
+
+    desk.stop().await;
+}

@@ -12,9 +12,15 @@ struct CommissionsView: View {
         return store.state.commissions.filter { item in
             item.title.localizedCaseInsensitiveContains(q)
                 || item.committee.localizedCaseInsensitiveContains(q)
+                || (item.phase?.localizedCaseInsensitiveContains(q) ?? false)
+                || (item.nextOwner?.localizedCaseInsensitiveContains(q) ?? false)
                 || (item.summaryLine?.localizedCaseInsensitiveContains(q) ?? false)
                 || (item.originLabel?.localizedCaseInsensitiveContains(q) ?? false)
                 || (item.owner?.localizedCaseInsensitiveContains(q) ?? false)
+                || item.artifacts.contains {
+                    $0.label.localizedCaseInsensitiveContains(q)
+                        || $0.value.localizedCaseInsensitiveContains(q)
+                }
                 || "\(item.root)" == q
         }
     }
@@ -90,70 +96,120 @@ private struct CommissionRow: View {
     }
 
     var body: some View {
-        Button {
-            store.openThread(committee: item.committee, root: item.root)
-        } label: {
-            HStack(alignment: .top, spacing: Theme.Space.m) {
-                Image(systemName: symbol)
-                    .font(.system(size: 14))
-                    .foregroundStyle(badgeColor)
-                    .frame(width: 20, height: 20)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(verbatim: item.bucketLabel)
-                            .font(Theme.Fonts.meta.weight(.medium))
-                            .foregroundStyle(badgeColor)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1)
-                            .background(badgeColor.opacity(0.12), in: Capsule())
-                        MentionText(item.title)
-                            .font(Theme.Fonts.text.weight(item.unread ? .semibold : .medium))
-                            .foregroundStyle(Theme.onSurface)
+        let busy = store.isBusy(item.commissionKey)
+        HStack(alignment: .top, spacing: Theme.Space.m) {
+            Button {
+                store.openThread(committee: item.committee, root: item.root)
+            } label: {
+                HStack(alignment: .top, spacing: Theme.Space.m) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 14))
+                        .foregroundStyle(badgeColor)
+                        .frame(width: 20, height: 20)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(verbatim: item.bucketLabel)
+                                .font(Theme.Fonts.meta.weight(.medium))
+                                .foregroundStyle(badgeColor)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1)
+                                .background(badgeColor.opacity(0.12), in: Capsule())
+                            if let phase = item.phase {
+                                Text(verbatim: phase)
+                                    .font(Theme.Fonts.meta)
+                                    .foregroundStyle(Theme.onSurfaceVariant)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .background(Theme.containerHigh, in: Capsule())
+                            }
+                            MentionText(item.title)
+                                .font(Theme.Fonts.text.weight(item.unread ? .semibold : .medium))
+                                .foregroundStyle(Theme.onSurface)
+                                .lineLimit(1)
+                            if item.unread {
+                                Circle()
+                                    .fill(Theme.primary)
+                                    .frame(width: 7, height: 7)
+                                    .accessibilityLabel(L("a11y.unread"))
+                            }
+                        }
+                        if let summary = item.summaryLine ?? item.originLabel {
+                            MentionText(summary)
+                                .font(Theme.Fonts.row)
+                                .foregroundStyle(Theme.onSurfaceVariant)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                        }
+                        if !item.artifacts.isEmpty || item.nextOwner != nil {
+                            HStack(spacing: 6) {
+                                if let nextOwner = item.nextOwner {
+                                    Text(verbatim: L("thread.next_owner") + ": " + Mentions.shared.plain(nextOwner, committee: item.committee))
+                                        .font(Theme.Fonts.meta)
+                                        .foregroundStyle(Theme.onSurfaceVariant)
+                                }
+                                ForEach(item.artifacts, id: \.self) { artifact in
+                                    Text(verbatim: "\(artifact.label): \(artifact.value)")
+                                        .font(Theme.Fonts.code)
+                                        .foregroundStyle(Theme.onSurfaceVariant)
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1)
+                                        .background(Theme.containerHigh, in: RoundedRectangle(cornerRadius: 4))
+                                }
+                            }
                             .lineLimit(1)
-                        if item.unread {
-                            Circle()
-                                .fill(Theme.primary)
-                                .frame(width: 7, height: 7)
-                                .accessibilityLabel(L("a11y.unread"))
+                        }
+                        if let downstream = item.linkedDownstream {
+                            let phase = downstream.phase.map { " · \($0)" } ?? ""
+                            let steps = downstream.stepsTotal > 0 ? " · \(downstream.stepsDone)/\(downstream.stepsTotal)" : ""
+                            Button {
+                                store.openThread(committee: downstream.committee, root: downstream.root)
+                            } label: {
+                                Text(verbatim: L("thread.downstream") + ": \(downstream.committee) #\(downstream.root) · \(downstream.stateLabel)\(phase)\(steps)")
+                                    .font(Theme.Fonts.meta)
+                                    .foregroundStyle(Theme.primary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        if let origin = item.originLabel, item.summaryLine != nil {
+                            Text(verbatim: origin)
+                                .font(Theme.Fonts.meta)
+                                .foregroundStyle(Theme.onSurfaceVariant)
                         }
                     }
-                    if let summary = item.summaryLine ?? item.originLabel {
-                        MentionText(summary)
-                            .font(Theme.Fonts.row)
-                            .foregroundStyle(Theme.onSurfaceVariant)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
+                    Spacer(minLength: Theme.Space.m)
+                    HStack(spacing: 6) {
+                        Text(verbatim: "\(item.committee) #\(item.root)")
+                        Ago(date: item.since)
                     }
-                    if let origin = item.originLabel, item.summaryLine != nil {
-                        Text(verbatim: origin)
-                            .font(Theme.Fonts.meta)
-                            .foregroundStyle(Theme.onSurfaceVariant)
-                    }
+                    .font(Theme.Fonts.meta)
+                    .foregroundStyle(Theme.onSurfaceVariant)
+                    .lineLimit(1)
                 }
-                Spacer(minLength: Theme.Space.m)
-                HStack(spacing: 6) {
-                    Text(verbatim: "\(item.committee) #\(item.root)")
-                    Ago(date: item.since)
-                }
-                .font(Theme.Fonts.meta)
-                .foregroundStyle(Theme.onSurfaceVariant)
-                .lineLimit(1)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, Theme.Space.m)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                hovered ? Theme.container : .clear,
-                in: RoundedRectangle(cornerRadius: Theme.Radius.card)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
+            .buttonStyle(.plain)
+            .environment(\.mentionCommittee, item.committee)
+            .accessibilityElement(children: .ignore)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(Mentions.shared.plain(item.title, committee: item.committee))
+
+            if item.awaitingAcceptance {
+                Button(L("commissions.accept_close")) {
+                    Task { await store.accept(committee: item.committee, root: item.root) }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(busy || !store.state.online)
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, Theme.Space.m)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            hovered ? Theme.container : .clear,
+            in: RoundedRectangle(cornerRadius: Theme.Radius.card)
+        )
         .onHover { hovered = $0 }
-        .environment(\.mentionCommittee, item.committee)
-        .accessibilityElement(children: .ignore)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(Mentions.shared.plain(item.title, committee: item.committee))
     }
 }

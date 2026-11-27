@@ -185,6 +185,26 @@ impl AppState {
     /// `person` acts as `senator`: themselves, or an agent under their own
     /// name that could sit in this Senate, which is seated if this is its
     /// first contact. Anyone else's, and the built-in session, is 403.
+    fn can_read_committee(&self, person: &Person, committee: &CommitteeId) -> bool {
+        self.hub
+            .roster_now()
+            .can_read_committee(&person.0, committee)
+    }
+
+    fn require_read_committee(
+        &self,
+        person: &Person,
+        committee: &CommitteeId,
+    ) -> Result<(), ApiFailure> {
+        if self.can_read_committee(person, committee) {
+            return Ok(());
+        }
+        Err(ApiFailure::forbidden(format!(
+            "{} may not read committee {committee}",
+            person.0
+        )))
+    }
+
     async fn act_as(&self, person: &Person, senator: &SenatorName) -> Result<(), ApiFailure> {
         self.hub
             .act_as(&person.0, senator)
@@ -1050,11 +1070,12 @@ fn asker_archive(payload: &StatusPayload, asker: &Address) -> Result<(), ApiFail
 
 async fn events(
     State(state): State<AppState>,
-    _person: Person,
+    person: Person,
     path: Result<Path<String>, PathRejection>,
     params: Result<Query<EventsQuery>, QueryRejection>,
 ) -> Result<Json<EventsPage>, ApiFailure> {
     let committee = committee_path(path)?;
+    state.require_read_committee(&person, &committee)?;
     let params = query(params)?;
     let limit = params.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
     let mut events = state.hub.read(&committee, params.after, limit + 1).await?;
@@ -1276,27 +1297,43 @@ async fn latest_checkpoint(
 
 async fn threads(
     State(state): State<AppState>,
-    _person: Person,
+    person: Person,
     path: Result<Path<String>, PathRejection>,
     params: Result<Query<ThreadsQuery>, QueryRejection>,
 ) -> Result<Json<ThreadsPage>, ApiFailure> {
     let committee = committee_path(path)?;
+    state.require_read_committee(&person, &committee)?;
     let params = query(params)?;
     if params.include_discussions && params.agent.is_none() {
         return Ok(Json(
-            state.hub.committee_threads(&committee, &params).await?,
+            state
+                .hub
+                .committee_threads(&committee, &params, |dst| {
+                    state.can_read_committee(&person, dst)
+                })
+                .await?,
         ));
     }
     let board = state.hub.tasks(&committee).await?;
-    let threads = match &params.agent {
-        Some(agent) => board.threads_for(
-            &state.hub.primary_name(agent, Some(&committee)).await?,
-            params.state,
-        ),
-        None => board.threads(params.state),
+    let mut threads: Vec<senate_core::ThreadSummary> = match &params.agent {
+        Some(agent) => board
+            .threads_for(
+                &state.hub.primary_name(agent, Some(&committee)).await?,
+                params.state,
+            )
+            .into_iter()
+            .cloned()
+            .collect(),
+        None => board.threads(params.state).into_iter().cloned().collect(),
     };
+    state
+        .hub
+        .project_linked_downstream(&board, &mut threads, |dst| {
+            state.can_read_committee(&person, dst)
+        })
+        .await;
     Ok(Json(ThreadsPage {
-        threads: threads.into_iter().cloned().collect(),
+        threads,
         head: board.head(),
     }))
 }

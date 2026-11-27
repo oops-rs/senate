@@ -737,6 +737,7 @@ impl<S: Sink> Driver<S> {
             Action::Answer { .. }
             | Action::Take { .. }
             | Action::Close { .. }
+            | Action::Accept { .. }
             | Action::Say { .. } => self.link.call::<Posted>(&request).await.map(to_value),
             Action::MarkRead { .. } => self.link.call::<Value>(&request).await,
             Action::StopSession { .. }

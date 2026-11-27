@@ -730,7 +730,10 @@ quote no code or secrets); `links` are branch, PR or preview URLs. Omit what did
 Waiting on your user? Use `escalate` instead. An escalation lasts until your user speaks in the \
 thread or takes it: a later `status` (ticking off steps, `active`) updates the card but does not \
 withdraw it. Only when it no longer needs them, pass `withdraw_escalation: true` with the `state` \
-to go back to. A thread you asked yourself (you wrote its root) you may only archive: \
+to go back to. Optional structured delivery metadata: `phase` (short stage label, <= 40 chars), \
+`artifacts` (`{label, value}` list, <= 8), `next_owner` (who owns verification/handoff), and \
+`awaiting_acceptance: true` (keeps the thread pending explicit acceptance after delivery). \
+A thread you asked yourself (you wrote its root) you may only archive: \
 pass `state: archived` and nothing else once the answer settles it, for instance when you \
 accept the work you requested.";
 
@@ -772,6 +775,15 @@ pub struct LinkParam {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
+pub struct ArtifactParam {
+    /// Short key (<= 24 chars), e.g. `commit`, `tag`, `host`, `pr`.
+    pub label: String,
+    /// Single-line identifier/value (<= 80 chars).
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
 pub struct StatusParams {
     /// Seq of the thread's root, as shown in `answer(thread=<n>)`.
     pub thread: u64,
@@ -785,6 +797,18 @@ pub struct StatusParams {
     /// Omit to leave them as they were.
     #[serde(default)]
     pub links: Option<Vec<LinkParam>>,
+    /// Short engineering phase badge (<= 40 chars, single-line).
+    #[serde(default)]
+    pub phase: Option<String>,
+    /// Key structured delivery artifacts (<= 8 items).
+    #[serde(default)]
+    pub artifacts: Option<Vec<ArtifactParam>>,
+    /// Next handoff/verification owner (`senator::<name>` or handle).
+    #[serde(default)]
+    pub next_owner: Option<String>,
+    /// True while delivered work awaits explicit acceptance/archive.
+    #[serde(default)]
+    pub awaiting_acceptance: bool,
     /// Take back your own escalation to a person, going back to `state`.
     /// Only for when it no longer needs them (they answered you some other
     /// way); a progress update never does.
@@ -1135,8 +1159,62 @@ pub fn render_inbox(reply: &InboxReply, locale: Locale, how: ShowAll) -> String 
             out.push_str(locale.pick(" · 尚未回答", " · not answered yet"));
         } else if t.reopened {
             out.push_str(locale.pick(" · 答复之后又有新话", " · said more after the answer"));
+        } else if t.awaiting_acceptance {
+            let owner = t.acceptance_owner().in_text();
+            out.push_str(&match locale {
+                Locale::Zh => format!(" · 待 {owner} 验收"),
+                Locale::En => format!(" · awaiting acceptance by {owner}"),
+            });
         } else if t.is_settled() {
             out.push_str(locale.pick(" · 已答复，无人在等", " · settled: answered, nobody waits"));
+        }
+        if let Some(phase) = t.phase.as_deref() {
+            out.push_str(&match locale {
+                Locale::Zh => format!(" · 阶段：{phase}"),
+                Locale::En => format!(" · phase: {phase}"),
+            });
+        }
+        if let Some(next_owner) = &t.next_owner {
+            let who = next_owner.in_text();
+            out.push_str(&match locale {
+                Locale::Zh => format!(" · 下一责任人：{who}"),
+                Locale::En => format!(" · next owner: {who}"),
+            });
+        }
+        if !t.artifacts.is_empty() {
+            let list = t
+                .artifacts
+                .iter()
+                .map(|a| format!("{}={}", a.label, a.value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&match locale {
+                Locale::Zh => format!("\n  产物：{list}"),
+                Locale::En => format!("\n  artifacts: {list}"),
+            });
+        }
+        if let Some(downstream) = &t.linked_downstream {
+            let ds_state = state_label(downstream.state, locale);
+            let phase = downstream
+                .phase
+                .as_deref()
+                .map(|p| format!(" · {p}"))
+                .unwrap_or_default();
+            let steps = if downstream.steps_total > 0 {
+                format!(" · {}/{}", downstream.steps_done, downstream.steps_total)
+            } else {
+                String::new()
+            };
+            out.push_str(&match locale {
+                Locale::Zh => format!(
+                    "\n  下游状态：{} #{} · {ds_state}{phase}{steps}",
+                    downstream.committee, downstream.root
+                ),
+                Locale::En => format!(
+                    "\n  downstream: {} #{} · {ds_state}{phase}{steps}",
+                    downstream.committee, downstream.root
+                ),
+            });
         }
         out.push_str(&reason_block(t, locale));
     }
@@ -2416,6 +2494,27 @@ impl SenateMcp {
                 })
                 .collect()
         });
+        status.phase = p
+            .phase
+            .map(|ph| ph.trim().to_string())
+            .filter(|ph| !ph.is_empty());
+        if let Some(artifacts) = p.artifacts {
+            status.artifacts = artifacts
+                .into_iter()
+                .map(|a| senate_core::ArtifactRef {
+                    label: a.label.trim().to_string(),
+                    value: a.value.trim().to_string(),
+                })
+                .collect();
+        }
+        status.next_owner = p
+            .next_owner
+            .as_deref()
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(parse_address)
+            .transpose()?;
+        status.awaiting_acceptance = p.awaiting_acceptance;
         status.withdraw = p.withdraw_escalation;
         status.check()?;
         let state = status.state;

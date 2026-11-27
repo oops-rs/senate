@@ -3224,6 +3224,11 @@ mod tests {
             origin: None,
             answer_seq: None,
             answer_line: None,
+            phase: None,
+            artifacts: Vec::new(),
+            next_owner: None,
+            awaiting_acceptance: false,
+            linked_downstream: None,
         }
     }
 

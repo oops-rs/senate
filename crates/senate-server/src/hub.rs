@@ -1633,19 +1633,57 @@ impl ServerHub {
         &self,
         committee: &CommitteeId,
         query: &senate_core::api::ThreadsQuery,
+        can_read_committee: impl Fn(&CommitteeId) -> bool,
     ) -> Result<senate_core::api::ThreadsPage, HubError> {
         let cached = self.folded(&self.discussions, committee).await?;
         let board = &cached.fold.0;
-        let threads = board.committee_threads(
-            query.state,
-            query.include_archived,
-            query.before,
-            query.limit.unwrap_or(41).clamp(1, 101),
-        );
+        let mut threads: Vec<senate_core::ThreadSummary> = board
+            .committee_threads(
+                query.state,
+                query.include_archived,
+                query.before,
+                query.limit.unwrap_or(41).clamp(1, 101),
+            )
+            .into_iter()
+            .cloned()
+            .collect();
+        self.project_linked_downstream(board, &mut threads, can_read_committee)
+            .await;
         Ok(senate_core::api::ThreadsPage {
-            threads: threads.into_iter().cloned().collect(),
+            threads,
             head: board.head(),
         })
+    }
+
+    pub(crate) async fn project_linked_downstream(
+        &self,
+        source_board: &TaskBoard,
+        threads: &mut [senate_core::ThreadSummary],
+        can_read_committee: impl Fn(&CommitteeId) -> bool,
+    ) {
+        let mut cache: HashMap<CommitteeId, TaskBoard> = HashMap::new();
+        for thread in threads {
+            let Some((dst_committee, dst_root)) = source_board.delivered_target(thread.root) else {
+                continue;
+            };
+            if !can_read_committee(dst_committee) {
+                continue;
+            }
+            if !cache.contains_key(dst_committee)
+                && let Ok(board) = self.tasks(dst_committee).await
+            {
+                cache.insert(dst_committee.clone(), board);
+            }
+            if let Some(dst_summary) = cache
+                .get(dst_committee)
+                .and_then(|board| board.get(*dst_root))
+            {
+                thread.linked_downstream = Some(senate_core::LinkedTaskSummary::from_thread(
+                    dst_committee.clone(),
+                    dst_summary,
+                ));
+            }
+        }
     }
 
     pub(crate) async fn count_unanswered_questions(

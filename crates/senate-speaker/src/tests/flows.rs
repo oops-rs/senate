@@ -65,6 +65,7 @@ fn roster_with_carol() -> Roster {
             platform: PLATFORM.into(),
             id: "u_carol".into(),
         }],
+        committees: None,
     });
     Roster::new(principals, base.seated().to_vec()).expect("roster")
 }

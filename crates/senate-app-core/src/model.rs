@@ -615,6 +615,11 @@ pub enum Action {
         committee: CommitteeId,
         thread: Seq,
     },
+    /// Accept a delivered thread awaiting verification and archive/close it.
+    Accept {
+        committee: CommitteeId,
+        thread: Seq,
+    },
     /// The person has seen the thread up to `seen`: read state on this
     /// machine, nothing is appended to the log.
     MarkRead {
@@ -709,6 +714,19 @@ impl Action {
                 agent: None,
                 as_person: true,
             },
+            Action::Accept { committee, thread } => {
+                let mut status = StatusPayload::new(StatusState::Archived);
+                status.reason = Some("Accepted and closed".to_string());
+                Request::Task {
+                    session,
+                    thread,
+                    status,
+                    id: None,
+                    committee: Some(committee),
+                    agent: None,
+                    as_person: true,
+                }
+            }
             Action::MarkRead {
                 committee,
                 thread,
@@ -772,6 +790,7 @@ impl Action {
             | Action::Answer { committee, .. }
             | Action::Take { committee, .. }
             | Action::Close { committee, .. }
+            | Action::Accept { committee, .. }
             | Action::MarkRead { committee, .. }
             | Action::Say { committee, .. } => Some(committee),
             Action::Approvals
@@ -807,13 +826,16 @@ fn is_escalated_to(t: &ThreadSummary, person: &senate_core::Name) -> bool {
 /// no one (an older server records neither), and this machine's person is
 /// the one who can act on it.
 fn parked_on(t: &ThreadSummary, person: &senate_core::Name) -> bool {
-    if t.waits() != Some(senate_core::WaitsOn::Person) {
-        return false;
-    }
-    match (escalated_to_now(t), t.takeover.as_ref()) {
-        (Some(to), _) => to == person,
-        (None, Some(by)) => by == person,
-        (None, None) => true,
+    match t.waits() {
+        Some(senate_core::WaitsOn::Acceptance { owner }) => {
+            owner == senate_core::Address::senior(person)
+        }
+        Some(senate_core::WaitsOn::Person) => match (escalated_to_now(t), t.takeover.as_ref()) {
+            (Some(to), _) => to == person,
+            (None, Some(by)) => by == person,
+            (None, None) => true,
+        },
+        _ => false,
     }
 }
 
@@ -1024,6 +1046,11 @@ mod tests {
             origin: None,
             answer_seq: None,
             answer_line: None,
+            phase: None,
+            artifacts: Vec::new(),
+            next_owner: None,
+            awaiting_acceptance: false,
+            linked_downstream: None,
         }
     }
 
@@ -1661,5 +1688,71 @@ mod tests {
             script.contains(r#"do script "cd '/a \"b\"' && codex""#),
             "{script}"
         );
+    }
+
+    #[test]
+    fn pending_acceptance_metadata_accept_action_and_thread_view_project_cleanly() {
+        let mut s = StatusPayload::new(StatusState::Active);
+        s.phase = Some("staging-verified".into());
+        s.artifacts = vec![senate_core::ArtifactRef {
+            label: "tag".into(),
+            value: "v0.4.3-rc1".into(),
+        }];
+        s.next_owner = Some(senate_core::Address::senior(&Name::new("alice").unwrap()));
+        s.awaiting_acceptance = true;
+
+        let c = CommitteeId::new("refund-v2").unwrap();
+        let req = senate_core::NewEvent::new(
+            c.clone(),
+            senate_core::Kind::Request,
+            senate_core::Address::senior(&Name::new("alice").unwrap()),
+            "Ship v0.4.3",
+        )
+        .to(senate_core::Address::senator(&path("claude")))
+        .into_event(Seq(10), Utc::now());
+        let st_ev = senate_core::NewEvent::new(
+            c.clone(),
+            senate_core::Kind::Status,
+            senate_core::Address::senator(&path("claude")),
+            "",
+        )
+        .in_thread(Seq(10))
+        .with_meta(senate_core::meta::STATUS, s.value())
+        .into_event(Seq(11), Utc::now());
+
+        let view = crate::reads::thread_view(
+            senate_bridge::ipc::ThreadReply {
+                committee: c.clone(),
+                root: Seq(10),
+                events: vec![req, st_ev],
+            },
+            Some(&Name::new("alice").unwrap()),
+            Locale::En,
+        );
+        assert!(view.awaiting_acceptance);
+        assert_eq!(view.phase.as_deref(), Some("staging-verified"));
+        assert_eq!(view.artifacts.len(), 1);
+        assert_eq!(view.next_owner.as_deref(), Some("[senator::alice]"));
+        let status_ev = view.events.iter().find(|e| e.status.is_some()).unwrap();
+        let status_line = status_ev.status.as_ref().unwrap();
+        assert!(status_line.awaiting_acceptance);
+        assert_eq!(status_line.phase.as_deref(), Some("staging-verified"));
+
+        let req_msg = Action::Accept {
+            committee: c,
+            thread: Seq(10),
+        }
+        .request()
+        .unwrap();
+        match req_msg {
+            Request::Task {
+                status, as_person, ..
+            } => {
+                assert!(as_person);
+                assert_eq!(status.state, StatusState::Archived);
+                assert_eq!(status.reason.as_deref(), Some("Accepted and closed"));
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
     }
 }
