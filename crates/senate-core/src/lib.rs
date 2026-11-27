@@ -85,6 +85,7 @@ pub mod brief;
 pub mod chair;
 pub mod chat_sim;
 pub mod committee_seat;
+pub mod conference;
 pub mod continuity;
 pub mod docket;
 pub mod duty;
@@ -111,6 +112,16 @@ pub use brief::{Brief, BriefBuilder};
 pub use chair::{ChairFold, ChairPayload, ChairSource};
 pub use committee_seat::{
     ArchiveFold, CommitteeArchive, CommitteeSeatAction, CommitteeSeatChange, CommitteeSeats,
+};
+pub use conference::{
+    AdjournConferenceRequest, CONFERENCE_PREFIX, ConferenceActionItem, ConferenceDetail,
+    ConferenceId, ConferenceInvitePayload, ConferenceList, ConferenceReport,
+    ConferenceReportPayload, ConferenceRsvpAction, ConferenceSeatInput, ConferenceState,
+    ConferenceSummary, CreateConferenceRequest, FloorState, InvitedSeat, LinkedThread,
+    MAX_REPORT_ACTION_ITEMS, MAX_REPORT_DECISIONS, MAX_TOPIC_CHARS, PostConferenceEventRequest,
+    PostConferenceEventResponse, SeatStatus, conference_adjourn_path, conference_events_path,
+    conference_path, conference_rsvp_path, conference_start_path, conference_stream_path,
+    conferences_path, is_conference_stream,
 };
 pub use continuity::{
     AgentPresence, CheckpointFiles, CheckpointPayload, CheckpointRecord, CheckpointTrigger,

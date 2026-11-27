@@ -2079,6 +2079,52 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
+    ConferenceConvene {
+        #[serde(default)]
+        session: SessionSelector,
+        topic: String,
+        seats: Vec<senate_core::ConferenceSeatInput>,
+        #[serde(default)]
+        linked_threads: Vec<senate_core::LinkedThread>,
+    },
+    ConferenceList {
+        #[serde(default)]
+        session: SessionSelector,
+    },
+    ConferenceGet {
+        #[serde(default)]
+        session: SessionSelector,
+        id: senate_core::ConferenceId,
+    },
+    ConferenceRsvp {
+        #[serde(default)]
+        session: SessionSelector,
+        id: senate_core::ConferenceId,
+        action: senate_core::ConferenceRsvpAction,
+    },
+    ConferenceStart {
+        #[serde(default)]
+        session: SessionSelector,
+        id: senate_core::ConferenceId,
+    },
+    ConferencePost {
+        #[serde(default)]
+        session: SessionSelector,
+        id: senate_core::ConferenceId,
+        body: String,
+        #[serde(default)]
+        to: Vec<Address>,
+    },
+    ConferenceAdjourn {
+        #[serde(default)]
+        session: SessionSelector,
+        id: senate_core::ConferenceId,
+        summary: String,
+        #[serde(default)]
+        decisions: Vec<String>,
+        #[serde(default)]
+        action_items: Vec<senate_core::ConferenceActionItem>,
+    },
 }
 
 /// How far the person has seen one thread.
@@ -2600,6 +2646,8 @@ pub enum WatchEvent {
     /// This machine's hosted sessions changed: a host started or ended, or a
     /// permission prompt opened or closed in one. Read `sessions` again.
     Sessions,
+    /// A cross-committee conference was convened, updated, or adjourned.
+    ConferencesChanged,
     /// The watcher fell behind and missed `missed` events: read everything
     /// again.
     Lagged { missed: u64 },

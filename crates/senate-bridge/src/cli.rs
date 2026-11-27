@@ -9,6 +9,8 @@
 mod cli_chat;
 #[path = "cli_cleanup.rs"]
 mod cli_cleanup;
+#[path = "cli_conference.rs"]
+mod cli_conference;
 #[path = "cli_desk.rs"]
 mod cli_desk;
 #[path = "cli_help.rs"]
@@ -310,6 +312,8 @@ enum Cmd {
   senate chat send --committee refund-v2 \"ask bob's agent how long refunds take\"
   senate chat thread sim:01j… --wait")]
     Chat(cli_chat::Chat),
+    /// Convene and run cross-committee multi-party conferences.
+    Conference(cli_conference::Conference),
     /// The profile, Claude Code and Codex hooks, the daemon service.
     #[command(after_help = "Examples:
   senate setup install --yes          Register Senate with Claude Code and Codex
@@ -3774,6 +3778,7 @@ fn run(command: Cmd, output: Output) -> anyhow::Result<()> {
         Cmd::Desk(args) => cli_desk::run(args),
         Cmd::Cleanup(args) => cli_cleanup::run(args, output),
         Cmd::Chat(args) => cli_chat::run(args),
+        Cmd::Conference(args) => cli_conference::run(args),
         Cmd::DeskWorker { command } => {
             let paths = Paths::from_env()?;
             let command = match command {

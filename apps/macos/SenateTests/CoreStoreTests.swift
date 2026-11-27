@@ -181,7 +181,53 @@ import SenateCore
 
     @Test func theSidebarHeadsWithInboxApprovalsAndHistory() async throws {
         let store = store()
-        #expect(store.sections == [.inbox, .commissions, .approvals, .history])
+        #expect(store.sections == [.inbox, .commissions, .conferences, .approvals, .history])
+    }
+
+    @Test func conferencesOpenPostStartAndAdjournWithDeepLinks() async throws {
+        let store = store()
+        let confId = "conf-01testconference00000000"
+        let summary = ConferenceSummaryView(
+            id: confId, topic: "Release sync", convener: "[senator::alice]",
+            state: "convening", stateLabel: "Convening",
+            seats: [
+                ConferenceSeatView(target: "senate::chair", committee: "senate", status: "seated",
+                                   statusLabel: "Seated", participant: "[senator::bob]",
+                                   delegatedBy: nil, ephemeral: false),
+                ConferenceSeatView(target: "audit::chair", committee: "audit", status: "absent",
+                                   statusLabel: "Absent", participant: nil,
+                                   delegatedBy: nil, ephemeral: false),
+            ],
+            linkedThreadsCount: 0, round: 0, agentHopsRemaining: 1,
+            createdAt: Date(), adjournedAt: nil, report: nil
+        )
+        core.conferences[confId] = ConferenceDetailView(summary: summary, events: [])
+        var s = online()
+        s.conferences = [summary]
+        core.push(s)
+        try await until(store) { $0.state.conferences.count == 1 }
+        #expect(store.count(.conferences) == 1)
+
+        // Deep link `senate://conference/<id>` routes to `.conference(id)`.
+        let parsed = parseAppLink(url: "senate://conference/\(confId)")
+        #expect(parsed?.route == .conference(id: confId))
+
+        await store.loadConference(confId)
+        #expect(store.conference?.summary.state == nil) // requires place == .conference(confId)
+        store.select(.conference(confId))
+        try await until(store) { $0.conference?.summary.id == confId }
+
+        await store.startConference(confId)
+        #expect(store.conference?.summary.state == "in_session")
+
+        store.conferenceDrafts[confId] = "Ready to ship"
+        await store.sendConferenceMessage(confId)
+        #expect(store.conferenceDrafts[confId] == nil)
+        #expect(store.conference?.events.last?.body == "Ready to ship")
+
+        await store.adjournConference(confId, summary: "Shipped v2", decisions: ["Freeze API"])
+        #expect(store.conference?.summary.state == "adjourned")
+        #expect(store.conference?.summary.report?.summary == "Shipped v2")
     }
 
     @Test func commissionsCountExcludesInProgressAndOpensAuthoritativeThread() async throws {

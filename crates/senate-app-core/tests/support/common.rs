@@ -355,6 +355,7 @@ pub struct World {
     pub hold_says: bool,
     /// Roots of threads that are settled: readable, in no inbox.
     pub settled: Vec<u64>,
+    pub conferences: Vec<senate_core::ConferenceDetail>,
 }
 
 /// One step of a watched timeline: an item appended, or one replaced in
@@ -406,6 +407,7 @@ impl World {
             archived: Vec::new(),
             hold_says: false,
             settled: Vec::new(),
+            conferences: Vec::new(),
         }
     }
 }
@@ -1404,6 +1406,82 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
         Request::ObserveAdmin {
             command: senate_observe::AdminRequest::SeatIdentity { id, committee: c },
         } => Reply::ok(&(id == FAKE_SEAT && c == committee()).then(|| path("claude"))),
+        Request::ConferenceList { .. } => Reply::ok(&senate_core::ConferenceList {
+            conferences: w.conferences.iter().map(|c| c.summary.clone()).collect(),
+        }),
+        Request::ConferenceGet { id, .. } => {
+            match w.conferences.iter().find(|c| c.summary.id == id) {
+                Some(detail) => Reply::ok(detail),
+                None => Reply::err(IpcError::new("not_found", format!("no conference {id}"))),
+            }
+        }
+        Request::ConferenceStart { id, .. } => {
+            if let Some(detail) = w.conferences.iter_mut().find(|c| c.summary.id == id) {
+                detail.summary.state = senate_core::ConferenceState::InSession;
+                Reply::ok(&detail.summary)
+            } else {
+                Reply::err(IpcError::new("not_found", format!("no conference {id}")))
+            }
+        }
+        Request::ConferencePost { id, body, .. } => {
+            let from = Address::senior(&w.status.person);
+            if let Some(detail) = w.conferences.iter_mut().find(|c| c.summary.id == id) {
+                if detail.summary.state == senate_core::ConferenceState::Adjourned {
+                    Reply::err(IpcError::new(
+                        "conflict",
+                        format!("conference {id} is adjourned"),
+                    ))
+                } else {
+                    let seq = Seq((detail.events.len() as u64) + 1);
+                    let event = Event {
+                        seq,
+                        committee: detail.summary.id.as_committee_id(),
+                        id: EventId::new(),
+                        ts: Utc::now(),
+                        kind: Kind::Note,
+                        from,
+                        to: Vec::new(),
+                        thread: None,
+                        on_behalf_of: None,
+                        source: None,
+                        body,
+                        refs: None,
+                        mirror: None,
+                        meta: Default::default(),
+                    };
+                    detail.events.push(event.clone());
+                    detail.summary.floor.round += 1;
+                    Reply::ok(&senate_core::PostConferenceEventResponse {
+                        event,
+                        duplicate: false,
+                        floor: detail.summary.floor.clone(),
+                        push_targets: Vec::new(),
+                    })
+                }
+            } else {
+                Reply::err(IpcError::new("not_found", format!("no conference {id}")))
+            }
+        }
+        Request::ConferenceAdjourn {
+            id,
+            summary,
+            decisions,
+            action_items,
+            ..
+        } => {
+            if let Some(detail) = w.conferences.iter_mut().find(|c| c.summary.id == id) {
+                detail.summary.state = senate_core::ConferenceState::Adjourned;
+                detail.summary.adjourned_at = Some(Utc::now());
+                detail.summary.report = Some(senate_core::ConferenceReport {
+                    summary,
+                    decisions,
+                    action_items,
+                });
+                Reply::ok(&detail.summary)
+            } else {
+                Reply::err(IpcError::new("not_found", format!("no conference {id}")))
+            }
+        }
         other => Reply::err(IpcError::bad_request(format!("fake: {other:?}"))),
     }
 }

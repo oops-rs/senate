@@ -54,7 +54,9 @@ use crate::registry;
 use crate::rules::check_may_change_state;
 use crate::seats::Seats;
 
+mod conference;
 mod secretary_work;
+pub(crate) use conference::ConferenceError;
 pub(crate) use secretary_work::SecretaryWorkError;
 
 /// Capacity of the process-wide broadcast behind [`Hub::subscribe`]. A
@@ -110,6 +112,7 @@ pub struct ServerHub {
     notes: Vec<String>,
     children: RwLock<BTreeMap<Name, ChildSenate>>,
     aliases: tokio::sync::RwLock<CommitteeAliases>,
+    conference_gate: tokio::sync::Mutex<()>,
     secretary_updates: tokio::sync::Mutex<()>,
     secretary_gate: tokio::sync::Mutex<()>,
     senate: Name,
@@ -298,6 +301,7 @@ impl ServerHub {
             notes,
             children: RwLock::new(children),
             aliases: tokio::sync::RwLock::new(aliases),
+            conference_gate: tokio::sync::Mutex::new(()),
             secretary_updates: tokio::sync::Mutex::new(()),
             secretary_gate: tokio::sync::Mutex::new(()),
             senate,
@@ -1771,7 +1775,9 @@ impl Hub for ServerHub {
     }
 
     async fn committees(&self) -> Result<Vec<CommitteeId>, HubError> {
-        self.store.committees().await.map_err(log_error)
+        let mut committees = self.store.committees().await.map_err(log_error)?;
+        committees.retain(|committee| !senate_core::is_conference_stream(committee));
+        Ok(committees)
     }
 
     async fn roster(&self) -> Result<Roster, HubError> {

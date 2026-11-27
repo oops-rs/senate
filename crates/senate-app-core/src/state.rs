@@ -13,8 +13,9 @@ use senate_bridge::approvals::Approval;
 use senate_bridge::ipc::{SenateDocket, SessionRow, StatusReply, StreamState};
 use senate_bridge::session::Runtime;
 use senate_core::{
-    Address, Awaiting, CommissionBucket, DocketItem, Kind, Locale, Mention, SenatorName,
-    SpeakerSeat, ThreadSummary,
+    Address, Awaiting, CommissionBucket, ConferenceActionItem, ConferenceReport, ConferenceState,
+    ConferenceSummary, DocketItem, Kind, Locale, Mention, SeatStatus, SenatorName, SpeakerSeat,
+    ThreadSummary,
 };
 use serde::Serialize;
 
@@ -58,8 +59,187 @@ pub struct AppState {
     pub counts: Counts,
     /// Explicit opt-in receiver bypass for cross-committee execution authorization.
     pub unsafe_ignore_execution_auth: bool,
+    /// Cross-committee multi-party conferences visible to the user.
+    pub conferences: Vec<ConferenceSummaryView>,
     /// The last failed action or read.
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ConferenceSeatView {
+    pub target: String,
+    pub committee: Option<String>,
+    pub status: String,
+    pub status_label: String,
+    pub participant: Option<String>,
+    pub delegated_by: Option<String>,
+    pub ephemeral: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ConferenceActionItemView {
+    pub description: String,
+    pub owner: Option<String>,
+    pub committee: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ConferenceReportView {
+    pub summary: String,
+    pub decisions: Vec<String>,
+    pub action_items: Vec<ConferenceActionItemView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ConferenceSummaryView {
+    pub id: String,
+    pub topic: String,
+    pub convener: String,
+    pub state: String,
+    pub state_label: String,
+    pub seats: Vec<ConferenceSeatView>,
+    pub linked_threads_count: u32,
+    pub round: u64,
+    pub agent_hops_remaining: u8,
+    pub created_at: SystemTime,
+    pub adjourned_at: Option<SystemTime>,
+    pub report: Option<ConferenceReportView>,
+}
+
+pub(crate) fn conference_summary_view(
+    conf: &ConferenceSummary,
+    locale: Locale,
+) -> ConferenceSummaryView {
+    let (state, state_label) = match conf.state {
+        ConferenceState::Convening => (
+            "convening".to_owned(),
+            match locale {
+                Locale::Zh => "召集中",
+                Locale::En => "Convening",
+            }
+            .to_owned(),
+        ),
+        ConferenceState::InSession => (
+            "in_session".to_owned(),
+            match locale {
+                Locale::Zh => "开会中",
+                Locale::En => "In Session",
+            }
+            .to_owned(),
+        ),
+        ConferenceState::Adjourned => (
+            "adjourned".to_owned(),
+            match locale {
+                Locale::Zh => "已散会",
+                Locale::En => "Adjourned",
+            }
+            .to_owned(),
+        ),
+    };
+    let seats = conf
+        .seats
+        .iter()
+        .map(|s| match &s.status {
+            SeatStatus::Pending => ConferenceSeatView {
+                target: s.target.to_string(),
+                committee: s.committee.as_ref().map(ToString::to_string),
+                status: "pending".to_owned(),
+                status_label: match locale {
+                    Locale::Zh => "待入席",
+                    Locale::En => "Pending",
+                }
+                .to_owned(),
+                participant: None,
+                delegated_by: None,
+                ephemeral: false,
+            },
+            SeatStatus::Absent => ConferenceSeatView {
+                target: s.target.to_string(),
+                committee: s.committee.as_ref().map(ToString::to_string),
+                status: "absent".to_owned(),
+                status_label: match locale {
+                    Locale::Zh => "缺席",
+                    Locale::En => "Absent",
+                }
+                .to_owned(),
+                participant: None,
+                delegated_by: None,
+                ephemeral: false,
+            },
+            SeatStatus::Seated {
+                participant,
+                delegated_by,
+                ephemeral,
+            } => {
+                let is_del = delegated_by.is_some();
+                let (status, status_label) = if is_del {
+                    (
+                        "delegate".to_owned(),
+                        match (locale, *ephemeral) {
+                            (Locale::Zh, true) => "临时代表",
+                            (Locale::Zh, false) => "代表",
+                            (Locale::En, true) => "Ephemeral Delegate",
+                            (Locale::En, false) => "Delegate",
+                        }
+                        .to_owned(),
+                    )
+                } else {
+                    (
+                        "seated".to_owned(),
+                        match locale {
+                            Locale::Zh => "已入席",
+                            Locale::En => "Seated",
+                        }
+                        .to_owned(),
+                    )
+                };
+                ConferenceSeatView {
+                    target: s.target.to_string(),
+                    committee: s.committee.as_ref().map(ToString::to_string),
+                    status,
+                    status_label,
+                    participant: Some(participant.in_text()),
+                    delegated_by: delegated_by.as_ref().map(Address::in_text),
+                    ephemeral: *ephemeral,
+                }
+            }
+        })
+        .collect();
+    let report = conf.report.as_ref().map(conference_report_view);
+    ConferenceSummaryView {
+        id: conf.id.to_string(),
+        topic: conf.topic.clone(),
+        convener: conf.convener.in_text(),
+        state,
+        state_label,
+        seats,
+        linked_threads_count: count(conf.linked_threads.len()),
+        round: conf.floor.round,
+        agent_hops_remaining: conf.floor.agent_hops_remaining,
+        created_at: conf.created_at.into(),
+        adjourned_at: conf.adjourned_at.map(Into::into),
+        report,
+    }
+}
+
+fn conference_report_view(report: &ConferenceReport) -> ConferenceReportView {
+    ConferenceReportView {
+        summary: report.summary.clone(),
+        decisions: report.decisions.clone(),
+        action_items: report
+            .action_items
+            .iter()
+            .map(conference_action_item_view)
+            .collect(),
+    }
+}
+
+fn conference_action_item_view(item: &ConferenceActionItem) -> ConferenceActionItemView {
+    ConferenceActionItemView {
+        description: item.description.clone(),
+        owner: item.owner.as_ref().map(Address::in_text),
+        committee: item.committee.as_ref().map(ToString::to_string),
+    }
 }
 
 /// One hosted session: a terminal this machine runs for a senator.
@@ -601,6 +781,15 @@ impl AppState {
             },
             counts,
             unsafe_ignore_execution_auth: status.is_some_and(|s| s.unsafe_ignore_execution_auth),
+            conferences: if model.online {
+                model
+                    .conferences
+                    .iter()
+                    .map(|c| conference_summary_view(c, locale))
+                    .collect()
+            } else {
+                Vec::new()
+            },
             last_error: model.last_error.as_ref().map(|f| f.text(locale)),
         }
     }

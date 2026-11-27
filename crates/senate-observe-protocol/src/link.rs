@@ -31,6 +31,7 @@ pub enum Target {
     History,
     HistoryEntry(String),
     Profile,
+    Conference(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +138,13 @@ impl FromStr for AppLink {
                 Target::HistoryEntry(id)
             }
             ["profile"] => Target::Profile,
+            ["conference", id] => {
+                let id = read_slug(id)?;
+                if !id.starts_with("conf-") || id.len() <= "conf-".len() {
+                    return Err(InvalidLink);
+                }
+                Target::Conference(id)
+            }
             _ => return Err(InvalidLink),
         };
         Ok(Self { target, senate })
@@ -162,6 +170,7 @@ impl fmt::Display for AppLink {
             Target::History => formatter.write_str("history")?,
             Target::HistoryEntry(value) => write!(formatter, "history/{}", encoded(value))?,
             Target::Profile => formatter.write_str("profile")?,
+            Target::Conference(value) => write!(formatter, "conference/{}", encoded(value))?,
         }
         if let Some(senate) = &self.senate {
             write!(formatter, "?senate={}", encoded(senate))?;

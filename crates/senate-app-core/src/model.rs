@@ -58,6 +58,8 @@ pub enum Refresh {
     /// `docket`: what awaits the Speaker of every Senate one of the
     /// person's agents presides over. Does nothing when none does.
     Docket,
+    /// Multi-party cross-committee conferences.
+    Conferences,
 }
 
 /// Something the user should be told about outside the window.
@@ -200,6 +202,7 @@ pub struct Model {
     pub sessions: Option<SessionsReply>,
     pub last_error: Option<Failure>,
     pub roster: Vec<senate_bridge::ipc::RosterCommittee>,
+    pub conferences: Vec<senate_core::ConferenceSummary>,
     /// Approvals already notified about, so a reconnect does not repeat them.
     notified: BTreeSet<String>,
     /// Hosted prompts already notified about, by session and when it opened.
@@ -251,6 +254,7 @@ impl Model {
         self.last_error = None;
         self.approvals.clear();
         self.sessions = None;
+        self.conferences.clear();
     }
 
     /// The daemon cannot be reached (or the stream broke).
@@ -287,6 +291,7 @@ impl Model {
                 fx.refresh.push(Refresh::Roster);
                 fx.refresh.push(Refresh::AllInboxes);
                 fx.refresh.push(Refresh::Docket);
+                fx.refresh.push(Refresh::Conferences);
                 // How agents are named (the driver reads them at most every
                 // few minutes).
                 fx.refresh.push(Refresh::Aliases);
@@ -312,6 +317,7 @@ impl Model {
             // What this machine's agents are comes with the next status.
             WatchEvent::Roles => fx.refresh.extend([Refresh::Roster, Refresh::Docket]),
             WatchEvent::Sessions => fx.refresh.push(Refresh::Sessions),
+            WatchEvent::ConferencesChanged => fx.refresh.push(Refresh::Conferences),
             WatchEvent::Inbox {
                 agent, committee, ..
             } => {
@@ -351,6 +357,7 @@ impl Model {
                 fx.refresh.push(Refresh::Approvals);
                 fx.refresh.push(Refresh::AllInboxes);
                 fx.refresh.push(Refresh::Docket);
+                fx.refresh.push(Refresh::Conferences);
             }
         }
         fx
@@ -392,6 +399,10 @@ impl Model {
             .into_iter()
             .map(|a| (a.id.clone(), a))
             .collect();
+    }
+
+    pub fn set_conferences(&mut self, list: senate_core::ConferenceList) {
+        self.conferences = list.conferences;
     }
 
     /// A read succeeded: forget its failure, if that is what the error bar
@@ -1081,6 +1092,7 @@ mod tests {
                 Refresh::Roster,
                 Refresh::AllInboxes,
                 Refresh::Docket,
+                Refresh::Conferences,
                 Refresh::Aliases,
                 Refresh::Sessions
             ]
@@ -1491,7 +1503,8 @@ mod tests {
                 Refresh::Sessions,
                 Refresh::Approvals,
                 Refresh::AllInboxes,
-                Refresh::Docket
+                Refresh::Docket,
+                Refresh::Conferences,
             ]
         );
     }

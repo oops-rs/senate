@@ -1083,7 +1083,14 @@ macro_rules! request_selector {
             | Request::Forward { session, .. }
             | Request::Refuse { session, .. }
             | Request::Terminal { session, .. }
-            | Request::SetChair { session, .. } => Some(session),
+            | Request::SetChair { session, .. }
+            | Request::ConferenceConvene { session, .. }
+            | Request::ConferenceList { session, .. }
+            | Request::ConferenceGet { session, .. }
+            | Request::ConferenceRsvp { session, .. }
+            | Request::ConferenceStart { session, .. }
+            | Request::ConferencePost { session, .. }
+            | Request::ConferenceAdjourn { session, .. } => Some(session),
             Request::RemoteControl { .. }
             | Request::ObserveAdmin { .. }
             | Request::DeskWorker { .. }

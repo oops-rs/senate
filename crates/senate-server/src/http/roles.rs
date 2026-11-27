@@ -23,7 +23,7 @@ use super::{
 /// it there. A senator carrying one could pass a message off as the
 /// desk's, or have the server relay a "Speaker's" answer into another
 /// committee's thread.
-const OFFICE_KEYS: [&str; 8] = [
+const OFFICE_KEYS: [&str; 12] = [
     meta::ACTED_BY,
     meta::ORIGIN,
     meta::FORWARDED_TO,
@@ -32,6 +32,10 @@ const OFFICE_KEYS: [&str; 8] = [
     meta::DESK_OUTCOME,
     meta::EXECUTION_AUTH,
     meta::RELAYED_EVENT_ID,
+    meta::CONFERENCE_ID,
+    meta::CONFERENCE_INVITE,
+    meta::CONFERENCE_REPORT,
+    meta::CONFERENCE_STATE,
 ];
 
 pub(super) fn reject_office_keys(event: &NewEvent, sender: Sender) -> Result<(), ApiFailure> {

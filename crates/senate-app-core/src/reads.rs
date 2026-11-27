@@ -8,8 +8,27 @@ use std::time::SystemTime;
 use senate_bridge::ipc::{DeskItemDetail, DeskOutcome, ThreadReply};
 use senate_core::{Address, Event, Locale, Name};
 
-use crate::state::ArtifactItem;
+use crate::state::{ArtifactItem, ConferenceSummaryView, conference_summary_view};
 use crate::text;
+
+/// A multi-party conference room and its isolated room transcript.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct ConferenceDetailView {
+    pub summary: ConferenceSummaryView,
+    pub events: Vec<ThreadEvent>,
+}
+
+pub(crate) fn conference_detail_view(
+    detail: senate_core::ConferenceDetail,
+    person: Option<&Name>,
+    locale: Locale,
+) -> ConferenceDetailView {
+    let me = person.map(Address::senior);
+    ConferenceDetailView {
+        summary: conference_summary_view(&detail.summary, locale),
+        events: thread_events(&detail.events, me.as_ref(), locale),
+    }
+}
 
 /// One thread, root first.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]

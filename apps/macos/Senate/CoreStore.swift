@@ -23,7 +23,7 @@ final class CoreStore {
     /// The window's fixed pages. Inbox and Approvals head the sidebar;
     /// Senates opens from the account menu at its foot.
     enum Section: String, CaseIterable, Hashable {
-        case inbox, commissions, approvals, senates, history
+        case inbox, commissions, conferences, approvals, senates, history
     }
 
     /// What the window shows: a page, a thread, a session, a committee.
@@ -35,6 +35,8 @@ final class CoreStore {
         case session(String)
         /// A committee's page, by name.
         case committee(String)
+        /// A multi-party cross-committee conference room, by `conf-<ulid>`.
+        case conference(String)
         /// The machine's default secretary: its session's page once it runs.
         case secretary
         /// An installed scene, by its identity: the Senate's activity as
@@ -101,6 +103,11 @@ final class CoreStore {
     /// The open thread as last read, and a failure to read it.
     private(set) var thread: ThreadView?
     private(set) var threadError: String?
+    /// The open conference room as last read, and a failure to read it.
+    private(set) var conference: ConferenceDetailView?
+    private(set) var conferenceError: String?
+    /// Unsent drafts for conference rooms, keyed by conference id.
+    var conferenceDrafts: [String: String] = [:]
     /// The open session's conversation, as read and followed.
     var timeline: SessionTimeline?
     /// Notes sent to a session from its composer, by session id, not yet
@@ -443,6 +450,11 @@ final class CoreStore {
             Task { await loadThread(committee: String(key[..<colon]), root: root) }
         }
         if case let .thread(key) = place, unreadShown != key { threads.markSeen(key) }
+        if case let .conference(id) = place {
+            conferenceError = nil
+            if conference?.summary.id != id { conference = nil }
+            Task { await loadConference(id) }
+        }
         if old != place { syncTimeline() }
     }
 
@@ -490,7 +502,7 @@ final class CoreStore {
     }
 
     /// The fixed pages at the head of the sidebar.
-    var sections: [Section] { [.inbox, .commissions, .approvals, .history] }
+    var sections: [Section] { [.inbox, .commissions, .conferences, .approvals, .history] }
 
     /// What waits in a section, for its badge: the threads for you (not
     /// those to decide), sponsored commissions needing attention or unread, and everything waiting for a yes or a no.
@@ -498,6 +510,7 @@ final class CoreStore {
         switch section {
         case .inbox: inboxThreads.count
         case .commissions: state.commissions.filter { $0.bucket != "in_progress" }.count
+        case .conferences: state.conferences.filter { $0.state != "adjourned" }.count
         case .approvals: approvalsCount
         case .senates, .history: 0
         }
@@ -540,6 +553,9 @@ final class CoreStore {
             Task { await refreshSecretary() }
         }
         if case .secretary = place { syncTimeline() }
+        if case let .conference(id) = place {
+            Task { await loadConference(id) }
+        }
     }
 
     // MARK: The default secretary
@@ -856,6 +872,51 @@ final class CoreStore {
         }
     }
 
+    func loadConference(_ id: String) async {
+        guard let core else { return }
+        do {
+            let detail = try await core.conferenceDetail(id: id)
+            guard case let .conference(current) = place, current == id else { return }
+            conference = detail
+            conferenceError = nil
+        } catch {
+            guard case let .conference(current) = place, current == id else { return }
+            conferenceError = describe(error)
+        }
+    }
+
+    func startConference(_ id: String) async {
+        await run("conf:\(id)") { core in
+            _ = try await core.startConference(id: id)
+        }
+        await loadConference(id)
+    }
+
+    func sendConferenceMessage(_ id: String) async {
+        let body = conferenceDrafts[id] ?? ""
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            actionError = L("error.empty_reply")
+            return
+        }
+        var updated: ConferenceDetailView?
+        let ok = await run("conf:\(id)") { core in
+            updated = try await core.postConferenceMessage(id: id, body: body)
+        }
+        if ok {
+            conferenceDrafts[id] = nil
+            if let updated { conference = updated }
+        }
+    }
+
+    func adjournConference(_ id: String, summary: String, decisions: [String]) async {
+        let ok = await run("conf:\(id)") { core in
+            _ = try await core.adjournConference(id: id, summary: summary, decisions: decisions)
+        }
+        if ok {
+            await loadConference(id)
+        }
+    }
+
     func decide(_ approval: ApprovalRequest, _ decision: ApprovalDecision) async {
         await run("approval:\(approval.id)") { core in
             try await core.approve(id: approval.id, decision: decision)
@@ -1082,9 +1143,12 @@ extension AppState {
         groups: [],
         counts: Counts(threads: 0, approvals: 0, codex: 0, docket: 0, prompts: 0, forPerson: 0, pending: 0),
         unsafeIgnoreExecutionAuth: false,
+        conferences: [],
         lastError: nil
     )
 }
+
+extension ConferenceSummaryView: @retroactive Identifiable {}
 
 extension InboxThread {
     /// A thread that is in no inbox, as its read says: its title, kind and

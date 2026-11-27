@@ -25,6 +25,7 @@ mod boundary;
 mod chat_sim;
 mod child_offline;
 mod cleanup;
+mod conference;
 mod continuity;
 mod criteria;
 mod decisions;

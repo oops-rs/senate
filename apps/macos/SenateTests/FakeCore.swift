@@ -356,6 +356,73 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     func watchTerminal() -> TerminalCommand {
         TerminalCommand(argv: [], cwd: nil, shellLine: "", appleScript: "")
     }
+
+    var conferences: [String: ConferenceDetailView] = [:]
+
+    func listConferences() async throws -> [ConferenceSummaryView] {
+        try record("conferences-list")
+        return conferences.values.map(\.summary)
+    }
+
+    func conferenceDetail(id: String) async throws -> ConferenceDetailView {
+        try record("conference-detail \(id)")
+        guard let detail = conferences[id] else {
+            throw CoreError.Failed(message: "no conference \(id)")
+        }
+        return detail
+    }
+
+    func conveneConference(topic: String, seats: [String]) async throws -> ConferenceSummaryView {
+        try record("conference-convene \(topic)")
+        let id = "conf-01fake000000000000000000"
+        let summary = ConferenceSummaryView(
+            id: id, topic: topic, convener: "[senator::alice]", state: "convening", stateLabel: "Convening",
+            seats: seats.map {
+                ConferenceSeatView(target: $0, committee: nil, status: "pending", statusLabel: "Pending",
+                                   participant: nil, delegatedBy: nil, ephemeral: false)
+            },
+            linkedThreadsCount: 0, round: 0, agentHopsRemaining: 1, createdAt: Date(), adjournedAt: nil, report: nil)
+        conferences[id] = ConferenceDetailView(summary: summary, events: [])
+        return summary
+    }
+
+    func startConference(id: String) async throws -> ConferenceSummaryView {
+        try record("conference-start \(id)")
+        guard var detail = conferences[id] else {
+            throw CoreError.Failed(message: "no conference \(id)")
+        }
+        detail.summary.state = "in_session"
+        detail.summary.stateLabel = "In Session"
+        conferences[id] = detail
+        return detail.summary
+    }
+
+    func postConferenceMessage(id: String, body: String) async throws -> ConferenceDetailView {
+        try record("conference-post \(id) \(body)")
+        guard var detail = conferences[id] else {
+            throw CoreError.Failed(message: "no conference \(id)")
+        }
+        let seq = UInt64(detail.events.count + 1)
+        detail.events.append(ThreadEvent(
+            seq: seq, kind: "note", kindLabel: "Note", by: "[senator::alice]", via: nil,
+            to: [], body: body, at: Date(), mine: true, status: nil,
+            executionAuthBadge: nil, executionAuthMode: nil))
+        conferences[id] = detail
+        return detail
+    }
+
+    func adjournConference(id: String, summary: String, decisions: [String]) async throws -> ConferenceSummaryView {
+        try record("conference-adjourn \(id) \(summary)")
+        guard var detail = conferences[id] else {
+            throw CoreError.Failed(message: "no conference \(id)")
+        }
+        detail.summary.state = "adjourned"
+        detail.summary.stateLabel = "Adjourned"
+        detail.summary.adjournedAt = Date()
+        detail.summary.report = ConferenceReportView(summary: summary, decisions: decisions, actionItems: [])
+        conferences[id] = detail
+        return detail.summary
+    }
 }
 
 /// A thread waiting on alice (`forPerson`), or only on her agents.

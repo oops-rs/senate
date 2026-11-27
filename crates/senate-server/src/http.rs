@@ -3,6 +3,7 @@
 mod chair_discussion;
 mod chat_sim;
 mod committee_seat;
+mod conference;
 mod error;
 mod roles;
 mod secretary_work;
@@ -120,6 +121,16 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/v1/children/{name}/seats", put(roles::put_child_seats))
         .route("/v1/resolve", get(resolve))
+        .route(
+            "/v1/conferences",
+            get(conference::list).post(conference::create),
+        )
+        .route("/v1/conferences/{id}", get(conference::get))
+        .route("/v1/conferences/{id}/rsvp", post(conference::rsvp))
+        .route("/v1/conferences/{id}/start", post(conference::start))
+        .route("/v1/conferences/{id}/events", post(conference::post_event))
+        .route("/v1/conferences/{id}/stream", get(conference::stream))
+        .route("/v1/conferences/{id}/adjourn", post(conference::adjourn))
         .route(
             "/v1/committees/{committee}/chat/simulate",
             post(chat_sim::simulate),
@@ -383,7 +394,13 @@ impl AppState {
 }
 
 fn committee_id(raw: &str) -> Result<CommitteeId, ApiFailure> {
-    CommitteeId::new(raw).map_err(|e| ApiFailure::bad_request(e.to_string()))
+    let id = CommitteeId::new(raw).map_err(|e| ApiFailure::bad_request(e.to_string()))?;
+    if senate_core::is_conference_stream(&id) {
+        return Err(ApiFailure::forbidden(
+            "conference streams must be accessed via /v1/conferences/{id}",
+        ));
+    }
+    Ok(id)
 }
 
 fn committee_path(path: Result<Path<String>, PathRejection>) -> Result<CommitteeId, ApiFailure> {

@@ -843,6 +843,21 @@ pub mod meta {
     /// seat among the question's recipients, so the question stays open
     /// when the replaced seat is unseated instead of being closed as gone.
     pub const HANDED_TO: &str = "handed_to";
+    /// Identifier of a cross-committee [`ConferenceId`](crate::ConferenceId)
+    /// (`conf-<ulid>`), written by the server on conference room events,
+    /// committee invitations, and adjournment reports.
+    pub const CONFERENCE_ID: &str = "conference_id";
+    /// Invitation payload ([`ConferenceInvitePayload`](crate::ConferenceInvitePayload))
+    /// written by the server when notifying an invited committee chair.
+    pub const CONFERENCE_INVITE: &str = "conference_invite";
+    /// Adjournment conclusion ([`ConferenceReportPayload`](crate::ConferenceReportPayload))
+    /// written back by the server to each participating chair's committee and
+    /// every linked thread.
+    pub const CONFERENCE_REPORT: &str = "conference_report";
+    /// Lifecycle transition marker ([`ConferenceState`](crate::ConferenceState))
+    /// written by the server on conference state events (`convening`,
+    /// `in_session`, `adjourned`).
+    pub const CONFERENCE_STATE: &str = "conference_state";
 }
 
 fn flag(event: &Event, key: &str) -> bool {

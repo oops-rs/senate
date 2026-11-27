@@ -42,6 +42,9 @@ pub enum AppRoute {
         id: String,
     },
     Profile,
+    Conference {
+        id: String,
+    },
 }
 
 /// A link that passed the v1 grammar.
@@ -59,7 +62,12 @@ pub struct AppLinkRoute {
 /// `senate://intent/…` and every authority but `open`.
 #[uniffi::export]
 pub fn parse_app_link(url: String) -> Option<AppLinkRoute> {
-    let link: AppLink = url.parse().ok()?;
+    let normalized = if let Some(rest) = url.strip_prefix("senate://conference/") {
+        format!("senate://open/v1/conference/{rest}")
+    } else {
+        url
+    };
+    let link: AppLink = normalized.parse().ok()?;
     let route = match link.target().clone() {
         Target::Committee(name) => AppRoute::Committee { name },
         Target::Session(selector) => AppRoute::Session { selector },
@@ -78,6 +86,7 @@ pub fn parse_app_link(url: String) -> Option<AppLinkRoute> {
         Target::History => AppRoute::History,
         Target::HistoryEntry(id) => AppRoute::HistoryEntry { id },
         Target::Profile => AppRoute::Profile,
+        Target::Conference(id) => AppRoute::Conference { id },
     };
     Some(AppLinkRoute {
         route,
@@ -178,6 +187,18 @@ mod tests {
             Some(AppRoute::DeskItem {
                 committee: "senate".into(),
                 seq: 42
+            })
+        );
+        assert_eq!(
+            parse_app_link("senate://open/v1/conference/conf-01abc".into()).map(|p| p.route),
+            Some(AppRoute::Conference {
+                id: "conf-01abc".into()
+            })
+        );
+        assert_eq!(
+            parse_app_link("senate://conference/conf-01abc".into()).map(|p| p.route),
+            Some(AppRoute::Conference {
+                id: "conf-01abc".into()
             })
         );
     }

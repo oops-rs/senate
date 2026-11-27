@@ -63,14 +63,15 @@ pub use ffi::{
     TimelineListener, split_mentions,
 };
 pub use reads::{
-    DeskAction, DeskChoice, DeskItemView, DeskOutcomeKind, DeskOutcomeView, StatusLine, StatusLink,
-    StatusStep, ThreadEvent, ThreadView,
+    ConferenceDetailView, DeskAction, DeskChoice, DeskItemView, DeskOutcomeKind, DeskOutcomeView,
+    StatusLine, StatusLink, StatusStep, ThreadEvent, ThreadView,
 };
 pub use state::{
     AgentInfo, AppState, ApprovalRequest, ArtifactItem, ChairLine, ChildLine, ChildSeatLine,
-    CodexThreadInfo, CommissionThread, CommitteeLine, Counts, DocketCommittee, DocketEntry,
-    DocketSenate, HostedSession, InboxThread, LinkedDownstreamView, MenuState, RosterCommittee,
-    RosterMember, SeatLine, SenateInfo,
+    CodexThreadInfo, CommissionThread, CommitteeLine, ConferenceActionItemView,
+    ConferenceReportView, ConferenceSeatView, ConferenceSummaryView, Counts, DocketCommittee,
+    DocketEntry, DocketSenate, HostedSession, InboxThread, LinkedDownstreamView, MenuState,
+    RosterCommittee, RosterMember, SeatLine, SenateInfo,
 };
 pub use timeline::{
     EntryBody, SenateLine, TimelineDelta, TimelineEntry, TimelinePage, TodoLine, ToolCall,

@@ -246,7 +246,12 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
         Request::Ask { session, .. }
         | Request::Post { session, .. }
         | Request::Send { session, .. }
-        | Request::ChatSend { session, .. } => {
+        | Request::ChatSend { session, .. }
+        | Request::ConferenceConvene { session, .. }
+        | Request::ConferenceRsvp { session, .. }
+        | Request::ConferenceStart { session, .. }
+        | Request::ConferencePost { session, .. }
+        | Request::ConferenceAdjourn { session, .. } => {
             if session == &SessionSelector::default() {
                 PersonWrite
             } else {
@@ -356,6 +361,8 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
         | Request::SecretaryWork { .. }
         | Request::Roles
         | Request::Approvals
+        | Request::ConferenceList { .. }
+        | Request::ConferenceGet { .. }
         | Request::Checkpoint { .. } => SessionOrRead,
     }
 }

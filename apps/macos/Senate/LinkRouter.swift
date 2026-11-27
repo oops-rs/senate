@@ -179,6 +179,14 @@ final class LinkRouter {
         case .desk: return .shown(.section(.approvals))
         case .history: return .shown(.section(.history))
         case .profile: return .shown(.section(.senates))
+        case let .conference(id):
+            if store.state.conferences.contains(where: { $0.id == id }) {
+                return .shown(.conference(id))
+            }
+            guard let core = store.core, (try? await core.conferenceDetail(id: id)) != nil else {
+                return .unavailable
+            }
+            return .shown(.conference(id))
         case let .committee(name):
             return await knownCommittee(name, store: store) ? .shown(.committee(name)) : .unavailable
         case let .thread(committee, root):

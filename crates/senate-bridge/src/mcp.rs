@@ -708,6 +708,80 @@ pub struct SecretaryParams {
     pub secretary: Option<String>,
 }
 
+const CONFERENCE_CONVENE_DESC: &str = "Convene an asynchronous, isolated cross-committee conference room (`conf-<ulid>`) without calendar time slots or rescheduling. Invite committee chairs (`<committee>::chair`) or senators (`senator::<name>`), optionally linking originating task threads (`<committee>:<seq>`). Online chairs receive `ConferenceInvite`; offline chairs show as `Absent`.";
+const CONFERENCE_RSVP_DESC: &str = "Respond to a conference invitation as an invited seat holder: either `attend` in person or `delegate` to another senator (existing or `ephemeral: true` temporary delegate) with a scoped brief containing only the conference topic and your committee's summary. Transitions the conference to `in_session` automatically once all seats are `Seated`.";
+const CONFERENCE_POST_DESC: &str = "Post a discussion message inside an `in_session` conference room (`conf-<ulid>`). Subject to deterministic anti-loop `FloorState`: a human post opens a new round (`<= 1` turn per seated agent), while agent `@mention` pushes consume the single round hop budget (`agent_hops_remaining`) until the human speaks again.";
+const CONFERENCE_READ_DESC: &str = "List conferences you participate in (when `id` is omitted) or read full conference seat status, `FloorState`, report, and isolated room events for one `conference_id` (`conf-<ulid>`). Non-participants and unrelated delegates are strictly refused.";
+const CONFERENCE_ADJOURN_DESC: &str = "Adjourn an active conference, locking its room stream read-only (`409 Conflict` on further posts) and publishing a structured `ConferenceReport` (`summary`, `decisions`, `action_items`) back to every participating chair's committee, linked threads, and ephemeral delegates.";
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ConferenceConveneParams {
+    /// Short topic for the cross-committee conference.
+    pub topic: String,
+    /// Invited seats (`senate::chair`, `commons::chair`, `senator::<name>`).
+    pub seats: Vec<String>,
+    /// Optional linked task threads formatted as `<committee>:<seq>`.
+    #[serde(default)]
+    pub linked_threads: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ConferenceRsvpParams {
+    /// Conference identifier (`conf-<ulid>`).
+    pub id: String,
+    /// `attend` or `delegate`.
+    pub action: String,
+    /// Optional invited seat target (`<committee>::chair`).
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Required when `action == "delegate"`: senator name or `senator::<name>`.
+    #[serde(default)]
+    pub senator: Option<String>,
+    /// Scoped delegation instruction (only passed for this conference).
+    #[serde(default)]
+    pub brief: Option<String>,
+    /// Whether the delegate was spawned strictly for this conference.
+    #[serde(default)]
+    pub ephemeral: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ConferencePostParams {
+    /// Conference identifier (`conf-<ulid>`).
+    pub id: String,
+    /// Message text inside the conference room.
+    pub body: String,
+    /// Optional explicit recipients (`[senator::<name>]` or `<name>`).
+    #[serde(default)]
+    pub to: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ConferenceReadParams {
+    /// Conference identifier (`conf-<ulid>`). Omit to list visible conferences.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct ConferenceAdjournParams {
+    /// Conference identifier (`conf-<ulid>`).
+    pub id: String,
+    /// Concise summary of conclusions reached.
+    pub summary: String,
+    /// Confirmed or agreed decisions.
+    #[serde(default)]
+    pub decisions: Vec<String>,
+    /// Action items recorded for follow-up.
+    #[serde(default)]
+    pub action_items: Vec<String>,
+}
+
 const CHECKPOINT: &str = "Leave a checkpoint on this session's Senate committee: a handover note \
 that outlives this laptop, so the Speaker can answer teammates' questions for you while you are \
 away and whoever picks the work up knows where it stands. Keep three Markdown files current in \
@@ -3326,6 +3400,186 @@ impl SenateMcp {
         Ok(render_checkpoint(&reply, push, self.locale))
     }
 
+    #[tool(name = "conference_convene", description = CONFERENCE_CONVENE_DESC)]
+    async fn conference_convene(
+        &self,
+        params: Parameters<ConferenceConveneParams>,
+    ) -> Result<String, String> {
+        let p = params.0;
+        let seats = p
+            .seats
+            .into_iter()
+            .map(|s| {
+                senate_core::Locator::parse_short(&s)
+                    .map(|target| senate_core::ConferenceSeatInput { target })
+                    .map_err(|e| e.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let linked_threads = p
+            .linked_threads
+            .into_iter()
+            .map(|raw| {
+                let (c, seq) = raw
+                    .split_once(':')
+                    .ok_or_else(|| format!("linked thread must be <committee>:<seq>: {raw:?}"))?;
+                let committee = CommitteeId::new(c).map_err(|e| e.to_string())?;
+                let root: u64 = seq.parse().map_err(|e| format!("bad seq {seq:?}: {e}"))?;
+                Ok(senate_core::LinkedThread {
+                    committee,
+                    root: Seq(root),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let reply: senate_core::ConferenceSummary = self
+            .call(&Request::ConferenceConvene {
+                session: self.selector.clone(),
+                topic: p.topic,
+                seats,
+                linked_threads,
+            })
+            .await
+            .map_err(|e| describe(e, self.locale))?;
+        serde_json::to_string_pretty(&reply).map_err(|e| e.to_string())
+    }
+
+    #[tool(name = "conference_rsvp", description = CONFERENCE_RSVP_DESC)]
+    async fn conference_rsvp(
+        &self,
+        params: Parameters<ConferenceRsvpParams>,
+    ) -> Result<String, String> {
+        let p = params.0;
+        let id =
+            p.id.parse::<senate_core::ConferenceId>()
+                .map_err(|e| e.to_string())?;
+        let target = p
+            .target
+            .as_deref()
+            .map(senate_core::Locator::parse_short)
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let action = match p.action.trim().to_ascii_lowercase().as_str() {
+            "attend" => senate_core::ConferenceRsvpAction::Attend {
+                target,
+                participant: None,
+            },
+            "delegate" => {
+                let raw = p.senator.as_deref().ok_or_else(|| {
+                    "`senator` is required when action is \"delegate\"".to_owned()
+                })?;
+                let del = parse_senator(raw)?;
+                senate_core::ConferenceRsvpAction::Delegate {
+                    target,
+                    senator: Address::senator(&del),
+                    delegated_by: None,
+                    brief: p.brief,
+                    ephemeral: p.ephemeral,
+                }
+            }
+            other => {
+                return Err(format!(
+                    "unknown conference RSVP action {other:?} (expected \"attend\" or \"delegate\")"
+                ));
+            }
+        };
+        let reply: senate_core::ConferenceSummary = self
+            .call(&Request::ConferenceRsvp {
+                session: self.selector.clone(),
+                id,
+                action,
+            })
+            .await
+            .map_err(|e| describe(e, self.locale))?;
+        serde_json::to_string_pretty(&reply).map_err(|e| e.to_string())
+    }
+
+    #[tool(name = "conference_post", description = CONFERENCE_POST_DESC)]
+    async fn conference_post(
+        &self,
+        params: Parameters<ConferencePostParams>,
+    ) -> Result<String, String> {
+        let p = params.0;
+        let id =
+            p.id.parse::<senate_core::ConferenceId>()
+                .map_err(|e| e.to_string())?;
+        let to =
+            p.to.into_iter()
+                .map(|raw| parse_senator(&raw).map(|s| Address::senator(&s)))
+                .collect::<Result<Vec<_>, _>>()?;
+        let reply: senate_core::PostConferenceEventResponse = self
+            .call(&Request::ConferencePost {
+                session: self.selector.clone(),
+                id,
+                body: p.body,
+                to,
+            })
+            .await
+            .map_err(|e| describe(e, self.locale))?;
+        serde_json::to_string_pretty(&reply).map_err(|e| e.to_string())
+    }
+
+    #[tool(name = "conference_read", description = CONFERENCE_READ_DESC)]
+    async fn conference_read(
+        &self,
+        params: Parameters<ConferenceReadParams>,
+    ) -> Result<String, String> {
+        let p = params.0;
+        match p.id {
+            Some(raw) => {
+                let id = raw
+                    .parse::<senate_core::ConferenceId>()
+                    .map_err(|e| e.to_string())?;
+                let detail: senate_core::ConferenceDetail = self
+                    .call(&Request::ConferenceGet {
+                        session: self.selector.clone(),
+                        id,
+                    })
+                    .await
+                    .map_err(|e| describe(e, self.locale))?;
+                serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())
+            }
+            None => {
+                let list: senate_core::ConferenceList = self
+                    .call(&Request::ConferenceList {
+                        session: self.selector.clone(),
+                    })
+                    .await
+                    .map_err(|e| describe(e, self.locale))?;
+                serde_json::to_string_pretty(&list).map_err(|e| e.to_string())
+            }
+        }
+    }
+
+    #[tool(name = "conference_adjourn", description = CONFERENCE_ADJOURN_DESC)]
+    async fn conference_adjourn(
+        &self,
+        params: Parameters<ConferenceAdjournParams>,
+    ) -> Result<String, String> {
+        let p = params.0;
+        let id =
+            p.id.parse::<senate_core::ConferenceId>()
+                .map_err(|e| e.to_string())?;
+        let action_items = p
+            .action_items
+            .into_iter()
+            .map(|description| senate_core::ConferenceActionItem {
+                description,
+                owner: None,
+                committee: None,
+            })
+            .collect();
+        let reply: senate_core::ConferenceSummary = self
+            .call(&Request::ConferenceAdjourn {
+                session: self.selector.clone(),
+                id,
+                summary: p.summary,
+                decisions: p.decisions,
+                action_items,
+            })
+            .await
+            .map_err(|e| describe(e, self.locale))?;
+        serde_json::to_string_pretty(&reply).map_err(|e| e.to_string())
+    }
+
     /// The brief of `committee` (else the session's committee) as Markdown,
     /// in the bridge's locale.
     pub async fn brief_markdown(&self, committee: Option<CommitteeId>) -> Result<String, String> {
@@ -4341,6 +4595,11 @@ mod tests {
                 "chair_escalate",
                 "chair_route",
                 "checkpoint",
+                "conference_adjourn",
+                "conference_convene",
+                "conference_post",
+                "conference_read",
+                "conference_rsvp",
                 "duty",
                 "escalate",
                 "inbox",

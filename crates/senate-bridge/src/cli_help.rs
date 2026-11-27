@@ -30,7 +30,16 @@ const GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Speak as yourself",
-        &["ask", "tell", "request", "reply", "take", "desk", "chat"],
+        &[
+            "ask",
+            "tell",
+            "request",
+            "reply",
+            "take",
+            "desk",
+            "chat",
+            "conference",
+        ],
     ),
     ("This worktree", &["join", "leave", "where"]),
     (

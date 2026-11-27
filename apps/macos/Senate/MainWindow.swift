@@ -56,6 +56,8 @@ struct MainWindow: View {
             if let s = store.session(id) { return s.displayName }
         case let .committee(name):
             return name.isEmpty ? L("sidebar.no_committee") : name
+        case let .conference(id):
+            return store.state.conferences.first(where: { $0.id == id })?.topic ?? L("tab.conferences")
         case .section(.senates):
             return store.state.person ?? Section.senates.title
         case let .section(section):
@@ -120,6 +122,8 @@ struct MainWindow: View {
             case let .past(id): PastSessionPage(store: store, sessionId: id)
             case .item, .section(.inbox): InboxView(store: store)
             case .section(.commissions): CommissionsView(store: store)
+            case .section(.conferences): ConferencesView(store: store)
+            case let .conference(id): ConferenceRoomView(store: store, id: id).id(id)
             case .section(.approvals): ApprovalsView(store: store)
             case let .desk(item): DeskEntryDetail(store: store, item: item).id(item.id)
             case .section(.senates): SenatesView(store: store)
@@ -505,6 +509,7 @@ extension CoreStore.Section {
         switch self {
         case .inbox: L("tab.inbox")
         case .commissions: L("tab.commissions")
+        case .conferences: L("tab.conferences")
         case .approvals: L("tab.approvals")
         case .senates: L("tab.profile")
         case .history: L("tab.history")
@@ -515,6 +520,7 @@ extension CoreStore.Section {
         switch self {
         case .inbox: "tray"
         case .commissions: "list.bullet.clipboard"
+        case .conferences: "person.3"
         case .approvals: "checkmark.shield"
         case .senates: "person.crop.circle"
         case .history: "clock.arrow.circlepath"

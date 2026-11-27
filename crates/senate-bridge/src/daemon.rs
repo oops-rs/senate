@@ -2595,6 +2595,11 @@ impl Shared {
             text,
             signal,
         });
+        if event.meta.contains_key(meta::CONFERENCE_INVITE)
+            || event.meta.contains_key(meta::CONFERENCE_REPORT)
+        {
+            self.publish(WatchEvent::ConferencesChanged);
+        }
     }
 
     /// Triage verdicts and takeovers off `agent`'s stream (see the module
@@ -3960,6 +3965,47 @@ impl Shared {
                 };
                 wrap(on_heap(|| self.on_checkpoint(&session, summary, files, push, id)).await)
             }
+            Request::ConferenceConvene {
+                session,
+                topic,
+                seats,
+                linked_threads,
+            } => wrap(
+                on_heap(|| self.on_conference_convene(&session, topic, seats, linked_threads))
+                    .await,
+            ),
+            Request::ConferenceList { session } => {
+                wrap(on_heap(|| self.on_conference_list(&session)).await)
+            }
+            Request::ConferenceGet { session, id } => {
+                wrap(on_heap(|| self.on_conference_get(&session, id)).await)
+            }
+            Request::ConferenceRsvp {
+                session,
+                id,
+                action,
+            } => wrap(on_heap(|| self.on_conference_rsvp(&session, id, action)).await),
+            Request::ConferenceStart { session, id } => {
+                wrap(on_heap(|| self.on_conference_start(&session, id)).await)
+            }
+            Request::ConferencePost {
+                session,
+                id,
+                body,
+                to,
+            } => wrap(on_heap(|| self.on_conference_post(&session, id, body, to)).await),
+            Request::ConferenceAdjourn {
+                session,
+                id,
+                summary,
+                decisions,
+                action_items,
+            } => wrap(
+                on_heap(|| {
+                    self.on_conference_adjourn(&session, id, summary, decisions, action_items)
+                })
+                .await,
+            ),
             Request::Ask {
                 session,
                 to,
@@ -7204,6 +7250,146 @@ impl Shared {
     ) -> Result<Brief, IpcError> {
         let committee = self.target(selector, committee)?;
         self.api.brief(&committee).await.map_err(server_error)
+    }
+
+    fn conference_actor(&self, selector: &SessionSelector) -> Result<Address, IpcError> {
+        if selector == &SessionSelector::default() {
+            Ok(self.person())
+        } else {
+            let session = self.resolve(selector)?;
+            Ok(Address::senator(&session.agent))
+        }
+    }
+
+    async fn on_conference_convene(
+        &self,
+        selector: &SessionSelector,
+        topic: String,
+        seats: Vec<senate_core::ConferenceSeatInput>,
+        linked_threads: Vec<senate_core::LinkedThread>,
+    ) -> Result<senate_core::ConferenceSummary, IpcError> {
+        let from = self.conference_actor(selector)?;
+        let summary = self
+            .api
+            .convene_conference(&senate_core::CreateConferenceRequest {
+                topic,
+                seats,
+                linked_threads,
+                from: Some(from),
+            })
+            .await
+            .map_err(server_error)?;
+        self.publish(WatchEvent::ConferencesChanged);
+        Ok(summary)
+    }
+
+    async fn on_conference_list(
+        &self,
+        selector: &SessionSelector,
+    ) -> Result<senate_core::ConferenceList, IpcError> {
+        let _ = self.conference_actor(selector)?;
+        self.api.list_conferences().await.map_err(server_error)
+    }
+
+    async fn on_conference_get(
+        &self,
+        selector: &SessionSelector,
+        id: senate_core::ConferenceId,
+    ) -> Result<senate_core::ConferenceDetail, IpcError> {
+        let _ = self.conference_actor(selector)?;
+        self.api.get_conference(&id).await.map_err(server_error)
+    }
+
+    async fn on_conference_rsvp(
+        &self,
+        selector: &SessionSelector,
+        id: senate_core::ConferenceId,
+        mut action: senate_core::ConferenceRsvpAction,
+    ) -> Result<senate_core::ConferenceSummary, IpcError> {
+        let actor = self.conference_actor(selector)?;
+        match &mut action {
+            senate_core::ConferenceRsvpAction::Attend { participant, .. }
+                if participant.is_none() =>
+            {
+                *participant = Some(actor);
+            }
+            senate_core::ConferenceRsvpAction::Delegate { delegated_by, .. }
+                if delegated_by.is_none() =>
+            {
+                *delegated_by = Some(actor);
+            }
+            _ => {}
+        }
+        let summary = self
+            .api
+            .rsvp_conference(&id, &action)
+            .await
+            .map_err(server_error)?;
+        self.publish(WatchEvent::ConferencesChanged);
+        Ok(summary)
+    }
+
+    async fn on_conference_start(
+        &self,
+        selector: &SessionSelector,
+        id: senate_core::ConferenceId,
+    ) -> Result<senate_core::ConferenceSummary, IpcError> {
+        let _ = self.conference_actor(selector)?;
+        let summary = self.api.start_conference(&id).await.map_err(server_error)?;
+        self.publish(WatchEvent::ConferencesChanged);
+        Ok(summary)
+    }
+
+    async fn on_conference_post(
+        &self,
+        selector: &SessionSelector,
+        id: senate_core::ConferenceId,
+        body: String,
+        to: Vec<Address>,
+    ) -> Result<senate_core::PostConferenceEventResponse, IpcError> {
+        let from = self.conference_actor(selector)?;
+        let resp = self
+            .api
+            .post_conference_event(
+                &id,
+                &senate_core::PostConferenceEventRequest {
+                    from,
+                    body,
+                    kind: None,
+                    to,
+                    meta: Default::default(),
+                },
+            )
+            .await
+            .map_err(server_error)?;
+        self.publish(WatchEvent::ConferencesChanged);
+        Ok(resp)
+    }
+
+    async fn on_conference_adjourn(
+        &self,
+        selector: &SessionSelector,
+        id: senate_core::ConferenceId,
+        summary: String,
+        decisions: Vec<String>,
+        action_items: Vec<senate_core::ConferenceActionItem>,
+    ) -> Result<senate_core::ConferenceSummary, IpcError> {
+        let from = self.conference_actor(selector)?;
+        let res = self
+            .api
+            .adjourn_conference(
+                &id,
+                &senate_core::AdjournConferenceRequest {
+                    summary,
+                    decisions,
+                    action_items,
+                    from: Some(from),
+                },
+            )
+            .await
+            .map_err(server_error)?;
+        self.publish(WatchEvent::ConferencesChanged);
+        Ok(res)
     }
 
     fn on_bound(&self, selector: &SessionSelector) -> Result<BoundReply, IpcError> {
