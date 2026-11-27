@@ -717,6 +717,7 @@ impl Shared {
                     SecretaryOp::Remove,
                     Some(principal.clone()),
                     Some(senator.clone()),
+                    None,
                 )
                 .await?;
             }

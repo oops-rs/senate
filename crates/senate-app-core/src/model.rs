@@ -872,6 +872,7 @@ mod tests {
             queue: Default::default(),
             speaker: None,
             roles: None,
+            unsafe_ignore_execution_auth: false,
         }
     }
 
@@ -888,6 +889,7 @@ mod tests {
                 speaker: senate_core::SenatorId::of("/senate".parse().unwrap(), path("alice")),
                 kind: senate_core::SenatorKind::Person,
                 desk: vec![path("claude-bd42dec6")],
+                execution_proxies: Vec::new(),
                 built_in: None,
             }),
             ..Default::default()
@@ -900,6 +902,7 @@ mod tests {
                 speaker: senate_core::SenatorId::here(path("claude")),
                 kind: senate_core::SenatorKind::Agent,
                 desk: Vec::new(),
+                execution_proxies: Vec::new(),
                 built_in: None,
             }),
             ..Default::default()

@@ -357,6 +357,7 @@ pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> 
             action,
             for_,
             secretary,
+            expires_at,
             ..
         } => {
             let principal = for_
@@ -367,8 +368,24 @@ pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> 
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "the secretary".into());
-            format!("{action:?} {secretary} as a secretary for {principal}")
+            match action {
+                crate::ipc::SecretaryOp::GrantProxy => {
+                    let ttl = expires_at
+                        .map(|ts| format!(" until {}", ts.to_rfc3339()))
+                        .unwrap_or_default();
+                    format!("Grant execution proxy to {secretary} for {principal}{ttl}")
+                }
+                crate::ipc::SecretaryOp::RevokeProxy => {
+                    format!("Revoke execution proxy from {secretary} for {principal}")
+                }
+                _ => format!("{action:?} {secretary} as a secretary for {principal}"),
+            }
         }
+        Request::SetUnsafeMode { enabled: true } => {
+            "Enable unsafe_ignore_execution_auth (bypass local execution authorization check)"
+                .into()
+        }
+        Request::SetUnsafeMode { enabled: false } => "Disable unsafe_ignore_execution_auth".into(),
         Request::SetSecretarySession {
             target_session,
             senator,
@@ -385,8 +402,24 @@ pub(crate) fn request_reason(request: &crate::ipc::Request, requester: &str) -> 
         }
         Request::EnsureSecretary => "Start or restore the default secretary".into(),
         Request::Desk { set: Some(_) } => "Change the Speaker's desk workers".into(),
+        Request::DeskDecide {
+            committee,
+            seq,
+            decision: crate::ipc::DeskDecision::ForwardAndAuthorize { .. },
+            ..
+        } => {
+            format!("Forward and authorize execution for desk item {committee} #{seq}")
+        }
         Request::DeskDecide { committee, seq, .. } => {
             format!("Decide desk item {committee} #{seq}")
+        }
+        Request::Forward {
+            committee,
+            seq,
+            authorize: true,
+            ..
+        } => {
+            format!("Forward and authorize desk item {committee} #{seq}")
         }
         Request::Forward { committee, seq, .. } => {
             format!("Forward desk item {committee} #{seq}")

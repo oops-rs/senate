@@ -771,6 +771,14 @@ final class CoreStore {
         return try await core.deskDecide(committee: entry.committee, seq: entry.seq, itemId: itemId, id: id, decision: choice)
     }
 
+    /// Toggle local receiver-side opt-in bypass for unverified cross-committee execution requests.
+    func setUnsafeIgnoreExecutionAuth(_ enabled: Bool) async -> Bool {
+        guard let core else { return false }
+        return await run("unsafe-mode") { core in
+            _ = try await core.setUnsafeIgnoreExecutionAuth(enabled: enabled)
+        }
+    }
+
     func loadThread(_ row: InboxThread) async {
         await loadThread(committee: row.committee, root: row.root)
     }
@@ -1061,6 +1069,7 @@ extension AppState {
         sessions: [],
         groups: [],
         counts: Counts(threads: 0, approvals: 0, codex: 0, docket: 0, prompts: 0, forPerson: 0, pending: 0),
+        unsafeIgnoreExecutionAuth: false,
         lastError: nil
     )
 }

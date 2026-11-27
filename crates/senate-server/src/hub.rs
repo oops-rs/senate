@@ -31,8 +31,8 @@ use ractor::rpc::CallResult;
 use ractor::{ActorRef, MessagingErr};
 use senate_core::alias::{AliasMatch, AliasName, CommitteeAliases, QualifiedAlias};
 use senate_core::api::{
-    ChairInfo, ChildSeat, ChildSenate, CommitteeSeatInfo, Heartbeat, PresencePage, Resolved,
-    Secretaries,
+    ChairInfo, ChildSeat, ChildSenate, CommitteeSeatInfo, ExecutionProxyGrant, Heartbeat,
+    PresencePage, Resolved, Secretaries,
 };
 use senate_core::hub::SCAN_PAGE;
 use senate_core::{
@@ -425,15 +425,26 @@ impl ServerHub {
         principal: SenatorName,
         secretaries: Vec<SenatorName>,
     ) -> Result<Secretaries, HubError> {
-        let _guard = self.secretary_updates.lock().await;
-        self.write_secretaries(principal, secretaries).await
+        self.set_secretaries_with_proxies(principal, secretaries, None)
+            .await
     }
 
-    /// Add workers to the desk without losing simultaneous appointments.
-    pub(crate) async fn add_secretaries(
+    pub async fn set_secretaries_with_proxies(
+        &self,
+        principal: SenatorName,
+        secretaries: Vec<SenatorName>,
+        execution_proxies: Option<Vec<ExecutionProxyGrant>>,
+    ) -> Result<Secretaries, HubError> {
+        let _guard = self.secretary_updates.lock().await;
+        self.write_secretaries(principal, secretaries, execution_proxies)
+            .await
+    }
+
+    pub(crate) async fn add_secretaries_with_proxies(
         &self,
         principal: SenatorName,
         additions: Vec<SenatorName>,
+        execution_proxies: Option<Vec<ExecutionProxyGrant>>,
     ) -> Result<Secretaries, HubError> {
         let _guard = self.secretary_updates.lock().await;
         let mut secretaries = self.seats.snapshot().secretaries_of(&principal).to_vec();
@@ -442,13 +453,15 @@ impl ServerHub {
                 secretaries.push(secretary);
             }
         }
-        self.write_secretaries(principal, secretaries).await
+        self.write_secretaries(principal, secretaries, execution_proxies)
+            .await
     }
 
     async fn write_secretaries(
         &self,
         principal: SenatorName,
         secretaries: Vec<SenatorName>,
+        execution_proxies: Option<Vec<ExecutionProxyGrant>>,
     ) -> Result<Secretaries, HubError> {
         let mut check = self.seats.snapshot();
         for secretary in &secretaries {
@@ -462,11 +475,26 @@ impl ServerHub {
         check
             .set_secretaries(principal.clone(), secretaries.clone())
             .map_err(|e| HubError::Rejected(e.to_string()))?;
+        let final_proxies = match execution_proxies {
+            Some(grants) => {
+                check
+                    .set_execution_proxies(principal.clone(), grants.clone())
+                    .map_err(|e| HubError::Rejected(e.to_string()))?;
+                grants
+            }
+            None => check.execution_proxies_of(&principal).to_vec(),
+        };
         registry::put_secretaries(self.store.as_ref(), &principal, &secretaries)
             .await
             .map_err(log_error)?;
+        registry::put_execution_proxies(self.store.as_ref(), &principal, &final_proxies)
+            .await
+            .map_err(log_error)?;
         self.seats
-            .update(|roster| roster.set_secretaries(principal, secretaries))
+            .update(|roster| -> Result<(), senate_core::RosterError> {
+                roster.set_secretaries(principal.clone(), secretaries)?;
+                roster.set_execution_proxies(principal, final_proxies)
+            })
             .map_err(|e| HubError::Rejected(e.to_string()))?;
         Ok(self.secretaries())
     }

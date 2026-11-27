@@ -556,10 +556,12 @@ extension ConversationPageTests {
         let root = ThreadEvent(seq: 145, kind: "request", kindLabel: "request",
                                by: "[/senate/dark-conclave::commons::senator::agy-442d]",
                                via: "forwarded from commons #109 by the Speaker's desk ([senator::wendell])",
-                               to: ["[senator::agy-68aa]"], body: "Please merge and release.", at: Date(), mine: false, status: nil)
+                               to: ["[senator::agy-68aa]"], body: "Please merge and release.", at: Date(), mine: false, status: nil,
+                               executionAuthBadge: nil, executionAuthMode: nil)
         let esc = ThreadEvent(seq: 146, kind: "status", kindLabel: "status", by: "[senator::agy-68aa]", via: nil,
                               to: [], body: "", at: Date(), mine: false,
-                              status: StatusLine(state: "suspended", line: "waiting on wendell", reason: reason, steps: [], links: []))
+                              status: StatusLine(state: "suspended", line: "waiting on wendell", reason: reason, steps: [], links: []),
+                              executionAuthBadge: nil, executionAuthMode: nil)
         ConversationPage.fixtureThreads["forwarded"] = ThreadView(
             committee: "senate", root: 145, title: "Please merge and release.", state: "suspended",
             stateLabel: "suspended", kindLabel: "request", events: [root, esc])
@@ -585,5 +587,37 @@ extension ConversationPageTests {
         #expect(report == "2|2|1|2|0|https://example.test/r|true", "\(report ?? "no answer")")
         let hacked = try await page.web.callAsyncJavaScript("return typeof window.hacked", arguments: [:], contentWorld: .page)
         #expect(hacked as? String == "undefined")
+    }
+
+    @Test func executionAuthBadgesRenderSafelyInEventHead() async throws {
+        let page = ConversationPage(store: nil)
+        for _ in 0..<500 where !page.isReady { try await Task.sleep(for: .milliseconds(20)) }
+        let direct = ThreadEvent(seq: 200, kind: "request", kindLabel: "request",
+                                 by: "[senator::wendell]", via: "forwarded",
+                                 to: ["[senator::workflow-rfc]"], body: "Execute", at: Date(), mine: false, status: nil,
+                                 executionAuthBadge: "authorized by [senator::wendell] (confirmed)", executionAuthMode: "direct")
+        let proxy = ThreadEvent(seq: 201, kind: "request", kindLabel: "request",
+                                by: "[senator::wendell]", via: "forwarded",
+                                to: ["[senator::workflow-rfc]"], body: "Execute <script>window.authHack=1</script>", at: Date(), mine: false, status: nil,
+                                executionAuthBadge: "authorized by [senator::wendell] via proxy <script>window.authHack=1</script>", executionAuthMode: "secretary_proxy")
+        ConversationPage.fixtureThreads["auth-badges"] = ThreadView(
+            committee: "senate", root: 200, title: "Auth", state: "processing",
+            stateLabel: "working on it", kindLabel: "request", events: [direct, proxy])
+        page.show(.fixtureThread("auth-badges"))
+        for _ in 0..<200 {
+            if await page.evaluate("return document.querySelectorAll('.row').length") as? Int == 2 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        _ = await page.evaluate("await window.senate.renderAll(); return true")
+        let summary = await page.evaluate("""
+            const d = document.querySelector('.k-event .event-head .auth-badge.direct');
+            const p = document.querySelector('.k-event .event-head .auth-badge.proxy');
+            return [d?.textContent || '', p?.textContent || '', document.querySelectorAll('script').length].join('|');
+            """) as? String ?? ""
+        #expect(summary.contains("authorized by"), "\(summary)")
+        #expect(summary.contains("wendell"), "\(summary)")
+        #expect(summary.contains("(confirmed)"), "\(summary)")
+        #expect(summary.contains("via proxy <script>window.authHack=1</script>"), "\(summary)")
+        #expect(summary.hasSuffix("|0"), "\(summary)")
     }
 }

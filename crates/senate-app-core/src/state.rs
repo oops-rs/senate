@@ -52,6 +52,8 @@ pub struct AppState {
     /// last.
     pub groups: Vec<crate::tree::SessionGroup>,
     pub counts: Counts,
+    /// Explicit opt-in receiver bypass for cross-committee execution authorization.
+    pub unsafe_ignore_execution_auth: bool,
     /// The last failed action or read.
     pub last_error: Option<String>,
 }
@@ -533,6 +535,7 @@ impl AppState {
                 Vec::new()
             },
             counts,
+            unsafe_ignore_execution_auth: status.is_some_and(|s| s.unsafe_ignore_execution_auth),
             last_error: model.last_error.as_ref().map(|f| f.text(locale)),
         }
     }

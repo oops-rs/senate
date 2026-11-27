@@ -465,6 +465,8 @@ async fn across_committees_a_person_goes_directly_and_an_agent_by_way_of_the_des
             session: Laptop::session("s-claude"),
             committee: ledger(),
             seq: asked.posted.seq,
+            authorize: false,
+            note: None,
             id: None,
         })
         .await;
@@ -587,6 +589,8 @@ async fn a_persons_reply_to_a_forwarded_request_reaches_the_assignee_that_escala
             session: Laptop::session("s-claude"),
             committee: ledger(),
             seq: asked.posted.seq,
+            authorize: false,
+            note: None,
             id: None,
         })
         .await;
@@ -684,6 +688,8 @@ async fn a_persons_reply_to_a_forwarded_request_with_no_escalation_goes_to_the_a
             session: Laptop::session("s-claude"),
             committee: ledger(),
             seq: asked.posted.seq,
+            authorize: false,
+            note: None,
             id: None,
         })
         .await;
@@ -1747,5 +1753,182 @@ async fn an_ask_for_a_committee_that_is_nowhere_is_refused_not_put_on_the_desk()
         .await;
     assert!(!sent.on_the_desk());
     other.wait_for("Is the modal ready?").await;
+    desk.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cross_committee_execution_auth_and_unsafe_mode_end_to_end() {
+    use senate_bridge::ipc::{
+        DeskDecision, DeskOutcome, SecretariesReply, SecretaryOp, SessionSelector, UnsafeModeReply,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut desk, _claude, copilot, _codex) = alices_machine(dir.path()).await;
+    let hub = desk.senate().daemon.hub.clone();
+    let send_req = |body: &str| {
+        let req = Request::Send {
+            session: Laptop::session("s-codex"),
+            kind: SayKind::Request,
+            to: Vec::new(),
+            at: Some(senate_core::Locator::parse_short("refund-v2::copilot").unwrap()),
+            body: body.into(),
+            refs: None,
+            id: None,
+        };
+        let desk = &desk;
+        async move { desk.ipc::<SendReply>(req).await }
+    };
+
+    // 1. Forward-only control: no execution_auth -> keeps confirmation prompt.
+    let req1 = send_req("Forward-only deploy check").await;
+    on_the_desk(&desk, req1.posted.seq).await;
+    let _: Forwarded = desk
+        .ipc(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: req1.posted.seq,
+            authorize: false,
+            note: None,
+            id: None,
+        })
+        .await;
+    let push1 = copilot.wait_for("Forward-only deploy check").await;
+    assert!(push1.contains("show it to your user first"), "{push1}");
+    assert!(!push1.contains("authorized by"), "{push1}");
+
+    // 2. Direct person execution authorization via DeskDecide::ForwardAndAuthorize.
+    let req2 = send_req("Direct authorized deploy").await;
+    on_the_desk(&desk, req2.posted.seq).await;
+    let req2_event = hub.get(&ledger(), req2.posted.seq).await.unwrap().unwrap();
+    let outcome: DeskOutcome = desk
+        .ipc(Request::DeskDecide {
+            committee: ledger(),
+            seq: req2.posted.seq,
+            item_id: req2_event.id,
+            id: senate_core::EventId::new(),
+            decision: DeskDecision::ForwardAndAuthorize {
+                note: Some("release v0.4.0".into()),
+            },
+        })
+        .await;
+    assert!(
+        matches!(outcome, DeskOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
+    let push2 = copilot.wait_for("Direct authorized deploy").await;
+    assert!(push2.contains("authorized by [senator::alice]"), "{push2}");
+    assert!(push2.contains("release v0.4.0"), "{push2}");
+    assert!(!push2.contains("show it to your user first"), "{push2}");
+
+    // 3. SecretaryProxy: rejected before grant, accepted while active, rejected once expired or revoked.
+    let req3 = send_req("Proxy without grant").await;
+    on_the_desk(&desk, req3.posted.seq).await;
+    assert!(
+        desk.try_ipc::<Forwarded>(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: req3.posted.seq,
+            authorize: true,
+            note: None,
+            id: None,
+        })
+        .await
+        .is_err()
+    );
+
+    // Grant active proxy to claude.
+    let granted: SecretariesReply = desk
+        .ipc(Request::Secretaries {
+            session: SessionSelector::default(),
+            action: SecretaryOp::GrantProxy,
+            for_: None,
+            secretary: Some(path("claude")),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
+        })
+        .await;
+    assert_eq!(granted.execution_proxies.len(), 1);
+    let _: Forwarded = desk
+        .ipc(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: req3.posted.seq,
+            authorize: true,
+            note: Some("delegated within window".into()),
+            id: None,
+        })
+        .await;
+    let push3 = copilot.wait_for("Proxy without grant").await;
+    assert!(
+        push3.contains("authorized via secretary [senator::claude] under [senator::alice]'s proxy"),
+        "{push3}"
+    );
+    assert!(!push3.contains("show it to your user first"), "{push3}");
+
+    // Expired proxy fails closed.
+    let _: SecretariesReply = desk
+        .ipc(Request::Secretaries {
+            session: SessionSelector::default(),
+            action: SecretaryOp::GrantProxy,
+            for_: None,
+            secretary: Some(path("claude")),
+            expires_at: Some(chrono::Utc::now() - chrono::Duration::seconds(5)),
+        })
+        .await;
+    let req4 = send_req("Expired proxy attempt").await;
+    on_the_desk(&desk, req4.posted.seq).await;
+    assert!(
+        desk.try_ipc::<Forwarded>(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: req4.posted.seq,
+            authorize: true,
+            note: None,
+            id: None,
+        })
+        .await
+        .is_err()
+    );
+
+    // Revoke proxy.
+    let revoked: SecretariesReply = desk
+        .ipc(Request::Secretaries {
+            session: SessionSelector::default(),
+            action: SecretaryOp::RevokeProxy,
+            for_: None,
+            secretary: Some(path("claude")),
+            expires_at: None,
+        })
+        .await;
+    assert!(revoked.execution_proxies.is_empty());
+
+    // 4. Local unsafe mode defaults false; toggling to true bypasses receiver gate WITHOUT mutating server events.
+    assert!(!desk.machine_status().await.unsafe_ignore_execution_auth);
+    let unsafe_on: UnsafeModeReply = desk.ipc(Request::SetUnsafeMode { enabled: true }).await;
+    assert!(unsafe_on.enabled);
+    assert!(desk.machine_status().await.unsafe_ignore_execution_auth);
+
+    let forwarded_unauth: Forwarded = desk
+        .ipc(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: req4.posted.seq,
+            authorize: false,
+            note: None,
+            id: None,
+        })
+        .await;
+    let push4 = copilot.wait_for("Expired proxy attempt").await;
+    assert!(push4.contains("[UNSAFE mode enabled"), "{push4}");
+    assert!(!push4.contains("show it to your user first"), "{push4}");
+    assert!(!push4.contains("authorized by"), "{push4}");
+    let stored4 = hub
+        .get(&committee(), forwarded_unauth.posted.seq)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(senate_core::ExecutionAuthPayload::of(&stored4).is_none());
+
+    let unsafe_off: UnsafeModeReply = desk.ipc(Request::SetUnsafeMode { enabled: false }).await;
+    assert!(!unsafe_off.enabled);
     desk.stop().await;
 }

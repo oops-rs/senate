@@ -775,6 +775,17 @@ impl<S: Sink> Driver<S> {
         self.changed();
     }
 
+    pub(crate) async fn refresh_status(&self) {
+        if let Ok(reply) = self
+            .link
+            .call::<senate_bridge::ipc::StatusReply>(&Request::Status)
+            .await
+        {
+            self.model().status = Some(reply);
+            self.changed();
+        }
+    }
+
     /// Re-read every inbox of the primary Senate on `committee`, then
     /// re-render: after an action there, or reading a thread (which marks
     /// it seen).

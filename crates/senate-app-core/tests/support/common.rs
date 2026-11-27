@@ -97,6 +97,7 @@ pub fn status(sessions: Vec<Session>) -> StatusReply {
         queue: QueueCounts::default(),
         speaker: Some(SpeakerSeat::Senator(path("claude"))),
         roles: None,
+        unsafe_ignore_execution_auth: false,
     }
 }
 
@@ -879,7 +880,13 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                         _ => Some("This card can only decide requests for another committee in this Senate.".into()),
                     },
                     actions: match seq.0 {
-                        60 | 61 => vec![DeskAction::Forward, DeskAction::Refuse, DeskAction::Answer, DeskAction::Close],
+                        60 | 61 => vec![
+                            DeskAction::ForwardAndAuthorize,
+                            DeskAction::Forward,
+                            DeskAction::Refuse,
+                            DeskAction::Answer,
+                            DeskAction::Close,
+                        ],
                         62 => vec![],
                         _ => vec![DeskAction::Answer, DeskAction::Close],
                     },
@@ -915,11 +922,13 @@ fn handle(world: &Mutex<World>, events: &broadcast::Sender<WatchEvent>, request:
                 ));
             }
             let receipt = match decision {
-                DeskDecision::Forward => DeskOutcome::Delivered {
-                    destination: "payments::senator::ledger".into(),
-                    committee: CommitteeId::new("payments").unwrap(),
-                    seq: Seq(75),
-                },
+                DeskDecision::Forward | DeskDecision::ForwardAndAuthorize { .. } => {
+                    DeskOutcome::Delivered {
+                        destination: "payments::senator::ledger".into(),
+                        committee: CommitteeId::new("payments").unwrap(),
+                        seq: Seq(75),
+                    }
+                }
                 DeskDecision::Refuse { reason } if !reason.trim().is_empty() => {
                     DeskOutcome::Refused {
                         destination: "refund-v2::senator::tester".into(),

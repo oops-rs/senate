@@ -76,6 +76,10 @@ impl People {
         Self(handles.into_iter().collect())
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn is_person(&self, senator: &SenatorName) -> bool {
         self.0.contains(senator.name())
     }
@@ -229,6 +233,8 @@ pub enum RosterError {
     OwnSecretary(SenatorName),
     #[error("{0} is a principal; a secretary is an agent or the built-in session")]
     SecretaryIsAPrincipal(SenatorName),
+    #[error("{0} is not a registered secretary of this principal")]
+    ExecutionProxyNotSecretary(SenatorName),
 }
 
 /// Who holds the Speaker's seat of one Senate.
@@ -382,6 +388,22 @@ impl<'de> Deserialize<'de> for SpeakerName {
     }
 }
 
+/// A Speaker's explicit execution proxy grant to one of its secretaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionProxyGrant {
+    pub secretary: SenatorName,
+    /// Optional UTC expiry (TTL); `None` stays active until explicitly revoked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ExecutionProxyGrant {
+    /// Whether this grant is active at `now`.
+    pub fn is_active(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        self.expires_at.is_none_or(|exp| exp > now)
+    }
+}
+
 /// The Speaker's office of one Senate: who the Speaker is, and who works
 /// its desk.
 ///
@@ -400,6 +422,9 @@ pub struct Office {
     /// Who works the desk, in order.
     #[serde(default)]
     pub desk: Vec<SenatorName>,
+    /// Execution proxy grants currently held by secretaries on the desk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_proxies: Vec<ExecutionProxyGrant>,
     /// The daemon's built-in session, by name, when it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub built_in: Option<SenatorName>,
@@ -470,6 +495,9 @@ pub struct RosterConfig {
     /// secretaries. The Speaker's work its desk.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secretaries: BTreeMap<SenatorName, Vec<SenatorName>>,
+    /// Execution proxy grants registered for a principal's secretaries.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub execution_proxies: BTreeMap<SenatorName, Vec<ExecutionProxyGrant>>,
     #[serde(default, alias = "seniors")]
     pub principals: Vec<Principal>,
     /// Agents seated from the start, each with its person. The rest are
@@ -511,6 +539,7 @@ pub struct Roster {
     principals: Vec<Principal>,
     agents: Vec<SeatedAgent>,
     secretaries: BTreeMap<SenatorName, Vec<SenatorName>>,
+    execution_proxies: BTreeMap<SenatorName, Vec<ExecutionProxyGrant>>,
     /// The daemon's built-in session, by name, when it runs. Not
     /// configuration: the server says.
     #[serde(skip)]
@@ -525,6 +554,7 @@ impl Roster {
             principals: Vec::with_capacity(principals.len()),
             agents: Vec::with_capacity(agents.len()),
             secretaries: BTreeMap::new(),
+            execution_proxies: BTreeMap::new(),
             built_in: None,
         };
         for senior in principals {
@@ -681,10 +711,84 @@ impl Roster {
         }
         if secretaries.is_empty() {
             self.secretaries.remove(&principal);
+            self.execution_proxies.remove(&principal);
         } else {
+            if let Some(grants) = self.execution_proxies.get_mut(&principal) {
+                grants.retain(|grant| secretaries.contains(&grant.secretary));
+                if grants.is_empty() {
+                    self.execution_proxies.remove(&principal);
+                }
+            }
             self.secretaries.insert(principal, secretaries);
         }
         Ok(())
+    }
+
+    /// Execution proxy grants registered for `principal`.
+    pub fn execution_proxies_of(&self, principal: &SenatorName) -> &[ExecutionProxyGrant] {
+        self.execution_proxies
+            .get(principal)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Every principal's execution proxy grants.
+    pub fn execution_proxies(&self) -> &BTreeMap<SenatorName, Vec<ExecutionProxyGrant>> {
+        &self.execution_proxies
+    }
+
+    /// Set `principal`'s execution proxy grants (must be a subset of its
+    /// registered secretaries, with no duplicates).
+    pub fn set_execution_proxies(
+        &mut self,
+        principal: SenatorName,
+        grants: Vec<ExecutionProxyGrant>,
+    ) -> Result<(), RosterError> {
+        let secretaries = self.secretaries_of(&principal);
+        for (i, grant) in grants.iter().enumerate() {
+            if self.principal(grant.secretary.name()).is_some() {
+                return Err(RosterError::SecretaryIsAPrincipal(grant.secretary.clone()));
+            }
+            if self.built_in.as_ref() == Some(&grant.secretary)
+                || !secretaries.contains(&grant.secretary)
+            {
+                return Err(RosterError::ExecutionProxyNotSecretary(
+                    grant.secretary.clone(),
+                ));
+            }
+            if grants[..i]
+                .iter()
+                .any(|other| other.secretary == grant.secretary)
+            {
+                return Err(RosterError::Duplicate(grant.secretary.name().clone()));
+            }
+        }
+        if grants.is_empty() {
+            self.execution_proxies.remove(&principal);
+        } else {
+            self.execution_proxies.insert(principal, grants);
+        }
+        Ok(())
+    }
+
+    /// Whether `secretary` currently holds an active execution proxy grant
+    /// from this Senate's Speaker office at `now`.
+    pub fn is_active_execution_proxy(
+        &self,
+        secretary: &SenatorName,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        let Some(office) = self.office() else {
+            return false;
+        };
+        let Some(owner) = office.desk_owner() else {
+            return false;
+        };
+        self.secretaries_of(owner).contains(secretary)
+            && self
+                .execution_proxies_of(owner)
+                .iter()
+                .any(|grant| &grant.secretary == secretary && grant.is_active(now))
     }
 
     /// The Speaker's office: who the Speaker is and who works its desk.
@@ -713,10 +817,21 @@ impl Roster {
                 desk.push(secretary.clone());
             }
         }
+        let mut execution_proxies = Vec::new();
+        for grant in self.execution_proxies_of(&name) {
+            if desk.contains(&grant.secretary)
+                && !execution_proxies
+                    .iter()
+                    .any(|g: &ExecutionProxyGrant| g.secretary == grant.secretary)
+            {
+                execution_proxies.push(grant.clone());
+            }
+        }
         Some(Office {
             speaker,
             kind,
             desk,
+            execution_proxies,
             built_in: self.built_in.clone(),
         })
     }
@@ -871,6 +986,7 @@ impl Roster {
         RosterConfig {
             speaker: self.speaker.clone(),
             secretaries: self.secretaries.clone(),
+            execution_proxies: self.execution_proxies.clone(),
             principals: self.principals.clone(),
             agents: self.agents.clone(),
         }
@@ -1092,6 +1208,9 @@ impl TryFrom<RosterConfig> for Roster {
         roster.name_speaker(config.speaker)?;
         for (principal, secretaries) in config.secretaries {
             roster.set_secretaries(principal, secretaries)?;
+        }
+        for (principal, grants) in config.execution_proxies {
+            roster.set_execution_proxies(principal, grants)?;
         }
         Ok(roster)
     }

@@ -333,6 +333,10 @@
         const head = el("div", "event-head");
         if (!row.mine) head.appendChild(el("span", "by", row.by));
         head.appendChild(el("span", "meta", row.kindLabel + " · " + row.when));
+        if (row.executionAuthBadge) {
+          const cls = row.executionAuthMode === "direct" ? "auth-badge direct" : "auth-badge proxy";
+          head.appendChild(el("span", cls, row.executionAuthBadge));
+        }
         // Words the Speaker's office carried: how they came, under who.
         if (row.via) head.appendChild(el("div", "via", row.via));
         const content = el("div", "event-body");

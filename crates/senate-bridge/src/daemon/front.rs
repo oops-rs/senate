@@ -656,11 +656,14 @@ impl Front {
                 session,
                 committee,
                 seq,
+                authorize,
+                note,
                 id,
             } => match self.presiding(&session) {
-                Ok((seat, speaker)) => {
-                    wrap(on_heap(|| seat.on_forward(&speaker, committee, seq, id)).await)
-                }
+                Ok((seat, speaker)) => wrap(
+                    on_heap(|| seat.on_forward(&speaker, committee, seq, authorize, note, id))
+                        .await,
+                ),
                 Err(e) => Reply::err(e),
             },
             Request::Refuse {
@@ -1138,6 +1141,7 @@ macro_rules! request_selector {
             | Request::DeskDecide { .. }
             | Request::SetSecretarySession { .. }
             | Request::Desk { .. }
+            | Request::SetUnsafeMode { .. }
             | Request::Roles
             | Request::Approvals
             | Request::Approve { .. }

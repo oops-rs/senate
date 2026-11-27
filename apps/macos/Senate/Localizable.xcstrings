@@ -920,6 +920,74 @@
         }
       }
     },
+    "banner.unsafe_mode": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "UNSAFE mode is on: cross-committee requests execute without execution_auth confirmation."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "UNSAFE 模式已开启：本机将跳过跨委员会请求的执行授权确认门禁。"
+          }
+        }
+      }
+    },
+    "banner.unsafe_turn_off": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn Off"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭"
+          }
+        }
+      }
+    },
+    "desk.forward_authorize_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forward & Authorize"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "转发并授权执行"
+          }
+        }
+      }
+    },
+    "desk.forward_only_title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forward only"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅转发"
+          }
+        }
+      }
+    },
     "desk.forward_title": {
       "extractionState": "manual",
       "localizations": {
@@ -4596,6 +4664,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "使用默认"
+          }
+        }
+      }
+    },
+    "settings.unsafe_ignore_auth": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unsafe: ignore cross-committee execution authorization"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不安全模式：忽略跨委员会执行授权"
+          }
+        }
+      }
+    },
+    "settings.unsafe_ignore_auth_help": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Default off. Bypasses receiver confirmation locally without mutating server provenance."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "默认关闭。仅在本机跳过接收方确认门禁，不会篡改服务端审计记录。"
           }
         }
       }

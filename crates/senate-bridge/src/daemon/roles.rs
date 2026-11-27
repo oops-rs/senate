@@ -1093,6 +1093,8 @@ impl Shared {
         acted_by: &SenatorName,
         committee: CommitteeId,
         seq: Seq,
+        authorize: bool,
+        note: Option<String>,
         id: Option<EventId>,
     ) -> Result<Forwarded, IpcError> {
         let (item, _) = self.docket_item(&committee, seq).await?;
@@ -1119,6 +1121,18 @@ impl Shared {
         let target = intended.committee().cloned().unwrap_or(committee.clone());
         let to = intended.address().clone();
         let root = item.event;
+        if authorize {
+            if above.is_some() {
+                return Err(IpcError::bad_request(
+                    "cross-Senate execution_auth is not supported across parent uplinks yet",
+                ));
+            }
+            if root.kind != Kind::Request {
+                return Err(IpcError::bad_request(
+                    "execution authorization can only be attached to a request",
+                ));
+            }
+        }
         let asker = root.on_behalf_of.clone().unwrap_or(root.from.clone());
         let origin = Origin {
             locator: self.locator_of(&committee, asker.clone()),
@@ -1136,6 +1150,37 @@ impl Shared {
             .to(to)
             .with_meta(meta::ORIGIN, origin.value())
             .with_meta(meta::ACTED_BY, acted.clone());
+        if authorize {
+            self.refresh_me().await;
+            let owner = self
+                .office()
+                .and_then(|o| o.desk_owner().cloned())
+                .ok_or_else(|| {
+                    IpcError::new(
+                        codes::NOT_PRESIDING,
+                        "this Senate's Speaker is not a local human principal",
+                    )
+                })?;
+            if !self.people().is_person(&owner) {
+                return Err(IpcError::new(
+                    codes::NOT_A_PERSON,
+                    "execution proxy requires the Speaker to be a human principal",
+                ));
+            }
+            let note = note
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned);
+            let auth = senate_core::ExecutionAuthPayload {
+                authorized_by: owner.name().clone(),
+                mode: senate_core::ExecutionAuthMode::SecretaryProxy {
+                    secretary: acted_by.clone(),
+                },
+                note,
+            };
+            forwarded = forwarded.with_meta(meta::EXECUTION_AUTH, auth.value());
+        }
         if let Some(refs) = root.refs {
             forwarded = forwarded.with_refs(refs);
         }
@@ -1348,14 +1393,16 @@ impl Shared {
 
     // ---- secretaries ----------------------------------------------------------
 
-    /// List, add or remove a senator's secretaries: the session's agent's,
-    /// or without a session the person's, unless `for_` names another.
+    /// List, add, remove, or grant/revoke execution proxy for a senator's
+    /// secretaries: the session's agent's, or without a session the person's,
+    /// unless `for_` names another.
     pub(crate) async fn on_secretaries(
         &self,
         selector: &SessionSelector,
         op: SecretaryOp,
         for_: Option<SenatorName>,
         secretary: Option<SenatorName>,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<SecretariesReply, IpcError> {
         let named = selector.session_id.is_some() || selector.claude_pid.is_some();
         let session = if named {
@@ -1372,9 +1419,14 @@ impl Shared {
         let all = self.api.secretaries().await.map_err(server_error)?;
         let mut list = all.get(&whose).cloned().unwrap_or_default();
         if op == SecretaryOp::List {
+            self.refresh_me().await;
             return Ok(SecretariesReply {
                 senator: whose,
                 secretaries: list,
+                execution_proxies: self
+                    .office()
+                    .map(|o| o.execution_proxies)
+                    .unwrap_or_default(),
                 all,
             });
         }
@@ -1383,6 +1435,54 @@ impl Shared {
                 self.locale,
             )));
         };
+        if matches!(op, SecretaryOp::GrantProxy | SecretaryOp::RevokeProxy) {
+            if session.is_some() {
+                return Err(IpcError::new(
+                    codes::NOT_A_PERSON,
+                    "execution proxy grants must be managed in person, never from a session",
+                ));
+            }
+            self.refresh_me().await;
+            let mut proxies = self
+                .office()
+                .map(|o| o.execution_proxies)
+                .unwrap_or_default();
+            match op {
+                SecretaryOp::GrantProxy => {
+                    if !list.contains(&secretary) {
+                        return Err(IpcError::bad_request(format!(
+                            "{} is not a secretary of {}; appoint them as secretary first",
+                            Address::senator(&secretary),
+                            Address::senator(&whose)
+                        )));
+                    }
+                    proxies.retain(|g| g.secretary != secretary);
+                    proxies.push(senate_core::ExecutionProxyGrant {
+                        secretary,
+                        expires_at,
+                    });
+                }
+                SecretaryOp::RevokeProxy => {
+                    proxies.retain(|g| g.secretary != secretary);
+                }
+                _ => unreachable!(),
+            }
+            let all = self
+                .api
+                .set_secretaries_with_proxies(&whose, list.clone(), Some(proxies), None)
+                .await
+                .map_err(|e| self.refusal(e))?;
+            self.refresh_me().await;
+            return Ok(SecretariesReply {
+                senator: whose.clone(),
+                secretaries: all.get(&whose).cloned().unwrap_or(list),
+                execution_proxies: self
+                    .office()
+                    .map(|o| o.execution_proxies)
+                    .unwrap_or_default(),
+                all,
+            });
+        }
         match op {
             SecretaryOp::Add if !list.contains(&secretary) => list.push(secretary),
             SecretaryOp::Remove => list.retain(|s| s != &secretary),
@@ -1404,6 +1504,10 @@ impl Shared {
         Ok(SecretariesReply {
             senator: whose.clone(),
             secretaries: all.get(&whose).cloned().unwrap_or(list),
+            execution_proxies: self
+                .office()
+                .map(|o| o.execution_proxies)
+                .unwrap_or_default(),
             all,
         })
     }
@@ -1451,6 +1555,10 @@ impl Shared {
         };
         Ok(crate::ipc::DeskReply {
             secretaries: all.get(&speaker).cloned().unwrap_or_default(),
+            execution_proxies: self
+                .office()
+                .map(|o| o.execution_proxies)
+                .unwrap_or_default(),
             desk: self.office().map(|o| o.desk).unwrap_or_default(),
             speaker,
         })

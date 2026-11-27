@@ -456,6 +456,12 @@ final class ConversationPage: NSObject {
         ]
         // Words the Speaker's office carried: how they came, and who acted.
         if let via = event.via { row["via"] = Mentions.shared.plain(via, committee: committee) }
+        if let badge = event.executionAuthBadge {
+            row["executionAuthBadge"] = Mentions.shared.plain(badge, committee: committee)
+        }
+        if let mode = event.executionAuthMode {
+            row["executionAuthMode"] = mode
+        }
         return row
     }
 

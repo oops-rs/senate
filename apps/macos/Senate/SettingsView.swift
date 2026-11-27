@@ -63,6 +63,14 @@ struct SettingsView: View {
                     set: { value in Task { await updateApprovalTouch(value) } }
                 ))
                 .disabled(store.senateHome == nil || updatingSecurity)
+                Toggle(isOn: Binding(
+                    get: { store.state.unsafeIgnoreExecutionAuth },
+                    set: { value in Task { _ = await store.setUnsafeIgnoreExecutionAuth(value) } }
+                )) {
+                    Text(verbatim: L("settings.unsafe_ignore_auth"))
+                    Text(verbatim: L("settings.unsafe_ignore_auth_help"))
+                }
+                .disabled(!store.state.online || store.isBusy("unsafe-mode"))
                 if let securityNotice {
                     Text(verbatim: securityNotice).font(.callout).foregroundStyle(.secondary)
                 }

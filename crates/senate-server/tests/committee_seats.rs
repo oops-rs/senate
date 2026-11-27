@@ -368,6 +368,7 @@ async fn the_speakers_office_aliases_an_agent_it_does_not_run_without_taking_it(
         )
         .json(&api::SetSecretaries {
             secretaries: vec![path(desk)],
+            execution_proxies: None,
             acted_by: None,
         })
         .send()

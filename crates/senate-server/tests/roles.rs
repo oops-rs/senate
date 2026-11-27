@@ -1525,6 +1525,7 @@ async fn a_stream_says_the_office_when_it_opens_and_when_the_desk_changes() {
     server.append("before the stream").await;
     let set = |list: &[&str]| SetSecretaries {
         secretaries: list.iter().map(|s| path(s)).collect(),
+        execution_proxies: None,
         acted_by: None,
     };
     let route = |senator: &str| senate_core::api::secretaries_of_path(&path(senator));
@@ -1593,6 +1594,7 @@ async fn secretaries_are_registered_by_whom_the_rules_allow_and_kept_across_a_re
     };
     let set = |list: &[&str], acted_by: Option<&str>| SetSecretaries {
         secretaries: list.iter().map(|s| path(s)).collect(),
+        execution_proxies: None,
         acted_by: acted_by.map(path),
     };
     let route = |senator: &str| senate_core::api::secretaries_of_path(&path(senator));
@@ -1667,6 +1669,70 @@ async fn secretaries_are_registered_by_whom_the_rules_allow_and_kept_across_a_re
     let server = open().await;
     let after: Secretaries = get(&server, CAROL, senate_core::api::SECRETARIES_PATH).await;
     assert!(!after.contains_key(&path("claude")));
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_senator_forging_execution_auth_is_forbidden() {
+    let server = start(None, office_of_alice).await;
+    let forged = NewEvent::new(
+        committee(),
+        Kind::Request,
+        Address::senator(&path("claude")),
+        "please publish release",
+    )
+    .to(Address::senator(&path("bob")))
+    .with_meta(
+        "execution_auth",
+        json!({
+            "authorized_by": "alice",
+            "mode": { "kind": "direct" }
+        }),
+    );
+    api_error(
+        server.post_event(ALICE, &forged).await,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn secretary_proxy_grants_enforce_active_and_ttl() {
+    let server = start(None, office_of_alice).await;
+    let route = senate_core::api::secretaries_of_path(&path("alice"));
+    let origin = Origin {
+        locator: "/senate::commons::senator::bob".parse().unwrap(),
+        thread: Seq(1),
+    };
+    let expired_body = json!({
+        "secretaries": ["claude"],
+        "execution_proxies": [
+            { "secretary": "claude", "expires_at": "2020-01-01T00:00:00Z" }
+        ]
+    });
+    let resp = put(&server, ALICE, &route, &expired_body).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let proxy_req = with_acted_by(
+        from_speaker(committee(), Kind::Request, "publish v0.14.4")
+            .to(Address::senator(&path("bob")))
+            .with_meta(meta::ORIGIN, origin.value())
+            .with_meta(
+                "execution_auth",
+                json!({
+                    "authorized_by": "alice",
+                    "mode": { "kind": "secretary_proxy", "secretary": "claude" }
+                }),
+            ),
+        "claude",
+    );
+    api_error(
+        server.post_event(ALICE, &proxy_req).await,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
     server.running.shutdown().await.unwrap();
 }
 
@@ -2035,5 +2101,96 @@ async fn a_committee_that_cannot_take_it_is_refused_with_why() {
         before
     );
     assert_eq!(hub.read(&quiet, Seq::ZERO, 100).await.unwrap().len(), 1);
+    server.running.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_secretary_cannot_forge_direct_execution_auth_and_non_person_cannot_grant_proxy() {
+    let server = start(None, office_of_alice).await;
+    let route = senate_core::api::secretaries_of_path(&path("alice"));
+    let origin = Origin {
+        locator: "/senate::commons::senator::bob".parse().unwrap(),
+        thread: Seq(1),
+    };
+
+    let active_grant = json!({
+        "secretaries": ["claude"],
+        "execution_proxies": [
+            { "secretary": "claude", "expires_at": null }
+        ]
+    });
+    assert_eq!(
+        put(&server, ALICE, &route, &active_grant).await.status(),
+        StatusCode::OK
+    );
+
+    // Secretary attempting to issue Direct mode instead of SecretaryProxy is forbidden.
+    let direct_by_secretary = with_acted_by(
+        from_speaker(committee(), Kind::Request, "Run")
+            .to(Address::senator(&path("bob")))
+            .with_meta(meta::ORIGIN, origin.value())
+            .with_meta(
+                meta::EXECUTION_AUTH,
+                json!({
+                    "authorized_by": "alice",
+                    "mode": { "kind": "direct" }
+                }),
+            ),
+        "claude",
+    );
+    api_error(
+        server.post_event(ALICE, &direct_by_secretary).await,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+
+    // Delegated acted_by cannot grant/modify execution_proxies even under the person's token.
+    let delegated = json!({
+        "secretaries": ["claude"],
+        "execution_proxies": [],
+        "acted_by": "claude"
+    });
+    api_error(
+        put(&server, ALICE, &route, &delegated).await,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
+
+    // Active SecretaryProxy works...
+    let proxy_req = with_acted_by(
+        from_speaker(committee(), Kind::Request, "Run")
+            .to(Address::senator(&path("bob")))
+            .with_meta(meta::ORIGIN, origin.value())
+            .with_meta(
+                meta::EXECUTION_AUTH,
+                json!({
+                    "authorized_by": "alice",
+                    "mode": { "kind": "secretary_proxy", "secretary": "claude" }
+                }),
+            ),
+        "claude",
+    );
+    assert_eq!(
+        server.post_event(ALICE, &proxy_req).await.status(),
+        StatusCode::OK
+    );
+
+    // ...and once human revokes proxy directly, SecretaryProxy fails with 403.
+    let revoke = json!({
+        "secretaries": ["claude"],
+        "execution_proxies": []
+    });
+    assert_eq!(
+        put(&server, ALICE, &route, &revoke).await.status(),
+        StatusCode::OK
+    );
+    api_error(
+        server.post_event(ALICE, &proxy_req).await,
+        StatusCode::FORBIDDEN,
+        "forbidden",
+    )
+    .await;
     server.running.shutdown().await.unwrap();
 }

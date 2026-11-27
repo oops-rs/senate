@@ -51,15 +51,16 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     func deskItem(committee: String, seq: UInt64) async throws -> DeskItemView {
         try record("desk-item \(committee) \(seq)")
         let item = ThreadEvent(seq: seq, kind: "request", kindLabel: "Request", by: "tester", via: nil,
-                               to: ["speaker"], body: "Full request", at: Date(), mine: false, status: nil)
+                               to: ["speaker"], body: "Full request", at: Date(), mine: false, status: nil,
+                               executionAuthBadge: nil, executionAuthMode: nil)
         let thread = ThreadView(committee: committee, root: seq, title: "Full request",
                                 state: nil, stateLabel: nil, kindLabel: "Request", events: [item])
         // As the fake daemon: 60 and 61 a request between committees (all
-        // four), 62 nothing to do here, 63 a question (answer, close).
+        // options), 62 nothing to do here, 63 a question (answer, close).
         let actions: [DeskAction] = switch seq {
         case 62: []
         case 63: [.answer, .close]
-        default: [.forward, .refuse, .answer, .close]
+        default: [.forwardAndAuthorize, .forward, .refuse, .answer, .close]
         }
         return DeskItemView(eventId: "source-item", item: item, thread: thread, origin: nil,
                             destination: seq == 63 ? nil : "payments::senator::ledger",
@@ -70,13 +71,14 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     func deskDecide(committee: String, seq: UInt64, itemId: String, id: String, decision: DeskChoice) async throws -> DeskOutcomeView {
         let word: String = switch decision {
         case .forward: "forward"
+        case .forwardAndAuthorize: "forward-and-authorize"
         case let .refuse(reason): reason
         case .answer: "answer"
         case .close: "close"
         }
         try record("desk-decide \(committee) \(seq) \(id) \(word)")
         let kind: DeskOutcomeKind = switch decision {
-        case .forward: .delivered
+        case .forward, .forwardAndAuthorize: .delivered
         case .refuse: .refused
         case .answer: .answered
         case .close: .closed
@@ -89,6 +91,10 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
                                seq: kind == .answered ? 77 : kind == .closed ? 78 : 75, reason: nil)
     }
     func newDeskActionId() -> String { "desk-test-action" }
+    func setUnsafeIgnoreExecutionAuth(enabled: Bool) async throws -> Bool {
+        try record("set-unsafe \(enabled)")
+        return enabled
+    }
     func decideDeskItem(committee: String, seq: UInt64, itemId: String, id: String, reason: String?) async throws -> DeskOutcomeView {
         try record("desk-decide \(committee) \(seq) \(id) \(reason ?? "forward")")
         return DeskOutcomeView(kind: reason == nil ? .delivered : .refused, delivered: reason == nil,

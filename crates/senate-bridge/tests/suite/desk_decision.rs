@@ -290,6 +290,8 @@ async fn hosted_session_caller_is_refused_for_speaker_and_prompt_free_requests()
             session: person.clone(),
             committee: committee.clone(),
             seq: Seq(1),
+            authorize: false,
+            note: None,
             id: None,
         },
         Request::Refuse {
@@ -307,6 +309,7 @@ async fn hosted_session_caller_is_refused_for_speaker_and_prompt_free_requests()
             action: ipc::SecretaryOp::Add,
             for_: None,
             secretary: Some(senator.clone()),
+            expires_at: None,
         },
         Request::SetSecretarySession {
             target_session: Some("s".into()),
@@ -527,6 +530,7 @@ async fn hosted_session_caller_is_refused_for_speaker_and_prompt_free_requests()
             action: ipc::SecretaryOp::Remove,
             for_: None,
             secretary: Some(senator),
+            expires_at: None,
         },
     ];
 
@@ -622,7 +626,7 @@ async fn detail(socket: &Path, item: &senate_core::Event) -> DeskItemDetail {
 
 #[tokio::test]
 async fn the_speaker_answers_each_kind_of_waiting_item_in_its_thread_once() {
-    use ipc::DeskAction::{Answer, Close, Forward, Refuse};
+    use ipc::DeskAction::{Answer, Close, Forward, ForwardAndAuthorize, Refuse};
     use senate_core::Awaiting;
     let (mut h, items) = desk(
         Some("senator::alice"),
@@ -669,7 +673,7 @@ async fn the_speaker_answers_each_kind_of_waiting_item_in_its_thread_once() {
     }
     assert_eq!(
         detail(&socket, forwardable).await.actions,
-        [Forward, Refuse, Answer, Close]
+        [ForwardAndAuthorize, Forward, Refuse, Answer, Close]
     );
 
     // An empty answer is refused and posts nothing.
@@ -935,5 +939,63 @@ async fn only_the_speaker_answers_and_not_what_waits_elsewhere() {
             .all(|e| e.thread.is_none()),
         "nothing posted"
     );
+    h.stop().await;
+}
+
+#[tokio::test]
+async fn forward_and_authorize_attaches_direct_execution_auth_and_distinguishes_idempotency() {
+    let mut h = Harness::new().await;
+    h.server
+        .state
+        .inner
+        .lock()
+        .unwrap()
+        .roster
+        .name_speaker(Some("senator::alice".parse().unwrap()))
+        .unwrap();
+    let item = h.server.append(
+        NewEvent::new(
+            common::committee(),
+            Kind::Request,
+            Address::senior(&common::name("bob")),
+            "Deploy v0.4.0 to staging.",
+        )
+        .to(Address::Speaker)
+        .with_meta(meta::INTENDED, json!("other::senator::alice")),
+    );
+    h.start().await;
+    let socket = h.socket();
+
+    let action_id = EventId::new();
+    let authorize = Request::DeskDecide {
+        committee: item.committee.clone(),
+        seq: item.seq,
+        item_id: item.id.clone(),
+        id: action_id.clone(),
+        decision: DeskDecision::ForwardAndAuthorize {
+            note: Some("  staging only  ".into()),
+        },
+    };
+    let receipt: DeskOutcome = call(&socket, &authorize).await.unwrap();
+    let retry: DeskOutcome = call(&socket, &authorize).await.unwrap();
+    assert_eq!(retry, receipt);
+
+    // Reusing the same id for plain Forward rejects as a mismatched retry.
+    let mismatch = Request::DeskDecide {
+        committee: item.committee.clone(),
+        seq: item.seq,
+        item_id: item.id,
+        id: action_id,
+        decision: DeskDecision::Forward,
+    };
+    assert!(call::<DeskOutcome>(&socket, &mismatch).await.is_err());
+
+    let delivered = h.server.events("other");
+    assert_eq!(delivered.len(), 1);
+    let auth = senate_core::ExecutionAuthPayload::of(&delivered[0])
+        .expect("ForwardAndAuthorize must attach meta::EXECUTION_AUTH");
+    assert_eq!(auth.authorized_by, common::name("alice"));
+    assert_eq!(auth.mode, senate_core::ExecutionAuthMode::Direct);
+    assert_eq!(auth.note.as_deref(), Some("staging only"));
     h.stop().await;
 }

@@ -54,6 +54,10 @@ pub struct ThreadEvent {
     pub mine: bool,
     /// A task status (`kind` `status`): what it says, as one activity line.
     pub status: Option<StatusLine>,
+    /// Execution authorization provenance badge (`meta::EXECUTION_AUTH`), when carried.
+    pub execution_auth_badge: Option<String>,
+    /// Execution authorization wire mode (`"direct"` or `"secretary_proxy"`).
+    pub execution_auth_mode: Option<String>,
 }
 
 /// A task status in a thread, as a compact activity line: the state in
@@ -90,6 +94,7 @@ pub struct StatusLink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum DeskAction {
     Forward,
+    ForwardAndAuthorize,
     Refuse,
     Answer,
     Close,
@@ -100,6 +105,7 @@ impl From<senate_bridge::ipc::DeskAction> for DeskAction {
         use senate_bridge::ipc::DeskAction as A;
         match action {
             A::Forward => Self::Forward,
+            A::ForwardAndAuthorize => Self::ForwardAndAuthorize,
             A::Refuse => Self::Refuse,
             A::Answer => Self::Answer,
             A::Close => Self::Close,
@@ -111,6 +117,9 @@ impl From<senate_bridge::ipc::DeskAction> for DeskAction {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum DeskChoice {
     Forward,
+    ForwardAndAuthorize {
+        note: Option<String>,
+    },
     Refuse {
         reason: String,
     },
@@ -128,6 +137,7 @@ impl From<DeskChoice> for senate_bridge::ipc::DeskDecision {
     fn from(choice: DeskChoice) -> Self {
         match choice {
             DeskChoice::Forward => Self::Forward,
+            DeskChoice::ForwardAndAuthorize { note } => Self::ForwardAndAuthorize { note },
             DeskChoice::Refuse { reason } => Self::Refuse { reason },
             DeskChoice::Answer { body } => Self::Answer { body },
             DeskChoice::Close { reason } => Self::Close { reason },
@@ -414,6 +424,11 @@ impl Task {
 
 fn thread_event(e: &Event, me: Option<&Address>, locale: Locale) -> ThreadEvent {
     let carried = e.carried();
+    let execution_auth = carried
+        .as_ref()
+        .and_then(|c| c.execution_auth.as_ref())
+        .cloned()
+        .or_else(|| senate_core::ExecutionAuthPayload::of(e));
     ThreadEvent {
         seq: e.seq.0,
         kind: e.kind.as_str().to_string(),
@@ -428,6 +443,8 @@ fn thread_event(e: &Event, me: Option<&Address>, locale: Locale) -> ThreadEvent 
         at: e.ts.into(),
         mine: me.is_some_and(|m| *m == e.from && e.on_behalf_of.is_none()),
         status: None,
+        execution_auth_badge: execution_auth.as_ref().map(|a| a.badge(locale)),
+        execution_auth_mode: execution_auth.as_ref().map(|a| a.mode_wire().to_string()),
     }
 }
 
@@ -848,5 +865,65 @@ mod tests {
         };
         let view = thread_view(reply, None, Locale::En);
         assert_eq!(view.events.len(), 1);
+    }
+
+    #[test]
+    fn thread_view_surfaces_execution_auth_provenance_badge_and_mode() {
+        let alice = SenatorName::new(senate_core::Name::new("alice").unwrap());
+        let bob = senate_core::Name::new("bob").unwrap();
+        let origin = senate_core::Origin {
+            locator: "/senate::commons::senator::bob".parse().unwrap(),
+            thread: Seq(13),
+        };
+        let forwarded = Event {
+            meta: [
+                (senate_core::meta::ORIGIN.to_owned(), origin.value()),
+                (
+                    senate_core::meta::ACTED_BY.to_owned(),
+                    serde_json::json!("alice"),
+                ),
+                (
+                    senate_core::meta::EXECUTION_AUTH.to_owned(),
+                    senate_core::ExecutionAuthPayload {
+                        authorized_by: senate_core::Name::new("alice").unwrap(),
+                        mode: senate_core::ExecutionAuthMode::Direct,
+                        note: Some("in scope".into()),
+                    }
+                    .value(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..event(10, Kind::Request, Address::Speaker, "Please ship it.")
+        };
+        let control = Event {
+            meta: [
+                (senate_core::meta::ORIGIN.to_owned(), origin.value()),
+                (
+                    senate_core::meta::ACTED_BY.to_owned(),
+                    serde_json::json!("bob"),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..event(11, Kind::Request, Address::Speaker, "Plain forward.")
+        };
+        let reply = ThreadReply {
+            committee: CommitteeId::new("refund-v2").unwrap(),
+            root: Seq(10),
+            events: vec![forwarded, control],
+        };
+        let view = thread_view(reply, Some(&bob), Locale::En);
+        assert_eq!(
+            view.events[0].execution_auth_mode.as_deref(),
+            Some("direct")
+        );
+        assert_eq!(
+            view.events[0].execution_auth_badge.as_deref(),
+            Some("authorized by [senator::alice]")
+        );
+        assert_eq!(view.events[1].execution_auth_mode, None);
+        assert_eq!(view.events[1].execution_auth_badge, None);
+        let _ = alice;
     }
 }

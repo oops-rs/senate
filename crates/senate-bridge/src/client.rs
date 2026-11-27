@@ -815,10 +815,23 @@ impl ApiClient {
         secretaries: Vec<SenatorName>,
         acted_by: Option<SenatorName>,
     ) -> Result<api::Secretaries, ApiClientError> {
+        self.set_secretaries_with_proxies(senator, secretaries, None, acted_by)
+            .await
+    }
+
+    /// `PUT /v1/secretaries/{senator}` with optional execution proxy grants.
+    pub async fn set_secretaries_with_proxies(
+        &self,
+        senator: &SenatorName,
+        secretaries: Vec<SenatorName>,
+        execution_proxies: Option<Vec<api::ExecutionProxyGrant>>,
+        acted_by: Option<SenatorName>,
+    ) -> Result<api::Secretaries, ApiClientError> {
         let _permit = self.short_request().await;
         let url = self.url(&api::secretaries_of_path(senator));
         let body = api::SetSecretaries {
             secretaries,
+            execution_proxies,
             acted_by,
         };
         let resp = self.authed(self.http.put(url)).json(&body).send().await?;
@@ -836,6 +849,7 @@ impl ApiClient {
         let url = self.url(&api::secretaries_of_path(senator));
         let body = api::SetSecretaries {
             secretaries: vec![secretary],
+            execution_proxies: None,
             acted_by,
         };
         let resp = self.authed(self.http.post(url)).json(&body).send().await?;

@@ -1904,6 +1904,12 @@ pub enum Request {
         session: SessionSelector,
         committee: CommitteeId,
         seq: Seq,
+        /// Authorize direct execution by the receiving committee (`meta::EXECUTION_AUTH`).
+        #[serde(default, skip_serializing_if = "is_false")]
+        authorize: bool,
+        /// Optional short note summarizing the authorized execution scope.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
@@ -1982,7 +1988,7 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
-    /// List, add or remove a senator's secretaries.
+    /// List, add, remove, or grant/revoke execution proxy for a senator's secretaries.
     Secretaries {
         session: SessionSelector,
         action: SecretaryOp,
@@ -1992,6 +1998,15 @@ pub enum Request {
         for_: Option<SenatorName>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secretary: Option<SenatorName>,
+        /// Optional expiry timestamp when `action == SecretaryOp::GrantProxy`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at: Option<DateTime<Utc>>,
+    },
+    /// Enable or disable the local `[desk].unsafe_ignore_execution_auth` opt-in
+    /// bypass (`Request::SetUnsafeMode`). Enabling requires `app_confirmation`
+    /// (Touch ID / confirmed app call).
+    SetUnsafeMode {
+        enabled: bool,
     },
     /// The person's appointment of a specific registered native session.
     SetSecretarySession {
@@ -2104,6 +2119,14 @@ pub enum SecretaryOp {
     List,
     Add,
     Remove,
+    GrantProxy,
+    RevokeProxy,
+}
+
+/// Reply to [`Request::SetUnsafeMode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsafeModeReply {
+    pub enabled: bool,
 }
 
 /// A senator's secretaries after `secretaries`, and every relation.
@@ -2113,6 +2136,9 @@ pub struct SecretariesReply {
     pub senator: SenatorName,
     /// Its secretaries, in order.
     pub secretaries: Vec<SenatorName>,
+    /// Active / configured execution proxy grants held by the Speaker's secretaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_proxies: Vec<senate_core::ExecutionProxyGrant>,
     /// Every secretary relation of the Senate.
     #[serde(default)]
     pub all: senate_core::api::Secretaries,
@@ -2125,6 +2151,9 @@ pub struct DeskReply {
     pub speaker: SenatorName,
     /// Its secretaries, in order: the desk workers set with `desk set`.
     pub secretaries: Vec<SenatorName>,
+    /// Execution proxy grants issued by the Speaker to desk secretaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_proxies: Vec<senate_core::ExecutionProxyGrant>,
     /// Who works the desk as the server has it, in order: the Speaker
     /// itself first when it is an agent, then its secretaries (and the
     /// built-in session when it runs). The first present acts.
@@ -2158,6 +2187,11 @@ impl SendReply {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeskDecision {
     Forward,
+    /// Forward across committees AND attach direct person execution authorization.
+    ForwardAndAuthorize {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     Refuse {
         reason: String,
     },
@@ -2179,6 +2213,7 @@ pub enum DeskDecision {
 #[serde(rename_all = "snake_case")]
 pub enum DeskAction {
     Forward,
+    ForwardAndAuthorize,
     Refuse,
     Answer,
     Close,
@@ -2752,6 +2787,9 @@ pub struct CatchUpReply {
     /// ([`crate::format::redelivered_note`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub redelivered: bool,
+    /// Local explicit opt-in receiver bypass for cross-committee execution auth.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unsafe_ignore_execution_auth: bool,
 }
 
 impl CatchUpReply {
@@ -2766,6 +2804,7 @@ impl CatchUpReply {
             Some(user) => reader.with_user(user.clone()),
             None => reader,
         };
+        let reader = reader.with_unsafe_ignore_execution_auth(self.unsafe_ignore_execution_auth);
         match &self.chair {
             Some(chair) => reader.with_chair(self.committee.clone(), chair.clone()),
             None => reader,
@@ -3187,6 +3226,9 @@ pub struct StatusReply {
     /// Absent from an older daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roles: Option<RolesReply>,
+    /// Local explicit opt-in receiver bypass for cross-committee execution auth.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unsafe_ignore_execution_auth: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]

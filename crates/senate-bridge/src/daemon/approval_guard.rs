@@ -199,10 +199,19 @@ pub(crate) fn request_effect(request: &Request) -> RequestEffect {
         },
         Request::Secretaries { action, .. } => match action {
             ipc::SecretaryOp::List => SessionOrRead,
-            ipc::SecretaryOp::Add => Presence,
+            ipc::SecretaryOp::Add
+            | ipc::SecretaryOp::GrantProxy
+            | ipc::SecretaryOp::RevokeProxy => Presence,
             // Removal only shrinks the list and never appoints a successor.
             ipc::SecretaryOp::Remove => Operator,
         },
+        Request::SetUnsafeMode { enabled } => {
+            if *enabled {
+                Presence
+            } else {
+                Operator
+            }
+        }
         Request::Desk { set } => {
             if set.is_some() {
                 Presence
@@ -479,6 +488,15 @@ pub(crate) fn person_only(request: &Request) -> Option<&'static str> {
         Request::CleanupPlan { .. } | Request::CleanupApply { .. } => {
             "Cleaning up the Senate is the person's to do: run `senate cleanup` from your own terminal"
         }
+        Request::Secretaries {
+            action: ipc::SecretaryOp::GrantProxy | ipc::SecretaryOp::RevokeProxy,
+            ..
+        } => {
+            "Execution proxy grants must be managed in person from your own terminal or the Senate app"
+        }
+        Request::SetUnsafeMode { .. } => {
+            "Receiver unsafe mode must be toggled in person from your own terminal or the Senate app"
+        }
         Request::EnsureSecretary => {
             "Only the person starts the default secretary: use your Senate MCP tools or ask the person to run it from their own terminal or the Senate app"
         }
@@ -555,6 +573,22 @@ pub(crate) fn session_id_claim(request: &Request) -> Option<&str> {
         | Request::HostedClaudeApproval { session_id, .. } => Some(session_id),
         _ => None,
     }
+}
+
+/// Whether `request` is a high-stakes execution authorization / proxy / unsafe
+/// toggle that ALWAYS requires Touch ID / `app_confirmation` on macOS, even
+/// if `approvals_require_touch` is off or the caller is the signed app.
+pub(crate) fn always_requires_touch(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::DeskDecide {
+            decision: ipc::DeskDecision::ForwardAndAuthorize { .. },
+            ..
+        } | Request::Secretaries {
+            action: ipc::SecretaryOp::GrantProxy | ipc::SecretaryOp::RevokeProxy,
+            ..
+        } | Request::SetUnsafeMode { enabled: true }
+    )
 }
 
 impl Front {
@@ -759,8 +793,9 @@ impl Front {
         let requester_instance = requester_pid
             .and_then(|pid| kernel_process::inspect(pid).ok())
             .and_then(|process| kernel_process::BoundProcess::capture(process.identity).ok());
-        let require_touch = answers_a_prompt(&request)
-            && crate::app_confirmation::macos::approvals_require_touch(home);
+        let require_touch = (answers_a_prompt(&request)
+            && crate::app_confirmation::macos::approvals_require_touch(home))
+            || always_requires_touch(&request);
         if peer.signed_app && !session_action && pin_change.is_none() && !require_touch {
             return self
                 .dispatch_app_confirmation(
@@ -1316,6 +1351,8 @@ mod tests {
                 session: person.clone(),
                 committee: committee.clone(),
                 seq: senate_core::Seq(1),
+                authorize: false,
+                note: None,
                 id: None,
             },
             Request::Refuse {
@@ -1333,6 +1370,7 @@ mod tests {
                 action: ipc::SecretaryOp::Add,
                 for_: None,
                 secretary: Some(senator.clone()),
+                expires_at: None,
             },
             Request::SetSecretarySession {
                 target_session: Some("s".into()),
@@ -1555,6 +1593,7 @@ mod tests {
                 action: ipc::SecretaryOp::Remove,
                 for_: None,
                 secretary: Some(senator.clone()),
+                expires_at: None,
             },
         ];
 
@@ -1631,6 +1670,7 @@ mod tests {
                 action: ipc::SecretaryOp::List,
                 for_: None,
                 secretary: None,
+                expires_at: None,
             },
             Request::CleanupPlan {
                 scope: crate::cleanup::Scope::default(),
@@ -1820,5 +1860,60 @@ mod tests {
         let (top, _) = chain.last().unwrap();
         // Windows: to a parent that has gone (0), a pid since reused.
         assert!(*top <= 1 || process(*top).await.is_ok());
+    }
+
+    #[test]
+    fn phase_a_touch_and_guard_classification() {
+        let committee = senate_core::CommitteeId::new("refund").unwrap();
+        let senator: senate_core::SenatorName = "claude".parse().unwrap();
+        let grant_proxy = Request::Secretaries {
+            session: SessionSelector::default(),
+            action: ipc::SecretaryOp::GrantProxy,
+            for_: None,
+            secretary: Some(senator.clone()),
+            expires_at: None,
+        };
+        let revoke_proxy = Request::Secretaries {
+            session: SessionSelector::default(),
+            action: ipc::SecretaryOp::RevokeProxy,
+            for_: None,
+            secretary: Some(senator),
+            expires_at: None,
+        };
+        let enable_unsafe = Request::SetUnsafeMode { enabled: true };
+        let disable_unsafe = Request::SetUnsafeMode { enabled: false };
+        let forward_only = Request::DeskDecide {
+            committee: committee.clone(),
+            seq: senate_core::Seq(1),
+            item_id: EventId::new(),
+            id: EventId::new(),
+            decision: ipc::DeskDecision::Forward,
+        };
+        let forward_authorize = Request::DeskDecide {
+            committee,
+            seq: senate_core::Seq(1),
+            item_id: EventId::new(),
+            id: EventId::new(),
+            decision: ipc::DeskDecision::ForwardAndAuthorize {
+                note: Some("in scope".into()),
+            },
+        };
+
+        assert!(always_requires_touch(&forward_authorize));
+        assert!(always_requires_touch(&grant_proxy));
+        assert!(always_requires_touch(&revoke_proxy));
+        assert!(always_requires_touch(&enable_unsafe));
+        assert!(!always_requires_touch(&forward_only));
+        assert!(!always_requires_touch(&disable_unsafe));
+
+        assert_eq!(request_effect(&grant_proxy), RequestEffect::Presence);
+        assert_eq!(request_effect(&revoke_proxy), RequestEffect::Presence);
+        assert_eq!(request_effect(&enable_unsafe), RequestEffect::Presence);
+        assert_eq!(request_effect(&disable_unsafe), RequestEffect::Operator);
+
+        assert!(person_only(&grant_proxy).is_some());
+        assert!(person_only(&revoke_proxy).is_some());
+        assert!(person_only(&enable_unsafe).is_some());
+        assert!(person_only(&disable_unsafe).is_some());
     }
 }

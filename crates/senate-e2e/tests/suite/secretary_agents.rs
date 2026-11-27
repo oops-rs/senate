@@ -67,6 +67,7 @@ async fn an_agent_secretary_covers_an_away_agents_questions_from_its_notes() {
             action: SecretaryOp::Add,
             for_: None,
             secretary: Some(path("claude")),
+            expires_at: None,
         })
         .await;
     assert!(registered.secretaries.contains(&path("claude")));
@@ -362,6 +363,7 @@ async fn the_secretarys_item_is_withdrawn_when_the_agent_returns_first() {
             action: SecretaryOp::Add,
             for_: None,
             secretary: Some(path("codex")),
+            expires_at: None,
         })
         .await;
     desk.checkpoint(

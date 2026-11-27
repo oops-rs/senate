@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 
 use senate_core::alias::CommitteeAliases;
-use senate_core::api::ChildSenate;
+use senate_core::api::{ChildSenate, ExecutionProxyGrant};
 use senate_core::{Name, SenatorName};
 use senate_log::{LogError, LogStore};
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,7 @@ use serde_json::Value;
 
 pub(crate) const SEAT: &str = "seat:";
 pub(crate) const SECRETARIES: &str = "secretaries:";
+pub(crate) const EXECUTION_PROXIES: &str = "execution-proxies:";
 const SECRETARY_TEAM: &str = "secretary-team:";
 pub(crate) const CHILD: &str = "child:";
 pub(crate) const NOTE: &str = "note:";
@@ -99,6 +100,23 @@ pub(crate) async fn put_secretaries(
     let value = serde_json::to_value(secretaries).unwrap_or(Value::Null);
     store
         .put_registry(&format!("{SECRETARIES}{principal}"), Some(value))
+        .await
+}
+
+pub(crate) async fn execution_proxies(
+    store: &dyn LogStore,
+) -> Result<Vec<(SenatorName, Vec<ExecutionProxyGrant>)>, LogError> {
+    entries(store, EXECUTION_PROXIES).await
+}
+
+pub(crate) async fn put_execution_proxies(
+    store: &dyn LogStore,
+    principal: &SenatorName,
+    grants: &[ExecutionProxyGrant],
+) -> Result<(), LogError> {
+    let value = serde_json::to_value(grants).unwrap_or(Value::Null);
+    store
+        .put_registry(&format!("{EXECUTION_PROXIES}{principal}"), Some(value))
         .await
 }
 

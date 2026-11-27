@@ -254,6 +254,72 @@ impl AppState {
                 "desk_person must name the authenticated human principal",
             ));
         }
+        if let Some(raw_auth) = event.meta.get(meta::EXECUTION_AUTH) {
+            let auth: senate_core::ExecutionAuthPayload = serde_json::from_value(raw_auth.clone())
+                .map_err(|e| {
+                    ApiFailure::bad_request(format!(
+                        "meta.{} is not an execution auth payload: {e}",
+                        meta::EXECUTION_AUTH
+                    ))
+                })?;
+            if event.kind != Kind::Request
+                || event.thread.is_some()
+                || senate_core::Origin::of_new(event).is_none()
+            {
+                return Err(ApiFailure::bad_request(format!(
+                    "meta.{} is only valid on a cross-committee forwarded request root",
+                    meta::EXECUTION_AUTH
+                )));
+            }
+            match &auth.mode {
+                senate_core::ExecutionAuthMode::Direct => {
+                    let is_human = roster
+                        .principal(&person.0)
+                        .is_some_and(|p| p.kind.is_person());
+                    let acted_by_allowed = acted_by.name() == &person.0
+                        || (office.kind == senate_core::SenatorKind::Agent
+                            && office.speaker_here() == Some(&acted_by)
+                            && roster.owner_of(&acted_by) == Some(&person.0));
+                    let desk_matches = event.meta.get(meta::DESK_PERSON).and_then(|v| v.as_str())
+                        == Some(person.0.as_str());
+                    if !is_human
+                        || !acted_by_allowed
+                        || auth.authorized_by != person.0
+                        || !desk_matches
+                    {
+                        return Err(ApiFailure::forbidden(
+                            "direct execution_auth must be issued by the authenticated human principal and match meta.desk_person",
+                        ));
+                    }
+                }
+                senate_core::ExecutionAuthMode::SecretaryProxy { secretary } => {
+                    if &acted_by != secretary {
+                        return Err(ApiFailure::forbidden(
+                            "secretary_proxy execution_auth must be written by the named secretary",
+                        ));
+                    }
+                    if !roster.is_active_execution_proxy(secretary, chrono::Utc::now()) {
+                        return Err(ApiFailure::forbidden(format!(
+                            "{} does not hold an active execution proxy grant",
+                            Address::senator(secretary)
+                        )));
+                    }
+                    let owner_person = office
+                        .desk_owner()
+                        .filter(|owner| {
+                            roster
+                                .principal(owner.name())
+                                .is_some_and(|p| p.kind.is_person())
+                        })
+                        .map(|owner| owner.name());
+                    if owner_person != Some(&auth.authorized_by) {
+                        return Err(ApiFailure::forbidden(
+                            "secretary_proxy authorized_by must match the Speaker's human principal",
+                        ));
+                    }
+                }
+            }
+        }
         event.meta.insert(
             meta::ACTED_BY.into(),
             serde_json::Value::String(acted_by.to_string()),

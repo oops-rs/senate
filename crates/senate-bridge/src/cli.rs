@@ -5893,6 +5893,7 @@ fn cli_only_announces_authentication_for_speaker_level_commands() {
             action: ipc::SecretaryOp::Remove,
             for_: None,
             secretary: Some(senator.clone()),
+            expires_at: None,
         },
     ];
     for request in &prompt_free {

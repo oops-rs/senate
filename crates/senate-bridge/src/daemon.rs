@@ -539,6 +539,8 @@ pub(crate) struct Shared {
     /// Whether a Speaker judges roots on this Senate, as `/v1/me` last said;
     /// until it has said, as if it does.
     triaged: AtomicBool,
+    /// Local explicit opt-in receiver bypass for cross-committee execution auth.
+    unsafe_ignore_execution_auth: AtomicBool,
     /// Who holds this Senate's Speaker's seat, as `/v1/me` last said.
     speaker: Mutex<Option<SpeakerSeat>>,
     pub(crate) store: Arc<Store>,
@@ -1173,6 +1175,7 @@ impl Shared {
             store: store.clone(),
             home: common.home.clone(),
         });
+        let unsafe_ignore_execution_auth = config.desk.unsafe_ignore_execution_auth;
         Ok(Arc::new(Shared {
             scope_fixture: common.scope_fixture,
             #[cfg(target_os = "macos")]
@@ -1190,6 +1193,7 @@ impl Shared {
             seating: Mutex::new(seating),
             senate: Mutex::new(None),
             triaged: AtomicBool::new(true),
+            unsafe_ignore_execution_auth: AtomicBool::new(unsafe_ignore_execution_auth),
             speaker: Mutex::new(None),
             config,
             store,
@@ -1526,13 +1530,31 @@ impl Shared {
         self.senate_path().map(|p| p.name().clone())
     }
 
+    pub(crate) fn unsafe_ignore_execution_auth(&self) -> bool {
+        self.unsafe_ignore_execution_auth.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn on_set_unsafe_mode(
+        &self,
+        enabled: bool,
+    ) -> Result<crate::ipc::UnsafeModeReply, IpcError> {
+        let config_path = Paths::new(&self.home).config();
+        crate::config::DeskConfig::set_unsafe_ignore_execution_auth(&config_path, enabled)
+            .map_err(IpcError::bad_request)?;
+        self.unsafe_ignore_execution_auth
+            .store(enabled, Ordering::Relaxed);
+        self.publish_status();
+        Ok(crate::ipc::UnsafeModeReply { enabled })
+    }
+
     /// How `agent` reads a pushed event: who the Senate's people are, and
     /// which agents this machine's person runs.
     pub(crate) fn reader(&self, agent: &SenatorName) -> format::Reader {
         let mut own: BTreeSet<SenatorName> = self.served_agents().unwrap_or_default();
         own.extend(self.seated());
         own.insert(agent.clone());
-        let mut reader = format::Reader::new(Address::senator(agent), self.people(), own);
+        let mut reader = format::Reader::new(Address::senator(agent), self.people(), own)
+            .with_unsafe_ignore_execution_auth(self.unsafe_ignore_execution_auth());
         if let Ok(user) = SenatorName::new(self.config.person.clone()) {
             reader = reader.with_user(user);
         }
@@ -3748,7 +3770,11 @@ impl Shared {
                 action,
                 for_,
                 secretary,
-            } => wrap(on_heap(|| self.on_secretaries(&session, action, for_, secretary)).await),
+                expires_at,
+            } => wrap(
+                on_heap(|| self.on_secretaries(&session, action, for_, secretary, expires_at)).await,
+            ),
+            Request::SetUnsafeMode { enabled } => wrap(self.on_set_unsafe_mode(enabled)),
             Request::Roles => wrap(on_heap(|| self.on_roles()).await),
             Request::Waiting { session_id } => wrap(on_heap(|| self.on_waiting(&session_id)).await),
             Request::SessionEnd { session_id, .. } => {
@@ -4346,6 +4372,7 @@ impl Shared {
             queue: self.store.counts().map_err(internal)?,
             speaker: self.speaker_seat(),
             roles: Some(self.roles_now()),
+            unsafe_ignore_execution_auth: self.unsafe_ignore_execution_auth(),
         })
     }
 
@@ -6652,6 +6679,7 @@ impl Shared {
                 read_before,
                 read: read_before,
                 redelivered,
+                unsafe_ignore_execution_auth: reader.unsafe_ignore_execution_auth,
             });
         }
         let read = match last {
@@ -6679,6 +6707,7 @@ impl Shared {
             read_before,
             read,
             redelivered,
+            unsafe_ignore_execution_auth: reader.unsafe_ignore_execution_auth,
         })
     }
 

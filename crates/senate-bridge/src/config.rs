@@ -196,6 +196,9 @@ pub struct BridgeConfig {
     /// Defaults for every agent this machine seats.
     #[serde(default, skip_serializing_if = "AgentDefaults::is_empty")]
     pub agent: AgentDefaults,
+    /// Receiver-side desk preferences (for cross-committee execution auth).
+    #[serde(default, skip_serializing_if = "DeskConfig::is_empty")]
+    pub desk: DeskConfig,
     /// Named launch settings for hosted coding sessions on this machine.
     #[serde(
         default,
@@ -211,6 +214,51 @@ pub struct BridgeConfig {
     /// them, and the desk's forward to a seat above as the child's office.
     #[serde(skip)]
     pub uplink: Option<Uplink>,
+}
+
+/// `[desk]` in `senate.toml`: receiver-side execution authorization preferences.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeskConfig {
+    /// Explicit opt-in receiver bypass for cross-committee execution authorization.
+    /// Default is `false`: forwarded cross-committee requests without valid
+    /// `meta::EXECUTION_AUTH` keep the user-confirmation gate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsafe_ignore_execution_auth: bool,
+}
+
+impl DeskConfig {
+    pub fn is_empty(&self) -> bool {
+        !self.unsafe_ignore_execution_auth
+    }
+
+    /// Persist `[desk].unsafe_ignore_execution_auth` into `path` while preserving formatting.
+    pub fn set_unsafe_ignore_execution_auth(path: &Path, enabled: bool) -> Result<(), String> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("reading {}: {e}", path.display())),
+        };
+        let mut doc: toml_edit::DocumentMut = text
+            .parse()
+            .map_err(|e: toml_edit::TomlError| format!("parsing {}: {e}", path.display()))?;
+        if enabled {
+            if !doc.contains_table("desk") {
+                doc["desk"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            doc["desk"]["unsafe_ignore_execution_auth"] = toml_edit::value(true);
+        } else if let Some(table) = doc.get_mut("desk").and_then(|item| item.as_table_mut()) {
+            table.remove("unsafe_ignore_execution_auth");
+            if table.is_empty() {
+                doc.remove("desk");
+            }
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        }
+        std::fs::write(path, doc.to_string())
+            .map_err(|e| format!("writing {}: {e}", path.display()))
+    }
 }
 
 /// A profile to copy into the configuration file, shown where none is
@@ -395,6 +443,7 @@ impl fmt::Debug for BridgeConfig {
             .field("branch_prefix", &self.branch_prefix)
             .field("agents", &self.agents)
             .field("agent", &self.agent)
+            .field("desk", &self.desk)
             .field("profiles", &self.profiles)
             .field("uplink", &self.uplink)
             .finish()
@@ -856,6 +905,7 @@ impl BridgeConfig {
             branch_prefix: default_branch_prefix(),
             agents: AgentNames::default(),
             agent: AgentDefaults::default(),
+            desk: DeskConfig::default(),
             profiles: BTreeMap::new(),
             uplink: None,
         }
@@ -1470,5 +1520,38 @@ note = "Use for diagnosis."
         let c: BridgeConfig =
             toml::from_str("server_url = \"ftp://x\"\ntoken = \"t\"\nperson = \"a\"\n").unwrap();
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn desk_unsafe_ignore_execution_auth_defaults_false_and_parses() {
+        let default_cfg: BridgeConfig =
+            toml::from_str("server_url = \"http://x\"\ntoken = \"t\"\nperson = \"a\"\n").unwrap();
+        let default_toml = toml::to_string(&default_cfg).unwrap();
+        assert!(!default_toml.contains("unsafe_ignore_execution_auth"));
+
+        let unsafe_cfg: BridgeConfig = toml::from_str(
+            "server_url = \"http://x\"\ntoken = \"t\"\nperson = \"a\"\n[desk]\nunsafe_ignore_execution_auth = true\n",
+        )
+        .unwrap();
+        let roundtrip = toml::to_string(&unsafe_cfg).unwrap();
+        assert!(
+            roundtrip.contains("unsafe_ignore_execution_auth = true"),
+            "{roundtrip}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("senate.toml");
+        std::fs::write(
+            &path,
+            "server_url = \"http://x\"\ntoken = \"t\"\nperson = \"a\"\n",
+        )
+        .unwrap();
+        DeskConfig::set_unsafe_ignore_execution_auth(&path, true).unwrap();
+        let loaded = BridgeConfig::load(&path).unwrap();
+        assert!(loaded.desk.unsafe_ignore_execution_auth);
+        assert_eq!(loaded.token, "t");
+        DeskConfig::set_unsafe_ignore_execution_auth(&path, false).unwrap();
+        let loaded = BridgeConfig::load(&path).unwrap();
+        assert!(!loaded.desk.unsafe_ignore_execution_auth);
     }
 }

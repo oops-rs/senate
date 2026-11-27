@@ -519,6 +519,8 @@ async fn the_desk_forwards_an_agents_question_above_and_the_answer_comes_back_do
             session: Laptop::session("s-claude"),
             committee: refund(),
             seq: sent.posted.seq,
+            authorize: false,
+            note: None,
             id: None,
         })
         .await;

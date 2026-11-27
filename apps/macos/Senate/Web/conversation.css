@@ -65,6 +65,9 @@ main { max-width: 700px; margin: 0 auto; padding: 8px 24px 24px; }
 .k-status.st-suspended .what { color: var(--attention); }
 .k-status .status-reason { color: var(--fg); margin: 4px 0 0 0; border-left: 2px solid var(--attention); padding-left: 10px; }
 .k-event .event-head .via { font-size: 11.5px; margin-top: 2px; }
+.k-event .event-head .auth-badge { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.k-event .event-head .auth-badge.direct { color: var(--success); background: var(--success-bg); }
+.k-event .event-head .auth-badge.proxy { color: var(--attention); background: var(--attention-bg); }
 .k-status .status-steps { list-style: none; margin: 4px 0 0 0; padding: 0 0 0 2px; }
 .k-status .status-steps li { display: flex; gap: 6px; }
 .k-status .status-steps li.done { color: var(--dim); }

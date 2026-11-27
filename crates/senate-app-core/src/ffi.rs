@@ -597,6 +597,19 @@ impl AppCore {
         Ok(s.into())
     }
 
+    /// Enable or disable the local `[desk].unsafe_ignore_execution_auth` opt-in
+    /// receiver bypass (enabling requires Touch ID / confirmed app call).
+    pub async fn set_unsafe_ignore_execution_auth(&self, enabled: bool) -> Result<bool, CoreError> {
+        let reply: senate_bridge::ipc::UnsafeModeReply = self
+            .on_runtime(move |driver| async move {
+                let reply = driver.read(&Request::SetUnsafeMode { enabled }).await?;
+                tokio::spawn(async move { driver.refresh_status().await });
+                Ok(reply)
+            })
+            .await?;
+        Ok(reply.enabled)
+    }
+
     /// A new observer grant for a scene the person allows in this app:
     /// metadata only, every committee now and later, this Senate's direct
     /// links (topology) only when the scene asks for them, for 30 days. The

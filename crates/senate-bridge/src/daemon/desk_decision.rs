@@ -139,7 +139,11 @@ impl Shared {
                 Ok(()) => {
                     let mut actions = Vec::new();
                     if destination.is_ok() {
-                        actions.extend([DeskAction::Forward, DeskAction::Refuse]);
+                        actions.extend([
+                            DeskAction::ForwardAndAuthorize,
+                            DeskAction::Forward,
+                            DeskAction::Refuse,
+                        ]);
                     }
                     actions.extend([DeskAction::Answer, DeskAction::Close]);
                     (actions, None)
@@ -215,7 +219,14 @@ impl Shared {
                 *seq = existing.seq;
             }
             let matches = match (&decision, &recorded) {
-                (DeskDecision::Forward, Some(DeskOutcome::Delivered { .. })) => true,
+                (DeskDecision::Forward, Some(DeskOutcome::Delivered { .. })) => {
+                    !existing.body.contains("execution authorization")
+                        && !existing.body.contains("执行授权")
+                }
+                (DeskDecision::ForwardAndAuthorize { .. }, Some(DeskOutcome::Delivered { .. })) => {
+                    existing.body.contains("execution authorization")
+                        || existing.body.contains("执行授权")
+                }
                 (DeskDecision::Refuse { reason }, Some(DeskOutcome::Refused { .. })) => {
                     existing.body == reason.trim()
                 }
@@ -314,7 +325,22 @@ impl Shared {
                     reason,
                 })
             }
-            DeskDecision::Forward => {
+            DeskDecision::Forward | DeskDecision::ForwardAndAuthorize { .. } => {
+                let auth = match decision {
+                    DeskDecision::ForwardAndAuthorize { note } => {
+                        let note = note
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|n| !n.is_empty())
+                            .map(str::to_owned);
+                        Some(senate_core::ExecutionAuthPayload {
+                            authorized_by: me.person.clone(),
+                            mode: senate_core::ExecutionAuthMode::Direct,
+                            note,
+                        })
+                    }
+                    _ => None,
+                };
                 let target = self.desk_destination(&item).await?;
                 let delivery_id = EventId::derived(
                     item.ts.timestamp_millis().cast_unsigned(),
@@ -330,6 +356,9 @@ impl Shared {
                         .with_id(delivery_id)
                         .with_meta(meta::ORIGIN, origin.value()),
                 );
+                if let Some(ref auth) = auth {
+                    outbound = outbound.with_meta(meta::EXECUTION_AUTH, auth.value());
+                }
                 if let Some(refs) = item.refs {
                     outbound = outbound.with_refs(refs);
                 }
@@ -346,16 +375,29 @@ impl Shared {
                     committee: delivered.committee,
                     seq: delivered.seq,
                 };
-                let body = self.locale.pick(
-                    format!(
-                        "{} 批准转发；已送达 {destination} #{}。",
-                        me.person, delivered.seq
-                    ),
-                    format!(
-                        "{} approved forwarding. Delivered to {destination} #{}.",
-                        me.person, delivered.seq
-                    ),
-                );
+                let body = if auth.is_some() {
+                    self.locale.pick(
+                        format!(
+                            "{} 批准转发并签发执行授权；已送达 {destination} #{}。",
+                            me.person, delivered.seq
+                        ),
+                        format!(
+                            "{} approved forwarding with direct execution authorization. Delivered to {destination} #{}.",
+                            me.person, delivered.seq
+                        ),
+                    )
+                } else {
+                    self.locale.pick(
+                        format!(
+                            "{} 批准转发；已送达 {destination} #{}。",
+                            me.person, delivered.seq
+                        ),
+                        format!(
+                            "{} approved forwarding. Delivered to {destination} #{}.",
+                            me.person, delivered.seq
+                        ),
+                    )
+                };
                 self.post(
                     source(Kind::Note, body)
                         .with_meta(meta::FORWARDED_TO, serde_json::json!(destination))

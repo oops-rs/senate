@@ -498,6 +498,13 @@ pub struct ForwardParams {
     pub committee: String,
     /// The item's seq.
     pub seq: u64,
+    /// When true, also attach a SecretaryProxy execution authorization (only
+    /// valid on Request roots when this secretary holds an active proxy grant).
+    #[serde(default)]
+    pub authorize: bool,
+    /// Optional short scope note included with `execution_auth`.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -2656,6 +2663,8 @@ impl SenateMcp {
                 session: self.selector.clone(),
                 committee,
                 seq: Seq(p.seq),
+                authorize: p.authorize,
+                note: p.note,
                 id: Some(EventId::new()),
             })
             .await?;
@@ -3154,6 +3163,7 @@ impl SenateMcp {
                 action,
                 for_: None,
                 secretary,
+                expires_at: None,
             })
             .await
             .map_err(|e| describe(e, self.locale))?;
@@ -4002,6 +4012,7 @@ mod tests {
             read_before: Seq(0),
             read: Seq(2),
             redelivered: false,
+            unsafe_ignore_execution_auth: false,
         }
     }
 

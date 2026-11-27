@@ -122,9 +122,9 @@ pub use docket::{
 };
 pub use duty::{DutyFold, DutyPayload};
 pub use event::{
-    BindingAction, BindingPayload, Carried, CarriedHow, Event, GroupRole, Kind, Mirror, NewEvent,
-    PROPOSAL_DECISION, Refs, Source, StatusState, is_companion, is_provisional, is_takeover, meta,
-    thread_participants,
+    BindingAction, BindingPayload, Carried, CarriedHow, Event, ExecutionAuthMode,
+    ExecutionAuthPayload, GroupRole, Kind, Mirror, NewEvent, PROPOSAL_DECISION, Refs, Source,
+    StatusState, is_companion, is_provisional, is_takeover, meta, thread_participants,
 };
 pub use hub::{
     Appended, Hub, HubError, MirrorRef, ReassignRefused, reassign_event, reassign_transition,
@@ -138,9 +138,9 @@ pub use memory::{
 };
 pub use mention::{Found, Mention, MentionParseError};
 pub use roster::{
-    Account, AgentOf, DEFAULT_SENATE_NAME, DelegationPresence, Office, People, Principal,
-    PrincipalKind, ResolveError, Roster, RosterConfig, RosterError, SeatedAgent, SenatorKind,
-    SpeakerName, SpeakerSeat,
+    Account, AgentOf, DEFAULT_SENATE_NAME, DelegationPresence, ExecutionProxyGrant, Office, People,
+    Principal, PrincipalKind, ResolveError, Roster, RosterConfig, RosterError, SeatedAgent,
+    SenatorKind, SpeakerName, SpeakerSeat,
 };
 pub use senate::{KEYWORDS, KeywordError, SenatePath, SenatePathError, check_not_keyword};
 pub use senator::{SenatorName, SenatorNameError};
