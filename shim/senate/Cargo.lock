@@ -1954,14 +1954,14 @@ dependencies = [
 
 [[package]]
 name = "senate"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "senate-bridge",
 ]
 
 [[package]]
 name = "senate-bridge"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2012,11 +2012,12 @@ dependencies = [
  "unicode-width",
  "uuid",
  "vt100",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "senate-core"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2030,7 +2031,7 @@ dependencies = [
 
 [[package]]
 name = "senate-markdown"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "comrak",
  "senate-core",
@@ -2041,7 +2042,7 @@ dependencies = [
 
 [[package]]
 name = "senate-observe"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2066,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "senate-observe-client"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "bytes",
  "futures",
@@ -2081,7 +2082,7 @@ dependencies = [
 
 [[package]]
 name = "senate-observe-protocol"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "chrono",
  "schemars",
@@ -2091,7 +2092,7 @@ dependencies = [
 
 [[package]]
 name = "senate-remote-admin"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2107,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "senate-scene"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "hex",
  "rustix",
