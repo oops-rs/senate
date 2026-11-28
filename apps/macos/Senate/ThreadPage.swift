@@ -17,6 +17,7 @@ struct ThreadPage: View {
         // things at one point confuse hit-testing for assistive tools); the
         // conversation fades out above it, so it reads as floating.
         VStack(spacing: 0) {
+            DeliveryStrip(store: store, row: row)
             Conversation(store: store, row: row)
                 .overlay(alignment: .bottom) {
                     LinearGradient(
@@ -59,10 +60,18 @@ struct ThreadPage: View {
         .sharedBackgroundVisibility(.hidden)
         ToolbarSpacer(.flexible)
         ToolbarItemGroup(placement: .primaryAction) {
+            let awaiting = row.awaitingAcceptance || (store.threadView(for: row)?.awaitingAcceptance == true)
+            if awaiting {
+                Button { Task { await store.accept(row) } } label: {
+                    Label(L("commissions.accept_close"), systemImage: "checkmark.seal")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(busy || !store.state.online)
+            }
             Button { Task { await store.take(row) } } label: {
                 Label(L("inbox.take"), systemImage: "hand.raised")
             }
-                // The page's one decisive action: tinted.
+                // The page's one decisive action when not awaiting acceptance: tinted.
                 .buttonStyle(.borderedProminent)
                 .help(L("inbox.take_help"))
                 .disabled(row.takeover != nil || busy || !store.state.online)
@@ -92,6 +101,71 @@ struct ThreadMenu: View {
             .disabled(thread.takeover != nil || store.isBusy(thread.key))
         Button(L("inbox.close"), role: .destructive) { Task { await store.close(thread) } }
             .disabled(store.isBusy(thread.key))
+    }
+}
+
+/// Compact delivery evidence & cross-committee downstream mirror banner.
+private struct DeliveryStrip: View {
+    let store: CoreStore
+    let row: InboxThread
+
+    var body: some View {
+        let view = store.threadView(for: row)
+        let phase = row.phase ?? view?.phase
+        let artifacts = !row.artifacts.isEmpty ? row.artifacts : (view?.artifacts ?? [])
+        let nextOwner = row.nextOwner ?? view?.nextOwner
+        let awaiting = row.awaitingAcceptance || (view?.awaitingAcceptance == true)
+        let downstream = row.linkedDownstream
+        if phase != nil || !artifacts.isEmpty || nextOwner != nil || awaiting || downstream != nil {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    if awaiting {
+                        Text(verbatim: L("thread.pending_acceptance"))
+                            .font(Theme.Fonts.label)
+                            .foregroundStyle(Theme.attention)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 2)
+                            .background(Theme.attention.opacity(0.12), in: Capsule())
+                    }
+                    if let phase {
+                        Text(verbatim: phase)
+                            .font(Theme.Fonts.label)
+                            .foregroundStyle(Theme.onSurface)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 2)
+                            .background(Theme.containerHigh, in: Capsule())
+                    }
+                    if let nextOwner {
+                        Text(verbatim: L("thread.next_owner") + ": " + Mentions.shared.plain(nextOwner, committee: row.committee))
+                            .font(Theme.Fonts.meta)
+                            .foregroundStyle(Theme.onSurfaceVariant)
+                    }
+                    ForEach(artifacts, id: \.self) { artifact in
+                        Text(verbatim: "\(artifact.label): \(artifact.value)")
+                            .font(Theme.Fonts.code)
+                            .foregroundStyle(Theme.onSurfaceVariant)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Theme.containerHigh, in: RoundedRectangle(cornerRadius: 4))
+                    }
+                    if let downstream {
+                        let dPhase = downstream.phase.map { " · \($0)" } ?? ""
+                        let dSteps = downstream.stepsTotal > 0 ? " · \(downstream.stepsDone)/\(downstream.stepsTotal)" : ""
+                        Button {
+                            store.openThread(committee: downstream.committee, root: downstream.root)
+                        } label: {
+                            Text(verbatim: L("thread.downstream") + ": \(downstream.committee) #\(downstream.root) · \(downstream.stateLabel)\(dPhase)\(dSteps)")
+                                .font(Theme.Fonts.meta)
+                                .foregroundStyle(Theme.primary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, Theme.Space.xl)
+                .padding(.vertical, Theme.Space.xs)
+            }
+            .background(Theme.surface)
+        }
     }
 }
 

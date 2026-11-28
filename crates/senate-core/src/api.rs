@@ -352,6 +352,8 @@ pub struct CommitteeSeatStatus {
 /// secretaries in order.
 pub type Secretaries = std::collections::BTreeMap<SenatorName, Vec<SenatorName>>;
 
+pub use crate::roster::ExecutionProxyGrant;
+
 /// `PUT /v1/secretaries/{senator}`: `senator`'s secretaries, in order
 /// (empty removes them). `POST` at the same path appends new secretaries
 /// in order. Allowed for the senator itself, the principal
@@ -359,6 +361,10 @@ pub type Secretaries = std::collections::BTreeMap<SenatorName, Vec<SenatorName>>
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetSecretaries {
     pub secretaries: Vec<SenatorName>,
+    /// Optional execution proxy grants (subset of `secretaries`); `None` keeps
+    /// existing grants for retained secretaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_proxies: Option<Vec<ExecutionProxyGrant>>,
     /// Writing for the Speaker's office: who acts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acted_by: Option<SenatorName>,

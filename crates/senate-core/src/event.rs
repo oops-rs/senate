@@ -306,6 +306,7 @@ impl Event {
                 how: CarriedHow::Relayed,
                 acted_by,
                 desk_person,
+                execution_auth: None,
             });
         }
         if self.thread.is_some() || self.is_chair_discussion() {
@@ -320,6 +321,7 @@ impl Event {
             },
             acted_by,
             desk_person,
+            execution_auth: ExecutionAuthPayload::of(self),
         })
     }
 
@@ -369,6 +371,9 @@ pub struct Carried {
     /// The person who chose the desk action in person
     /// ([`meta::DESK_PERSON`]).
     pub desk_person: Option<String>,
+    /// Server-verified execution authorization ([`meta::EXECUTION_AUTH`]),
+    /// when a forwarded request carries one.
+    pub execution_auth: Option<ExecutionAuthPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,7 +408,7 @@ impl Carried {
             (None, Locale::Zh) => "议长办公桌".to_string(),
             (None, Locale::En) => "the Speaker's desk".to_string(),
         };
-        match (&self.how, locale) {
+        let base = match (&self.how, locale) {
             (CarriedHow::Forwarded { committee, thread }, _) => {
                 let at = match committee {
                     Some(c) => format!("{c} #{thread}"),
@@ -416,6 +421,87 @@ impl Carried {
             }
             (CarriedHow::Relayed, _) => {
                 locale.pick(format!("由{desk}转回"), format!("relayed back by {desk}"))
+            }
+        };
+        let Some(auth) = &self.execution_auth else {
+            return base;
+        };
+        let badge = auth.badge(locale);
+        let note = auth
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.replace(['\r', '\n'], " "));
+        match (note, locale) {
+            (Some(note), Locale::Zh) => format!("{base} · {badge}（{note}）"),
+            (Some(note), Locale::En) => format!("{base} · {badge} ({note})"),
+            (None, _) => format!("{base} · {badge}"),
+        }
+    }
+}
+
+/// Server-verified execution authorization carried in [`meta::EXECUTION_AUTH`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionAuthPayload {
+    /// Human principal who bears authorization responsibility (e.g. "wendell").
+    pub authorized_by: crate::Name,
+    pub mode: ExecutionAuthMode,
+    /// Optional short note summarizing the person's instruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// How execution authorization was issued.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExecutionAuthMode {
+    /// Confirmed directly by the human principal via signed App / Touch ID.
+    Direct,
+    /// Issued by a Secretary holding an active execution proxy grant from the Speaker.
+    SecretaryProxy { secretary: crate::SenatorName },
+}
+
+impl ExecutionAuthPayload {
+    /// Encode as a JSON metadata value.
+    pub fn value(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+
+    /// Decode from a stored event, when valid.
+    pub fn of(event: &Event) -> Option<Self> {
+        serde_json::from_value(event.meta.get(meta::EXECUTION_AUTH)?.clone()).ok()
+    }
+
+    /// Decode from a pending event, when valid.
+    pub fn of_new(event: &NewEvent) -> Option<Self> {
+        serde_json::from_value(event.meta.get(meta::EXECUTION_AUTH)?.clone()).ok()
+    }
+
+    /// Wire name of the authorization mode.
+    pub fn mode_wire(&self) -> &'static str {
+        match &self.mode {
+            ExecutionAuthMode::Direct => "direct",
+            ExecutionAuthMode::SecretaryProxy { .. } => "secretary_proxy",
+        }
+    }
+
+    /// Human-readable provenance badge in `locale`.
+    pub fn badge(&self, locale: Locale) -> String {
+        let who = Address::senior(&self.authorized_by).in_text();
+        match &self.mode {
+            ExecutionAuthMode::Direct => match locale {
+                Locale::Zh => format!("经 {who} 授权执行"),
+                Locale::En => format!("authorized by {who}"),
+            },
+            ExecutionAuthMode::SecretaryProxy { secretary } => {
+                let sec = Address::senator(secretary).in_text();
+                match locale {
+                    Locale::Zh => format!("经秘书 {sec} 代理 {who} 授权执行"),
+                    Locale::En => {
+                        format!("authorized via secretary {sec} under {who}'s proxy")
+                    }
+                }
             }
         }
     }
@@ -692,6 +778,9 @@ pub mod meta {
     /// Senate): an [`Origin`](crate::locator::Origin), naming the seat that
     /// asked and the root of its thread, so an answer can go back there.
     pub const ORIGIN: &str = "origin";
+    /// Event id of the downstream `Answer` carried back by `relay_answer`,
+    /// written by the server so clients can deduplicate origin and destination receipts.
+    pub const RELAYED_EVENT_ID: &str = "relayed_event_id";
     /// A direct discussion between committees of this Senate. On the
     /// source root, the qualified name of the chair selected at delivery.
     /// On replies and copies, `true`. Written by the server only.
@@ -704,6 +793,9 @@ pub mod meta {
     pub const ACTED_BY: &str = "acted_by";
     /// The authenticated person who chose a desk action in person.
     pub const DESK_PERSON: &str = "desk_person";
+    /// Server-verified execution authorization for a forwarded request root;
+    /// written only by the Speaker's office.
+    pub const EXECUTION_AUTH: &str = "execution_auth";
     /// The receipt written to the original thread by the desk.
     pub const DESK_OUTCOME: &str = "desk_outcome";
     /// On the root of a question submitted to a worker's configured desk inbox.
@@ -751,6 +843,21 @@ pub mod meta {
     /// seat among the question's recipients, so the question stays open
     /// when the replaced seat is unseated instead of being closed as gone.
     pub const HANDED_TO: &str = "handed_to";
+    /// Identifier of a cross-committee [`ConferenceId`](crate::ConferenceId)
+    /// (`conf-<ulid>`), written by the server on conference room events,
+    /// committee invitations, and adjournment reports.
+    pub const CONFERENCE_ID: &str = "conference_id";
+    /// Invitation payload ([`ConferenceInvitePayload`](crate::ConferenceInvitePayload))
+    /// written by the server when notifying an invited committee chair.
+    pub const CONFERENCE_INVITE: &str = "conference_invite";
+    /// Adjournment conclusion ([`ConferenceReportPayload`](crate::ConferenceReportPayload))
+    /// written back by the server to each participating chair's committee and
+    /// every linked thread.
+    pub const CONFERENCE_REPORT: &str = "conference_report";
+    /// Lifecycle transition marker ([`ConferenceState`](crate::ConferenceState))
+    /// written by the server on conference state events (`convening`,
+    /// `in_session`, `adjourned`).
+    pub const CONFERENCE_STATE: &str = "conference_state";
 }
 
 fn flag(event: &Event, key: &str) -> bool {

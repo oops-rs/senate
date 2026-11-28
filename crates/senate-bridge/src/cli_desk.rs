@@ -15,6 +15,7 @@ use super::{BridgeConfig, daemon_call, message_text, print_json, runtime};
 use crate::Paths;
 use crate::ipc::{
     DeskAction, DeskDecision, DeskItemDetail, DeskOutcome, DocketReply, Request, SessionSelector,
+    StatusReply, UnsafeModeReply,
 };
 
 #[derive(Args)]
@@ -69,6 +70,21 @@ enum Action {
         /// `committee#seq`, or the seq alone when only one item has it.
         #[arg(add = ArgValueCandidates::new(items))]
         item: String,
+        /// Attach direct execution authorization (`meta::EXECUTION_AUTH`) via Touch ID.
+        #[arg(long)]
+        authorize: bool,
+        /// Optional scope/reason note attached with `--authorize`.
+        #[arg(long, requires = "authorize")]
+        note: Option<String>,
+    },
+    /// Inspect or toggle local `[desk].unsafe_ignore_execution_auth`.
+    Unsafe {
+        /// Enable local receiver-side bypass for unverified cross-committee requests.
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        /// Disable local unsafe bypass (default).
+        #[arg(long, conflicts_with = "enable")]
+        disable: bool,
     },
     /// Refuse a request for another committee, telling the asker why.
     Refuse {
@@ -112,7 +128,40 @@ pub(super) fn run(args: Desk) -> anyhow::Result<()> {
             DeskAction::Answer,
         ),
         Action::Close { item, reason } => (item, DeskDecision::Close { reason }, DeskAction::Close),
-        Action::Forward { item } => (item, DeskDecision::Forward, DeskAction::Forward),
+        Action::Forward {
+            item,
+            authorize,
+            note,
+        } => {
+            if authorize {
+                (
+                    item,
+                    DeskDecision::ForwardAndAuthorize { note },
+                    DeskAction::ForwardAndAuthorize,
+                )
+            } else {
+                (item, DeskDecision::Forward, DeskAction::Forward)
+            }
+        }
+        Action::Unsafe { enable, disable } => {
+            if enable || disable {
+                let reply: UnsafeModeReply = rt.block_on(daemon_call(
+                    &paths,
+                    &Request::SetUnsafeMode { enabled: enable },
+                ))?;
+                println!(
+                    "unsafe_ignore_execution_auth = {} (local receiver setting; server provenance untouched)",
+                    reply.enabled
+                );
+            } else {
+                let status: StatusReply = rt.block_on(daemon_call(&paths, &Request::Status))?;
+                println!(
+                    "unsafe_ignore_execution_auth = {}",
+                    status.unsafe_ignore_execution_auth
+                );
+            }
+            return Ok(());
+        }
         Action::Refuse { item, reason } => (
             item,
             DeskDecision::Refuse {
@@ -322,6 +371,7 @@ fn render_list(docket: &DocketReply, locale: Locale) -> String {
 fn action_word(action: DeskAction) -> &'static str {
     match action {
         DeskAction::Forward => "forward",
+        DeskAction::ForwardAndAuthorize => "forward & authorize",
         DeskAction::Refuse => "refuse",
         DeskAction::Answer => "answer",
         DeskAction::Close => "close",

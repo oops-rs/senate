@@ -815,10 +815,23 @@ impl ApiClient {
         secretaries: Vec<SenatorName>,
         acted_by: Option<SenatorName>,
     ) -> Result<api::Secretaries, ApiClientError> {
+        self.set_secretaries_with_proxies(senator, secretaries, None, acted_by)
+            .await
+    }
+
+    /// `PUT /v1/secretaries/{senator}` with optional execution proxy grants.
+    pub async fn set_secretaries_with_proxies(
+        &self,
+        senator: &SenatorName,
+        secretaries: Vec<SenatorName>,
+        execution_proxies: Option<Vec<api::ExecutionProxyGrant>>,
+        acted_by: Option<SenatorName>,
+    ) -> Result<api::Secretaries, ApiClientError> {
         let _permit = self.short_request().await;
         let url = self.url(&api::secretaries_of_path(senator));
         let body = api::SetSecretaries {
             secretaries,
+            execution_proxies,
             acted_by,
         };
         let resp = self.authed(self.http.put(url)).json(&body).send().await?;
@@ -836,6 +849,7 @@ impl ApiClient {
         let url = self.url(&api::secretaries_of_path(senator));
         let body = api::SetSecretaries {
             secretaries: vec![secretary],
+            execution_proxies: None,
             acted_by,
         };
         let resp = self.authed(self.http.post(url)).json(&body).send().await?;
@@ -996,6 +1010,85 @@ impl ApiClient {
             .send()
             .await?;
         checked(resp).await
+    }
+
+    pub async fn convene_conference(
+        &self,
+        request: &senate_core::CreateConferenceRequest,
+    ) -> Result<senate_core::ConferenceSummary, ApiClientError> {
+        let _permit = self.short_request().await;
+        let url = self.url(senate_core::conferences_path());
+        let resp = self
+            .authed(self.http.post(url).json(request))
+            .send()
+            .await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    pub async fn list_conferences(&self) -> Result<senate_core::ConferenceList, ApiClientError> {
+        let _permit = self.short_request().await;
+        let url = self.url(senate_core::conferences_path());
+        let resp = self.authed(self.http.get(url)).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    pub async fn get_conference(
+        &self,
+        id: &senate_core::ConferenceId,
+    ) -> Result<senate_core::ConferenceDetail, ApiClientError> {
+        let _permit = self.short_request().await;
+        let url = self.url(&senate_core::conference_path(id));
+        let resp = self.authed(self.http.get(url)).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    pub async fn rsvp_conference(
+        &self,
+        id: &senate_core::ConferenceId,
+        action: &senate_core::ConferenceRsvpAction,
+    ) -> Result<senate_core::ConferenceSummary, ApiClientError> {
+        let _permit = self.short_request().await;
+        let url = self.url(&senate_core::conference_rsvp_path(id));
+        let resp = self.authed(self.http.post(url).json(action)).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    pub async fn start_conference(
+        &self,
+        id: &senate_core::ConferenceId,
+    ) -> Result<senate_core::ConferenceSummary, ApiClientError> {
+        let _permit = self.short_request().await;
+        let url = self.url(&senate_core::conference_start_path(id));
+        let resp = self.authed(self.http.post(url)).send().await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    pub async fn post_conference_event(
+        &self,
+        id: &senate_core::ConferenceId,
+        request: &senate_core::PostConferenceEventRequest,
+    ) -> Result<senate_core::PostConferenceEventResponse, ApiClientError> {
+        let _permit = self.short_request().await;
+        let url = self.url(&senate_core::conference_events_path(id));
+        let resp = self
+            .authed(self.http.post(url).json(request))
+            .send()
+            .await?;
+        Ok(checked(resp).await?.json().await?)
+    }
+
+    pub async fn adjourn_conference(
+        &self,
+        id: &senate_core::ConferenceId,
+        request: &senate_core::AdjournConferenceRequest,
+    ) -> Result<senate_core::ConferenceSummary, ApiClientError> {
+        let _permit = self.short_request().await;
+        let url = self.url(&senate_core::conference_adjourn_path(id));
+        let resp = self
+            .authed(self.http.post(url).json(request))
+            .send()
+            .await?;
+        Ok(checked(resp).await?.json().await?)
     }
 }
 

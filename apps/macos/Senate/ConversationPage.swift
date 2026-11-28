@@ -7,6 +7,7 @@ import WebKit
 enum ConversationSource: Hashable {
     case session(String)
     case thread(committee: String, root: UInt64)
+    case conference(String)
     #if DEBUG
     /// Tests: these messages, as an agent's replies.
     case fixture([String])
@@ -202,6 +203,8 @@ final class ConversationPage: NSObject {
                 _ = store.sentNotes[id]
             case .thread:
                 _ = (store.thread, store.threadError)
+            case .conference:
+                _ = (store.conference, store.conferenceError)
             #if DEBUG
             case .fixture, .fixtureRows, .fixtureThread:
                 break
@@ -253,6 +256,11 @@ final class ConversationPage: NSObject {
             let events = view.events.suffix(shownEvents)
             return (events.map { event in Row(id: event.seq, value: event) { [unowned self] in encode(event, committee: committee, root: root) } },
                     ["hasOlder": view.events.count > shownEvents, "loadingOlder": false, "working": false])
+        case let .conference(id):
+            guard let detail = store?.conference, detail.summary.id == id else { return ([], [:]) }
+            let events = detail.events.suffix(shownEvents)
+            return (events.map { event in Row(id: event.seq, value: event) { [unowned self] in encode(event, committee: id, root: 0) } },
+                    ["hasOlder": detail.events.count > shownEvents, "loadingOlder": false, "working": false])
         #if DEBUG
         case let .fixtureRows(name):
             let rows = Self.fixtureRows[name] ?? []
@@ -432,15 +440,22 @@ final class ConversationPage: NSObject {
         // message body: the same renderer, raw HTML as text, links only
         // through the page's handler.
         if let s = event.status {
+            var statusDict: [String: Any] = [
+                "state": s.state, "line": Mentions.shared.plain(s.line, committee: committee),
+                "steps": s.steps.map { ["label": $0.label, "done": $0.done] },
+                "links": s.links.map { ["label": $0.label, "url": $0.url] },
+                "artifacts": s.artifacts.map { ["label": $0.label, "value": $0.value] },
+                "awaitingAcceptance": s.awaitingAcceptance,
+            ]
+            if let phase = s.phase { statusDict["phase"] = phase }
+            if let nextOwner = s.nextOwner {
+                statusDict["nextOwner"] = Mentions.shared.plain(nextOwner, committee: committee)
+            }
             var row: [String: Any] = [
                 "id": event.seq, "kind": "status",
                 "by": Mentions.shared.plain(event.by, committee: committee),
                 "when": event.at.formatted(.relative(presentation: .named)),
-                "status": [
-                    "state": s.state, "line": Mentions.shared.plain(s.line, committee: committee),
-                    "steps": s.steps.map { ["label": $0.label, "done": $0.done] },
-                    "links": s.links.map { ["label": $0.label, "url": $0.url] },
-                ] as [String: Any],
+                "status": statusDict,
             ]
             if let reason = s.reason {
                 row["md"] = markdown("t/\(committee)/\(root)/\(event.seq)", Mentions.shared.plain(reason, committee: committee))
@@ -456,6 +471,12 @@ final class ConversationPage: NSObject {
         ]
         // Words the Speaker's office carried: how they came, and who acted.
         if let via = event.via { row["via"] = Mentions.shared.plain(via, committee: committee) }
+        if let badge = event.executionAuthBadge {
+            row["executionAuthBadge"] = Mentions.shared.plain(badge, committee: committee)
+        }
+        if let mode = event.executionAuthMode {
+            row["executionAuthMode"] = mode
+        }
         return row
     }
 
@@ -476,6 +497,9 @@ final class ConversationPage: NSObject {
         case let .thread(committee, root):
             prefix = "t/\(committee)/\(root)/"
             ids = (store?.thread?.events ?? []).suffix(3).map(\.seq)
+        case let .conference(id):
+            prefix = "t/\(id)/0/"
+            ids = (store?.conference?.events ?? []).suffix(3).map(\.seq)
         #if DEBUG
         case .fixture, .fixtureRows, .fixtureThread:
             return []
@@ -653,6 +677,11 @@ final class ConversationPage: NSObject {
             case let .thread(committee, root):
                 guard let view = store?.thread, view.committee == committee, view.root == root,
                       view.events.count > shownEvents else { return }
+                shownEvents += Self.eventPage
+                push()
+            case let .conference(id):
+                guard let detail = store?.conference, detail.summary.id == id,
+                      detail.events.count > shownEvents else { return }
                 shownEvents += Self.eventPage
                 push()
             default:

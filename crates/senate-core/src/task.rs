@@ -107,6 +107,14 @@ pub const MAX_LINKS: usize = 8;
 pub const MAX_LABEL_CHARS: usize = 80;
 /// Longest task title, in characters.
 pub const MAX_TITLE_CHARS: usize = 80;
+/// Longest phase label on a status card, in characters.
+pub const MAX_PHASE_CHARS: usize = 40;
+/// Most artifacts a [`StatusPayload`] may carry.
+pub const MAX_ARTIFACTS: usize = 8;
+/// Longest artifact label, in characters.
+pub const MAX_ARTIFACT_LABEL_CHARS: usize = 24;
+/// Longest artifact value, in characters.
+pub const MAX_ARTIFACT_VALUE_CHARS: usize = 80;
 
 /// One line of a task's checklist ("read the log · checked
 /// gateway/src/idem.rs · drafting the answer"). The label is the agent's
@@ -127,11 +135,60 @@ pub struct Link {
     pub url: String,
 }
 
+/// Structured delivery evidence attached to a task card (`commit`, `tag`, `host`, `pr`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRef {
+    pub label: String,
+    pub value: String,
+}
+
+/// Read-only mirror of a cross-committee downstream task card, projected
+/// onto the origin thread when the reader also has access to `committee`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedTaskSummary {
+    pub committee: crate::CommitteeId,
+    pub root: Seq,
+    pub state: StatusState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    pub steps_done: u32,
+    pub steps_total: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<Escalation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_owner: Option<Address>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub awaiting_acceptance: bool,
+    pub updated: Seq,
+}
+
+impl LinkedTaskSummary {
+    pub fn from_thread(committee: crate::CommitteeId, thread: &ThreadSummary) -> Self {
+        let steps_total = u32::try_from(thread.steps.len()).unwrap_or(u32::MAX);
+        let steps_done =
+            u32::try_from(thread.steps.iter().filter(|s| s.done).count()).unwrap_or(u32::MAX);
+        Self {
+            committee,
+            root: thread.root,
+            state: thread.state,
+            phase: thread.phase.clone(),
+            steps_done,
+            steps_total,
+            escalation: thread.escalation.clone(),
+            artifacts: thread.artifacts.clone(),
+            next_owner: thread.next_owner.clone(),
+            awaiting_acceptance: thread.awaiting_acceptance,
+            updated: thread.updated,
+        }
+    }
+}
+
 /// `meta["status"]` of a [`Kind::Status`] event, in the thread of a task.
 ///
 /// Every field but `state` is optional, and `None` means "unchanged".
-/// `steps` and `links`, when present, are the complete list and replace the
-/// previous one.
+/// `steps`, `links`, and `artifacts`, when present, replace the previous list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusPayload {
     pub state: StatusState,
@@ -142,6 +199,18 @@ pub struct StatusPayload {
     pub steps: Option<Vec<Step>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub links: Option<Vec<Link>>,
+    /// Short engineering phase badge (`<= 40` chars, single-line).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Key structured delivery artifacts (`<= 8` items).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactRef>,
+    /// Who owns the next handoff or verification step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_owner: Option<Address>,
+    /// True when the agent delivered an answer/handoff that awaits explicit acceptance.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub awaiting_acceptance: bool,
     /// The bridge session that owns the thread: one thread, one session in
     /// charge. Set by the bridge on its agent's first status in the thread;
     /// follow-ups in the thread go to this session only. The id is the
@@ -176,6 +245,10 @@ impl StatusPayload {
             title: None,
             steps: None,
             links: None,
+            phase: None,
+            artifacts: Vec::new(),
+            next_owner: None,
+            awaiting_acceptance: false,
             session: None,
             escalated_to: None,
             takeover: None,
@@ -198,7 +271,7 @@ impl StatusPayload {
     }
 
     /// What is wrong with it as a senator's append, if anything: limits on
-    /// steps, links and labels.
+    /// steps, links, phase, artifacts and labels.
     pub fn check(&self) -> Result<(), String> {
         if self.withdraw
             && (self.escalated_to.is_some()
@@ -212,12 +285,44 @@ impl StatusPayload {
             );
         }
         let long = |s: &str, max: usize| s.chars().count() > max;
+        let multiline = |s: &str| s.contains('\n') || s.contains('\r');
         if self
             .title
             .as_deref()
             .is_some_and(|t| long(t, MAX_TITLE_CHARS))
         {
             return Err(format!("title is over {MAX_TITLE_CHARS} characters"));
+        }
+        if let Some(phase) = self.phase.as_deref() {
+            if multiline(phase) {
+                return Err("phase must be a single line".to_string());
+            }
+            if long(phase, MAX_PHASE_CHARS) {
+                return Err(format!("phase is over {MAX_PHASE_CHARS} characters"));
+            }
+        }
+        if self.artifacts.len() > MAX_ARTIFACTS {
+            return Err(format!("more than {MAX_ARTIFACTS} artifacts"));
+        }
+        for artifact in &self.artifacts {
+            let label = artifact.label.trim();
+            let value = artifact.value.trim();
+            if label.is_empty() || value.is_empty() {
+                return Err("artifact label and value must not be empty".to_string());
+            }
+            if multiline(&artifact.label) || multiline(&artifact.value) {
+                return Err("artifact label and value must be single-line".to_string());
+            }
+            if long(&artifact.label, MAX_ARTIFACT_LABEL_CHARS) {
+                return Err(format!(
+                    "an artifact label is over {MAX_ARTIFACT_LABEL_CHARS} characters"
+                ));
+            }
+            if long(&artifact.value, MAX_ARTIFACT_VALUE_CHARS) {
+                return Err(format!(
+                    "an artifact value is over {MAX_ARTIFACT_VALUE_CHARS} characters"
+                ));
+            }
         }
         if let Some(steps) = &self.steps {
             if steps.len() > MAX_STEPS {
@@ -393,6 +498,36 @@ pub struct ThreadSummary {
     /// answered by speaking in the thread themselves.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub directed: Vec<Directed>,
+    /// Person who authorized/approved the root on the Speaker's desk (`meta::DESK_PERSON`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desk_person: Option<Name>,
+    /// Execution authorization attached to the root (`meta::EXECUTION_AUTH`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_auth: Option<crate::ExecutionAuthPayload>,
+    /// Cross-committee origin carried on a forwarded root (`meta::ORIGIN`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<crate::Origin>,
+    /// Seq of the latest non-provisional `Answer` in the thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_seq: Option<Seq>,
+    /// First non-empty line of the latest non-provisional `Answer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_line: Option<String>,
+    /// Latest engineering phase badge (`StatusPayload::phase`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Latest delivery artifacts (`StatusPayload::artifacts`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactRef>,
+    /// Next handoff/verification owner (`StatusPayload::next_owner`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_owner: Option<Address>,
+    /// True while awaiting explicit acceptance/archive after delivery.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub awaiting_acceptance: bool,
+    /// Server-projected read-only mirror of a cross-committee downstream thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_downstream: Option<LinkedTaskSummary>,
 }
 
 /// Log metadata used by committee-wide readers.
@@ -480,13 +615,15 @@ pub struct PersonWait<'a> {
 }
 
 /// Who a thread that [waits](ThreadSummary::waits) waits on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitsOn {
     /// The agents it was addressed to.
     Agents,
     /// A person: it was escalated or parked on them, or they took it over.
     Person,
+    /// Delivered and explicitly marked `awaiting_acceptance`; awaits verification or archive.
+    Acceptance { owner: Address },
 }
 
 impl ThreadSummary {
@@ -510,28 +647,35 @@ impl ThreadSummary {
         self.escalation.as_ref().map(|e| &e.to)
     }
 
+    /// Resolved owner for a pending acceptance handoff: explicit `next_owner`,
+    /// else sponsor (`execution_auth`, `desk_person`, `on_behalf_of`, `from`).
+    pub fn acceptance_owner(&self) -> Address {
+        if let Some(owner) = &self.next_owner {
+            return owner.clone();
+        }
+        if let Some(auth) = &self.execution_auth {
+            return Address::senior(&auth.authorized_by);
+        }
+        if let Some(person) = &self.desk_person {
+            return Address::senior(person);
+        }
+        self.on_behalf_of
+            .clone()
+            .unwrap_or_else(|| self.from.clone())
+    }
+
     /// Whether the thread waits on someone, and on whom. This is the one
     /// rule every inbox uses (the `senate inbox` command, the `inbox` tool,
     /// the Speaker's per-agent count, the app's inbox); it is derived and
     /// stores nothing.
-    ///
-    /// A thread waits when it is not archived and
-    ///
-    /// - it is `suspended`: parked on a person (an escalation or a
-    ///   takeover): [`WaitsOn::Person`];
-    /// - or its root has no answer yet, or its task status is explicitly in
-    ///   progress (`processing` after an answer, set by a `status`), or
-    ///   something was said in it after the latest answer by someone other
-    ///   than the answerer ([`ThreadSummary::reopened`]):
-    ///   [`WaitsOn::Agents`].
-    ///
-    /// Otherwise its last word is an answer and nothing asks for more: it
-    /// is [settled](ThreadSummary::is_settled).
     pub fn waits(&self) -> Option<WaitsOn> {
         match self.state {
             StatusState::Archived => None,
             _ if self.escalation.is_some() => Some(WaitsOn::Person),
             StatusState::Suspended => Some(WaitsOn::Person),
+            _ if self.awaiting_acceptance => Some(WaitsOn::Acceptance {
+                owner: self.acceptance_owner(),
+            }),
             StatusState::Processing => Some(WaitsOn::Agents),
             StatusState::Active => (!self.answered || self.reopened).then_some(WaitsOn::Agents),
         }
@@ -591,6 +735,191 @@ impl ThreadSummary {
     pub fn is_settled(&self) -> bool {
         self.state != StatusState::Archived && self.waits().is_none()
     }
+
+    /// Whether `person` sponsored this task: initiated directly as themselves,
+    /// approved it in person on the Speaker's desk (`meta::DESK_PERSON`), or
+    /// authorized execution (`meta::EXECUTION_AUTH`, directly or via proxy).
+    pub fn is_sponsored_by(&self, person: &Name) -> bool {
+        is_root_sponsored_by(
+            &self.from,
+            self.desk_person.as_ref(),
+            self.execution_auth.as_ref(),
+            person,
+        )
+    }
+
+    /// Sort bucket for "My Commissions" / 「委派追踪」 given how far `person`
+    /// has seen this thread.
+    pub fn commission_bucket(&self, seen: Seq) -> CommissionBucket {
+        if self.state == StatusState::Suspended || self.escalation.is_some() {
+            CommissionBucket::Blocked
+        } else if self.awaiting_acceptance && self.state != StatusState::Archived {
+            CommissionBucket::PendingAcceptance
+        } else if self.answered && !self.reopened && self.state != StatusState::Processing {
+            let unread = self
+                .answer_seq
+                .map_or(self.updated > seen, |seq| seq > seen);
+            if unread {
+                CommissionBucket::CompletedUnread
+            } else {
+                CommissionBucket::CompletedRead
+            }
+        } else {
+            CommissionBucket::InProgress
+        }
+    }
+}
+
+fn is_root_sponsored_by(
+    from: &Address,
+    desk_person: Option<&Name>,
+    execution_auth: Option<&crate::ExecutionAuthPayload>,
+    person: &Name,
+) -> bool {
+    person_of(from).as_ref() == Some(person)
+        || desk_person == Some(person)
+        || execution_auth.is_some_and(|auth| &auth.authorized_by == person)
+}
+
+/// Unified commission priority bucket (`Blocked → PendingAcceptance → CompletedUnread → InProgress`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommissionBucket {
+    Blocked = 0,
+    /// Reserved hook for Phase C W3 (`awaiting_acceptance`).
+    PendingAcceptance = 1,
+    CompletedUnread = 2,
+    InProgress = 3,
+    CompletedRead = 4,
+}
+
+impl CommissionBucket {
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Blocked => "blocked",
+            Self::PendingAcceptance => "pending_acceptance",
+            Self::CompletedUnread => "completed_unread",
+            Self::InProgress => "in_progress",
+            Self::CompletedRead => "completed_read",
+        }
+    }
+}
+
+/// Notification signal kind emitted for a sponsored task thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommissionSignalKind {
+    Blocked,
+    Completed,
+}
+
+/// Root metadata cached by the bridge to classify sponsored task events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommissionRoot {
+    pub from: Address,
+    pub desk_person: Option<Name>,
+    pub execution_auth: Option<crate::ExecutionAuthPayload>,
+    pub origin: Option<crate::Origin>,
+    pub answered: bool,
+}
+
+impl CommissionRoot {
+    pub fn from_event(root: &Event) -> Self {
+        Self {
+            from: root.from.clone(),
+            desk_person: root_desk_person(root),
+            execution_auth: crate::ExecutionAuthPayload::of(root),
+            origin: crate::Origin::of(root),
+            answered: false,
+        }
+    }
+
+    pub fn is_sponsored_by(&self, person: &Name) -> bool {
+        is_root_sponsored_by(
+            &self.from,
+            self.desk_person.as_ref(),
+            self.execution_auth.as_ref(),
+            person,
+        )
+    }
+}
+
+/// A deduplicated notification signal for the human sponsor of a task thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommissionSignal {
+    pub kind: CommissionSignalKind,
+    /// Canonical thread key: origin `(committee, thread)` when forwarded across
+    /// committees, otherwise `(committee, root)`.
+    pub origin_committee: crate::CommitteeId,
+    pub origin_root: Seq,
+    /// Per-signal dedup key (blocker seq for `Blocked`, canonical downstream
+    /// answer `EventId` for `Completed`).
+    pub discriminator: String,
+    pub text: String,
+}
+
+/// Classify `event` in a thread rooted at `root` for `person`:
+/// - `StatusState::Suspended` (without takeover) -> `Blocked`
+/// - First non-provisional `Kind::Answer` -> `Completed`
+/// - Progress / `Processing` / unrelated threads -> `None`
+pub fn commission_signal(
+    event: &Event,
+    root: &CommissionRoot,
+    person: &Name,
+    already_answered: bool,
+) -> Option<CommissionSignal> {
+    if !root.is_sponsored_by(person)
+        || person_of(&event.from).as_ref() == Some(person)
+        || is_provisional(event)
+    {
+        return None;
+    }
+    let (origin_committee, origin_root) = root
+        .origin
+        .as_ref()
+        .and_then(|o| o.locator.committee().map(|c| (c.clone(), o.thread)))
+        .unwrap_or_else(|| (event.committee.clone(), event.thread.unwrap_or(event.seq)));
+
+    match event.kind {
+        Kind::Status => {
+            let status = StatusPayload::of(event)?;
+            if status.state == StatusState::Suspended && status.takeover.is_none() {
+                Some(CommissionSignal {
+                    kind: CommissionSignalKind::Blocked,
+                    origin_committee,
+                    origin_root,
+                    discriminator: event.seq.0.to_string(),
+                    text: status.reason.unwrap_or_default(),
+                })
+            } else {
+                None
+            }
+        }
+        Kind::Answer if !already_answered => {
+            let discriminator = event
+                .meta
+                .get(meta::RELAYED_EVENT_ID)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| event.id.to_string());
+            Some(CommissionSignal {
+                kind: CommissionSignalKind::Completed,
+                origin_committee,
+                origin_root,
+                discriminator,
+                text: event.body.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn root_desk_person(event: &Event) -> Option<Name> {
+    event
+        .meta
+        .get(meta::DESK_PERSON)
+        .and_then(Value::as_str)
+        .and_then(|raw| Name::new(raw).ok())
 }
 
 /// Characters of the root's body used as a title when the task has none.
@@ -603,6 +932,7 @@ pub struct TaskBoard {
     head: Seq,
     threads: BTreeMap<Seq, ThreadSummary>,
     discussions: BTreeMap<Seq, ThreadSummary>,
+    delivered_targets: BTreeMap<Seq, (crate::CommitteeId, Seq)>,
     include_discussions: bool,
     output_level: OutputLevel,
     /// Who the Senate's people are: a `senator::` address that is not one
@@ -638,6 +968,11 @@ impl TaskBoard {
 
     pub fn get(&self, root: Seq) -> Option<&ThreadSummary> {
         self.threads.get(&root)
+    }
+
+    /// Downstream `(committee, root_seq)` when the Speaker delivered `root` across committees.
+    pub fn delivered_target(&self, root: Seq) -> Option<&(crate::CommitteeId, Seq)> {
+        self.delivered_targets.get(&root)
     }
 
     /// All unarchived questions from one author, including desk discussions.
@@ -774,11 +1109,32 @@ impl TaskBoard {
                 reopened: false,
                 escalation: None,
                 directed: Vec::new(),
+                desk_person: root_desk_person(event),
+                execution_auth: crate::ExecutionAuthPayload::of(event),
+                origin: crate::Origin::of(event),
+                answer_seq: None,
+                answer_line: None,
+                phase: None,
+                artifacts: Vec::new(),
+                next_owner: None,
+                awaiting_acceptance: false,
+                linked_downstream: None,
             },
         );
     }
 
     fn observe_reply(&mut self, root: Seq, event: &Event) {
+        if event.from == Address::Speaker
+            && let Some(outcome) = event.meta.get(meta::DESK_OUTCOME)
+            && outcome.get("kind").and_then(Value::as_str) == Some("delivered")
+            && let Some(committee) = outcome
+                .get("committee")
+                .and_then(Value::as_str)
+                .and_then(|c| crate::CommitteeId::new(c).ok())
+            && let Some(seq) = outcome.get("seq").and_then(Value::as_u64)
+        {
+            self.delivered_targets.insert(root, (committee, Seq(seq)));
+        }
         let Some(thread) = self
             .threads
             .get_mut(&root)
@@ -843,6 +1199,8 @@ impl TaskBoard {
                 thread.answered = true;
                 thread.answered_by = Some(event.from.clone());
                 thread.reopened = false;
+                thread.answer_seq = Some(event.seq);
+                thread.answer_line = Some(summarize_line(&event.body));
                 // An answer from the agent does not withdraw its own
                 // escalation.
                 if thread.state != StatusState::Archived && thread.escalation.is_none() {
@@ -899,6 +1257,22 @@ impl TaskBoard {
                 }
                 if let Some(links) = status.links {
                     thread.links = links;
+                }
+                if let Some(phase) = status.phase {
+                    thread.phase = Some(phase);
+                }
+                if !status.artifacts.is_empty() {
+                    thread.artifacts = status.artifacts;
+                }
+                if let Some(next_owner) = status.next_owner {
+                    thread.next_owner = Some(next_owner);
+                }
+                if archives {
+                    thread.awaiting_acceptance = false;
+                } else if status.awaiting_acceptance {
+                    thread.awaiting_acceptance = true;
+                } else if status.state == StatusState::Processing && !under_escalation {
+                    thread.awaiting_acceptance = false;
                 }
                 // A session is an agent's; the asker archiving its own
                 // thread (it is not addressed to it) names no owner.
@@ -1031,6 +1405,19 @@ pub fn seen_by_author(event: &Event) -> Option<Seq> {
 }
 
 /// Record `event` as the latest one addressed to `person`.
+fn summarize_line(text: &str) -> String {
+    let first = text.lines().map(str::trim).find(|l| !l.is_empty());
+    let mut line: String = first
+        .unwrap_or_default()
+        .chars()
+        .take(DIRECTED_LINE_CHARS)
+        .collect();
+    if first.is_some_and(|l| l.chars().count() > DIRECTED_LINE_CHARS) {
+        line.push('…');
+    }
+    line
+}
+
 fn note_directed(
     thread: &mut ThreadSummary,
     event: &Event,
@@ -1038,20 +1425,7 @@ fn note_directed(
     escalated: bool,
     text: &str,
 ) {
-    let line = text.lines().map(str::trim).find(|l| !l.is_empty());
-    let mut line: String = line
-        .unwrap_or_default()
-        .chars()
-        .take(DIRECTED_LINE_CHARS)
-        .collect();
-    if text
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .is_some_and(|l| l.chars().count() > DIRECTED_LINE_CHARS)
-    {
-        line.push('…');
-    }
+    let line = summarize_line(text);
     thread
         .directed
         .retain(|d| !(&d.person == person && d.escalated == escalated));
@@ -2015,5 +2389,270 @@ mod tests {
             .to(Address::Speaker)
             .into_event(Seq(9), Utc::now());
         assert!(attention(&to_speaker, &wendell).is_none());
+    }
+
+    #[test]
+    fn sponsored_rules_signals_and_buckets_follow_w2_spec() {
+        let wendell = name("wendell");
+        let bob = name("bob");
+        let mut board = TaskBoard::new(People::new([wendell.clone(), bob.clone()]));
+        let origin = crate::Origin {
+            locator: "/senate::office::senator::secretary".parse().unwrap(),
+            thread: Seq(194),
+        };
+
+        // 1. Direct person root
+        let direct_root = NewEvent::new(c(), Kind::Request, Address::senior(&wendell), "Do A")
+            .to(addr("senator::claude"))
+            .into_event(Seq(1), Utc::now());
+        board.observe(&direct_root);
+        assert!(board.get(Seq(1)).unwrap().is_sponsored_by(&wendell));
+        assert!(!board.get(Seq(1)).unwrap().is_sponsored_by(&bob));
+
+        // 2. DESK_PERSON root
+        let desk_root = NewEvent::new(c(), Kind::Request, Address::Speaker, "Do B")
+            .to(addr("senator::claude"))
+            .with_meta(meta::ORIGIN, origin.value())
+            .with_meta(meta::DESK_PERSON, serde_json::json!("wendell"))
+            .into_event(Seq(2), Utc::now());
+        board.observe(&desk_root);
+        assert!(board.get(Seq(2)).unwrap().is_sponsored_by(&wendell));
+
+        // 3. EXECUTION_AUTH authorized_by via SecretaryProxy
+        let proxy_root = NewEvent::new(c(), Kind::Request, Address::Speaker, "Do C")
+            .to(addr("senator::claude"))
+            .with_meta(meta::ORIGIN, origin.value())
+            .with_meta(
+                meta::EXECUTION_AUTH,
+                crate::ExecutionAuthPayload {
+                    authorized_by: wendell.clone(),
+                    mode: crate::ExecutionAuthMode::SecretaryProxy {
+                        secretary: path("secretary"),
+                    },
+                    note: None,
+                }
+                .value(),
+            )
+            .into_event(Seq(3), Utc::now());
+        board.observe(&proxy_root);
+        assert!(board.get(Seq(3)).unwrap().is_sponsored_by(&wendell));
+        assert!(!board.get(Seq(3)).unwrap().is_sponsored_by(&bob));
+
+        // 4. Unrelated agent forward (neither from, desk_person, nor execution_auth)
+        let unrelated_root = NewEvent::new(c(), Kind::Request, Address::Speaker, "Do D")
+            .to(addr("senator::claude"))
+            .with_meta(meta::ORIGIN, origin.value())
+            .into_event(Seq(4), Utc::now());
+        board.observe(&unrelated_root);
+        assert!(!board.get(Seq(4)).unwrap().is_sponsored_by(&wendell));
+
+        // Commission signals for proxy_root
+        let croot = CommissionRoot::from_event(&proxy_root);
+        let processing = NewEvent::new(c(), Kind::Status, addr("senator::claude"), "")
+            .in_thread(Seq(3))
+            .with_meta(
+                meta::STATUS,
+                StatusPayload::new(StatusState::Processing).value(),
+            )
+            .into_event(Seq(10), Utc::now());
+        assert_eq!(
+            commission_signal(&processing, &croot, &wendell, false),
+            None
+        );
+
+        let mut sp = StatusPayload::new(StatusState::Suspended);
+        sp.reason = Some("needs key".into());
+        let blocked = NewEvent::new(c(), Kind::Status, addr("senator::claude"), "")
+            .in_thread(Seq(3))
+            .with_meta(meta::STATUS, sp.value())
+            .into_event(Seq(11), Utc::now());
+        let sig_block = commission_signal(&blocked, &croot, &wendell, false).unwrap();
+        assert_eq!(sig_block.kind, CommissionSignalKind::Blocked);
+        assert_eq!(sig_block.origin_committee.as_str(), "office");
+        assert_eq!(sig_block.origin_root, Seq(194));
+
+        let ans = NewEvent::new(c(), Kind::Answer, addr("senator::claude"), "Done!")
+            .in_thread(Seq(3))
+            .into_event(Seq(12), Utc::now());
+        let sig_done = commission_signal(&ans, &croot, &wendell, false).unwrap();
+        assert_eq!(sig_done.kind, CommissionSignalKind::Completed);
+        assert_eq!(sig_done.discriminator, ans.id.to_string());
+        // Already answered -> no second Completed signal
+        assert_eq!(commission_signal(&ans, &croot, &wendell, true), None);
+
+        // Relayed answer on origin matches canonical discriminator
+        let origin_committee = CommitteeId::new("office").unwrap();
+        let relayed = NewEvent::new(
+            origin_committee.clone(),
+            Kind::Answer,
+            Address::Speaker,
+            "Done!",
+        )
+        .in_thread(Seq(194))
+        .with_meta(
+            meta::ANSWERED_BY,
+            serde_json::json!("refund-v2::senator::claude"),
+        )
+        .with_meta(
+            meta::RELAYED_EVENT_ID,
+            serde_json::json!(ans.id.to_string()),
+        )
+        .into_event(Seq(199), Utc::now());
+        let origin_root_ev = NewEvent::new(
+            origin_committee,
+            Kind::Request,
+            addr("senator::secretary"),
+            "Do C",
+        )
+        .to(Address::Speaker)
+        .into_event(Seq(194), Utc::now());
+        let mut oroot = CommissionRoot::from_event(&origin_root_ev);
+        oroot.desk_person = Some(wendell.clone());
+        let sig_relay = commission_signal(&relayed, &oroot, &wendell, false).unwrap();
+        assert_eq!(sig_relay.discriminator, sig_done.discriminator);
+        assert_eq!(sig_relay.origin_committee, sig_done.origin_committee);
+        assert_eq!(sig_relay.origin_root, sig_done.origin_root);
+
+        // Buckets
+        board.observe(&blocked);
+        assert_eq!(
+            board.get(Seq(3)).unwrap().commission_bucket(Seq(0)),
+            CommissionBucket::Blocked
+        );
+        board.observe(&ans);
+        assert_eq!(
+            board.get(Seq(3)).unwrap().commission_bucket(Seq(11)),
+            CommissionBucket::CompletedUnread
+        );
+        assert_eq!(
+            board.get(Seq(3)).unwrap().commission_bucket(Seq(12)),
+            CommissionBucket::CompletedRead
+        );
+        assert_eq!(
+            board.get(Seq(1)).unwrap().commission_bucket(Seq(0)),
+            CommissionBucket::InProgress
+        );
+    }
+
+    #[test]
+    fn status_payload_bounds_and_pending_acceptance_lifecycle() {
+        let mut s = StatusPayload::new(StatusState::Active);
+        s.phase = Some("staging-verified".into());
+        s.artifacts = vec![
+            ArtifactRef {
+                label: "commit".into(),
+                value: "035b2c43".into(),
+            },
+            ArtifactRef {
+                label: "tag".into(),
+                value: "v0.4.2".into(),
+            },
+        ];
+        s.next_owner = Some(addr("senator::alice"));
+        s.awaiting_acceptance = true;
+        assert!(s.check().is_ok());
+
+        let mut bad_phase = s.clone();
+        bad_phase.phase = Some("x".repeat(MAX_PHASE_CHARS + 1));
+        assert!(bad_phase.check().is_err());
+
+        let mut multiline_phase = s.clone();
+        multiline_phase.phase = Some("line1\nline2".into());
+        assert!(multiline_phase.check().is_err());
+
+        let mut too_many = s.clone();
+        too_many.artifacts = vec![
+            ArtifactRef {
+                label: "k".into(),
+                value: "v".into()
+            };
+            MAX_ARTIFACTS + 1
+        ];
+        assert!(too_many.check().is_err());
+
+        let mut bad_art = s.clone();
+        bad_art.artifacts = vec![ArtifactRef {
+            label: " ".into(),
+            value: "v".into(),
+        }];
+        assert!(bad_art.check().is_err());
+
+        // Pending acceptance keeps answered thread unsettled in PendingAcceptance until archived.
+        let bob: Name = Name::new("bob").unwrap();
+        let alice: Name = Name::new("alice").unwrap();
+        let people = People::new([alice.clone(), bob]);
+        let mut board = TaskBoard::new(people);
+        let root = NewEvent::new(
+            CommitteeId::new("refund-v2").unwrap(),
+            Kind::Request,
+            addr("senator::bob"),
+            "Deploy release",
+        )
+        .to(addr("senator::claude"))
+        .into_event(Seq(1), Utc::now());
+        board.observe(&root);
+        let ans = NewEvent::new(
+            CommitteeId::new("refund-v2").unwrap(),
+            Kind::Answer,
+            addr("senator::claude"),
+            "Deployed to staging",
+        )
+        .in_thread(Seq(1))
+        .into_event(Seq(2), Utc::now());
+        board.observe(&ans);
+        assert!(board.get(Seq(1)).unwrap().is_settled());
+
+        let st_ev = NewEvent::new(
+            CommitteeId::new("refund-v2").unwrap(),
+            Kind::Status,
+            addr("senator::claude"),
+            "",
+        )
+        .in_thread(Seq(1))
+        .with_meta(meta::STATUS, s.value())
+        .into_event(Seq(3), Utc::now());
+        board.observe(&st_ev);
+
+        let sum = board.get(Seq(1)).unwrap();
+        assert!(!sum.is_settled());
+        assert_eq!(
+            sum.waits(),
+            Some(WaitsOn::Acceptance {
+                owner: addr("senator::alice")
+            })
+        );
+        assert_eq!(
+            sum.commission_bucket(Seq(3)),
+            CommissionBucket::PendingAcceptance
+        );
+        let linked = LinkedTaskSummary::from_thread(CommitteeId::new("refund-v2").unwrap(), sum);
+        assert!(linked.awaiting_acceptance);
+        assert_eq!(linked.phase.as_deref(), Some("staging-verified"));
+        assert_eq!(linked.artifacts.len(), 2);
+
+        // Archiving clears awaiting_acceptance and settles/closes.
+        let archived = NewEvent::new(
+            CommitteeId::new("refund-v2").unwrap(),
+            Kind::Status,
+            addr("senator::alice"),
+            "",
+        )
+        .in_thread(Seq(1))
+        .with_meta(
+            meta::STATUS,
+            StatusPayload::new(StatusState::Archived).value(),
+        )
+        .into_event(Seq(4), Utc::now());
+        board.observe(&archived);
+        let sum = board.get(Seq(1)).unwrap();
+        assert!(!sum.awaiting_acceptance);
+        assert_eq!(sum.waits(), None);
+
+        // Legacy StatusPayload without W3 fields still deserializes cleanly.
+        let legacy: StatusPayload =
+            serde_json::from_value(serde_json::json!({ "state": "active" })).unwrap();
+        assert!(!legacy.awaiting_acceptance);
+        assert!(legacy.artifacts.is_empty());
+        assert_eq!(legacy.phase, None);
     }
 }

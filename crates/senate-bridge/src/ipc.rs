@@ -1904,6 +1904,12 @@ pub enum Request {
         session: SessionSelector,
         committee: CommitteeId,
         seq: Seq,
+        /// Authorize direct execution by the receiving committee (`meta::EXECUTION_AUTH`).
+        #[serde(default, skip_serializing_if = "is_false")]
+        authorize: bool,
+        /// Optional short note summarizing the authorized execution scope.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
@@ -1982,7 +1988,7 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
-    /// List, add or remove a senator's secretaries.
+    /// List, add, remove, or grant/revoke execution proxy for a senator's secretaries.
     Secretaries {
         session: SessionSelector,
         action: SecretaryOp,
@@ -1992,6 +1998,15 @@ pub enum Request {
         for_: Option<SenatorName>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secretary: Option<SenatorName>,
+        /// Optional expiry timestamp when `action == SecretaryOp::GrantProxy`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at: Option<DateTime<Utc>>,
+    },
+    /// Enable or disable the local `[desk].unsafe_ignore_execution_auth` opt-in
+    /// bypass (`Request::SetUnsafeMode`). Enabling requires `app_confirmation`
+    /// (Touch ID / confirmed app call).
+    SetUnsafeMode {
+        enabled: bool,
     },
     /// The person's appointment of a specific registered native session.
     SetSecretarySession {
@@ -2064,6 +2079,52 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<EventId>,
     },
+    ConferenceConvene {
+        #[serde(default)]
+        session: SessionSelector,
+        topic: String,
+        seats: Vec<senate_core::ConferenceSeatInput>,
+        #[serde(default)]
+        linked_threads: Vec<senate_core::LinkedThread>,
+    },
+    ConferenceList {
+        #[serde(default)]
+        session: SessionSelector,
+    },
+    ConferenceGet {
+        #[serde(default)]
+        session: SessionSelector,
+        id: senate_core::ConferenceId,
+    },
+    ConferenceRsvp {
+        #[serde(default)]
+        session: SessionSelector,
+        id: senate_core::ConferenceId,
+        action: senate_core::ConferenceRsvpAction,
+    },
+    ConferenceStart {
+        #[serde(default)]
+        session: SessionSelector,
+        id: senate_core::ConferenceId,
+    },
+    ConferencePost {
+        #[serde(default)]
+        session: SessionSelector,
+        id: senate_core::ConferenceId,
+        body: String,
+        #[serde(default)]
+        to: Vec<Address>,
+    },
+    ConferenceAdjourn {
+        #[serde(default)]
+        session: SessionSelector,
+        id: senate_core::ConferenceId,
+        summary: String,
+        #[serde(default)]
+        decisions: Vec<String>,
+        #[serde(default)]
+        action_items: Vec<senate_core::ConferenceActionItem>,
+    },
 }
 
 /// How far the person has seen one thread.
@@ -2104,6 +2165,14 @@ pub enum SecretaryOp {
     List,
     Add,
     Remove,
+    GrantProxy,
+    RevokeProxy,
+}
+
+/// Reply to [`Request::SetUnsafeMode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsafeModeReply {
+    pub enabled: bool,
 }
 
 /// A senator's secretaries after `secretaries`, and every relation.
@@ -2113,6 +2182,9 @@ pub struct SecretariesReply {
     pub senator: SenatorName,
     /// Its secretaries, in order.
     pub secretaries: Vec<SenatorName>,
+    /// Active / configured execution proxy grants held by the Speaker's secretaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_proxies: Vec<senate_core::ExecutionProxyGrant>,
     /// Every secretary relation of the Senate.
     #[serde(default)]
     pub all: senate_core::api::Secretaries,
@@ -2125,6 +2197,9 @@ pub struct DeskReply {
     pub speaker: SenatorName,
     /// Its secretaries, in order: the desk workers set with `desk set`.
     pub secretaries: Vec<SenatorName>,
+    /// Execution proxy grants issued by the Speaker to desk secretaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_proxies: Vec<senate_core::ExecutionProxyGrant>,
     /// Who works the desk as the server has it, in order: the Speaker
     /// itself first when it is an agent, then its secretaries (and the
     /// built-in session when it runs). The first present acts.
@@ -2158,6 +2233,11 @@ impl SendReply {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeskDecision {
     Forward,
+    /// Forward across committees AND attach direct person execution authorization.
+    ForwardAndAuthorize {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     Refuse {
         reason: String,
     },
@@ -2179,6 +2259,7 @@ pub enum DeskDecision {
 #[serde(rename_all = "snake_case")]
 pub enum DeskAction {
     Forward,
+    ForwardAndAuthorize,
     Refuse,
     Answer,
     Close,
@@ -2554,6 +2635,9 @@ pub enum WatchEvent {
         escalated: bool,
         /// The body, or an escalation's reason.
         text: String,
+        /// Sponsored commission lifecycle signal (`Blocked` or `Completed`), if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signal: Option<senate_core::CommissionSignalKind>,
     },
     /// The Speaker's office or a committee's chair is another one now, as
     /// this side knows them: what a session may do (`presides`, and so the
@@ -2562,6 +2646,8 @@ pub enum WatchEvent {
     /// This machine's hosted sessions changed: a host started or ended, or a
     /// permission prompt opened or closed in one. Read `sessions` again.
     Sessions,
+    /// A cross-committee conference was convened, updated, or adjourned.
+    ConferencesChanged,
     /// The watcher fell behind and missed `missed` events: read everything
     /// again.
     Lagged { missed: u64 },
@@ -2752,6 +2838,9 @@ pub struct CatchUpReply {
     /// ([`crate::format::redelivered_note`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub redelivered: bool,
+    /// Local explicit opt-in receiver bypass for cross-committee execution auth.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unsafe_ignore_execution_auth: bool,
 }
 
 impl CatchUpReply {
@@ -2766,6 +2855,7 @@ impl CatchUpReply {
             Some(user) => reader.with_user(user.clone()),
             None => reader,
         };
+        let reader = reader.with_unsafe_ignore_execution_auth(self.unsafe_ignore_execution_auth);
         match &self.chair {
             Some(chair) => reader.with_chair(self.committee.clone(), chair.clone()),
             None => reader,
@@ -3187,6 +3277,9 @@ pub struct StatusReply {
     /// Absent from an older daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roles: Option<RolesReply>,
+    /// Local explicit opt-in receiver bypass for cross-committee execution auth.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unsafe_ignore_execution_auth: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]

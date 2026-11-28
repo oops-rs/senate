@@ -366,6 +366,7 @@ async fn set_desk_member(server: &TestServer, appointed: bool) {
         )
         .json(&api::SetSecretaries {
             secretaries,
+            execution_proxies: None,
             acted_by: None,
         })
         .send()

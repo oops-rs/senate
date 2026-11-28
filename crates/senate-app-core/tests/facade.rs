@@ -186,6 +186,7 @@ async fn the_speaker_answers_or_closes_a_desk_item_through_one_choice() {
     assert_eq!(
         forwardable.actions,
         [
+            DeskAction::ForwardAndAuthorize,
             DeskAction::Forward,
             DeskAction::Refuse,
             DeskAction::Answer,

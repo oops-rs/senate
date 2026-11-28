@@ -465,6 +465,8 @@ async fn across_committees_a_person_goes_directly_and_an_agent_by_way_of_the_des
             session: Laptop::session("s-claude"),
             committee: ledger(),
             seq: asked.posted.seq,
+            authorize: false,
+            note: None,
             id: None,
         })
         .await;
@@ -587,6 +589,8 @@ async fn a_persons_reply_to_a_forwarded_request_reaches_the_assignee_that_escala
             session: Laptop::session("s-claude"),
             committee: ledger(),
             seq: asked.posted.seq,
+            authorize: false,
+            note: None,
             id: None,
         })
         .await;
@@ -684,6 +688,8 @@ async fn a_persons_reply_to_a_forwarded_request_with_no_escalation_goes_to_the_a
             session: Laptop::session("s-claude"),
             committee: ledger(),
             seq: asked.posted.seq,
+            authorize: false,
+            note: None,
             id: None,
         })
         .await;
@@ -1747,5 +1753,537 @@ async fn an_ask_for_a_committee_that_is_nowhere_is_refused_not_put_on_the_desk()
         .await;
     assert!(!sent.on_the_desk());
     other.wait_for("Is the modal ready?").await;
+    desk.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cross_committee_execution_auth_and_unsafe_mode_end_to_end() {
+    use senate_bridge::ipc::{
+        DeskDecision, DeskOutcome, SecretariesReply, SecretaryOp, SessionSelector, UnsafeModeReply,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut desk, _claude, copilot, _codex) = alices_machine(dir.path()).await;
+    let hub = desk.senate().daemon.hub.clone();
+    let send_req = |body: &str| {
+        let req = Request::Send {
+            session: Laptop::session("s-codex"),
+            kind: SayKind::Request,
+            to: Vec::new(),
+            at: Some(senate_core::Locator::parse_short("refund-v2::copilot").unwrap()),
+            body: body.into(),
+            refs: None,
+            id: None,
+        };
+        let desk = &desk;
+        async move { desk.ipc::<SendReply>(req).await }
+    };
+
+    // 1. Forward-only control: no execution_auth -> keeps confirmation prompt.
+    let req1 = send_req("Forward-only deploy check").await;
+    on_the_desk(&desk, req1.posted.seq).await;
+    let _: Forwarded = desk
+        .ipc(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: req1.posted.seq,
+            authorize: false,
+            note: None,
+            id: None,
+        })
+        .await;
+    let push1 = copilot.wait_for("Forward-only deploy check").await;
+    assert!(push1.contains("show it to your user first"), "{push1}");
+    assert!(!push1.contains("authorized by"), "{push1}");
+
+    // 2. Direct person execution authorization via DeskDecide::ForwardAndAuthorize.
+    let req2 = send_req("Direct authorized deploy").await;
+    on_the_desk(&desk, req2.posted.seq).await;
+    let req2_event = hub.get(&ledger(), req2.posted.seq).await.unwrap().unwrap();
+    let outcome: DeskOutcome = desk
+        .ipc(Request::DeskDecide {
+            committee: ledger(),
+            seq: req2.posted.seq,
+            item_id: req2_event.id,
+            id: senate_core::EventId::new(),
+            decision: DeskDecision::ForwardAndAuthorize {
+                note: Some("release v0.4.0".into()),
+            },
+        })
+        .await;
+    assert!(
+        matches!(outcome, DeskOutcome::Delivered { .. }),
+        "{outcome:?}"
+    );
+    let push2 = copilot.wait_for("Direct authorized deploy").await;
+    assert!(push2.contains("authorized by [senator::alice]"), "{push2}");
+    assert!(push2.contains("release v0.4.0"), "{push2}");
+    assert!(!push2.contains("show it to your user first"), "{push2}");
+
+    // 3. SecretaryProxy: rejected before grant, accepted while active, rejected once expired or revoked.
+    let req3 = send_req("Proxy without grant").await;
+    on_the_desk(&desk, req3.posted.seq).await;
+    assert!(
+        desk.try_ipc::<Forwarded>(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: req3.posted.seq,
+            authorize: true,
+            note: None,
+            id: None,
+        })
+        .await
+        .is_err()
+    );
+
+    // Grant active proxy to claude.
+    let granted: SecretariesReply = desk
+        .ipc(Request::Secretaries {
+            session: SessionSelector::default(),
+            action: SecretaryOp::GrantProxy,
+            for_: None,
+            secretary: Some(path("claude")),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
+        })
+        .await;
+    assert_eq!(granted.execution_proxies.len(), 1);
+    let _: Forwarded = desk
+        .ipc(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: req3.posted.seq,
+            authorize: true,
+            note: Some("delegated within window".into()),
+            id: None,
+        })
+        .await;
+    let push3 = copilot.wait_for("Proxy without grant").await;
+    assert!(
+        push3.contains("authorized via secretary [senator::claude] under [senator::alice]'s proxy"),
+        "{push3}"
+    );
+    assert!(!push3.contains("show it to your user first"), "{push3}");
+
+    // Expired proxy fails closed.
+    let _: SecretariesReply = desk
+        .ipc(Request::Secretaries {
+            session: SessionSelector::default(),
+            action: SecretaryOp::GrantProxy,
+            for_: None,
+            secretary: Some(path("claude")),
+            expires_at: Some(chrono::Utc::now() - chrono::Duration::seconds(5)),
+        })
+        .await;
+    let req4 = send_req("Expired proxy attempt").await;
+    on_the_desk(&desk, req4.posted.seq).await;
+    assert!(
+        desk.try_ipc::<Forwarded>(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: req4.posted.seq,
+            authorize: true,
+            note: None,
+            id: None,
+        })
+        .await
+        .is_err()
+    );
+
+    // Revoke proxy.
+    let revoked: SecretariesReply = desk
+        .ipc(Request::Secretaries {
+            session: SessionSelector::default(),
+            action: SecretaryOp::RevokeProxy,
+            for_: None,
+            secretary: Some(path("claude")),
+            expires_at: None,
+        })
+        .await;
+    assert!(revoked.execution_proxies.is_empty());
+
+    // 4. Local unsafe mode defaults false; toggling to true bypasses receiver gate WITHOUT mutating server events.
+    assert!(!desk.machine_status().await.unsafe_ignore_execution_auth);
+    let unsafe_on: UnsafeModeReply = desk.ipc(Request::SetUnsafeMode { enabled: true }).await;
+    assert!(unsafe_on.enabled);
+    assert!(desk.machine_status().await.unsafe_ignore_execution_auth);
+
+    let forwarded_unauth: Forwarded = desk
+        .ipc(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: req4.posted.seq,
+            authorize: false,
+            note: None,
+            id: None,
+        })
+        .await;
+    let push4 = copilot.wait_for("Expired proxy attempt").await;
+    assert!(push4.contains("[UNSAFE mode enabled"), "{push4}");
+    assert!(!push4.contains("show it to your user first"), "{push4}");
+    assert!(!push4.contains("authorized by"), "{push4}");
+    let stored4 = hub
+        .get(&committee(), forwarded_unauth.posted.seq)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(senate_core::ExecutionAuthPayload::of(&stored4).is_none());
+
+    let unsafe_off: UnsafeModeReply = desk.ipc(Request::SetUnsafeMode { enabled: false }).await;
+    assert!(!unsafe_off.enabled);
+    desk.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sponsored_cross_committee_task_notifies_only_blocked_and_deduplicated_completed() {
+    use senate_bridge::ipc::{DeskDecision, DeskOutcome, IpcClient, WatchEvent};
+    use senate_core::{StatusPayload, StatusState};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut desk, _claude, copilot, _codex) = alices_machine(dir.path()).await;
+    let hub = desk.senate().daemon.hub.clone();
+
+    let mut watch = IpcClient::connect(&desk.paths.socket(), Duration::from_secs(2))
+        .await
+        .unwrap()
+        .watch(false, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    async fn drain_for_person(
+        watch: &mut senate_bridge::ipc::WatchStream,
+        wait_ms: u64,
+    ) -> Vec<(Box<senate_core::Event>, bool, String)> {
+        let mut events = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            match tokio::time::timeout(deadline - now, watch.next()).await {
+                Ok(Ok(Some(WatchEvent::ForPerson {
+                    news,
+                    escalated,
+                    text,
+                    ..
+                }))) => events.push((news, escalated, text)),
+                Ok(Ok(Some(_))) => {}
+                _ => break,
+            }
+        }
+        events
+    }
+
+    // Sponsored task: codex sends request on ledger, alice directly authorizes cross-committee forward.
+    let sponsored_req: SendReply = desk
+        .ipc(Request::Send {
+            session: Laptop::session("s-codex"),
+            kind: SayKind::Request,
+            to: Vec::new(),
+            at: Some(senate_core::Locator::parse_short("refund-v2::copilot").unwrap()),
+            body: "Ship sponsored release v0.4.1".into(),
+            refs: None,
+            id: None,
+        })
+        .await;
+    on_the_desk(&desk, sponsored_req.posted.seq).await;
+    let sponsored_evt = hub
+        .get(&ledger(), sponsored_req.posted.seq)
+        .await
+        .unwrap()
+        .unwrap();
+    let outcome: DeskOutcome = desk
+        .ipc(Request::DeskDecide {
+            committee: ledger(),
+            seq: sponsored_req.posted.seq,
+            item_id: sponsored_evt.id,
+            id: senate_core::EventId::new(),
+            decision: DeskDecision::ForwardAndAuthorize {
+                note: Some("release window".into()),
+            },
+        })
+        .await;
+    assert!(matches!(outcome, DeskOutcome::Delivered { .. }));
+    let push1 = copilot.wait_for("Ship sponsored release v0.4.1").await;
+    let dst_root = thread_of(&push1, "Ship sponsored release v0.4.1");
+
+    // Discard any initial watch backlog before agent status transitions.
+    let _ = drain_for_person(&mut watch, 200).await;
+
+    // Intermediate Processing status -> 0 notifications.
+    desk.status(
+        "s-copilot",
+        dst_root,
+        StatusPayload::new(StatusState::Processing),
+    )
+    .await;
+    let proc_notices = drain_for_person(&mut watch, 350).await;
+    assert!(
+        proc_notices.is_empty(),
+        "Processing must produce 0 notifications: {proc_notices:?}"
+    );
+
+    // Downstream Suspended blocker -> exactly 1 Blocked notification.
+    let mut blocked = StatusPayload::new(StatusState::Suspended);
+    blocked.reason = Some("waiting on staging credentials".into());
+    desk.status("s-copilot", dst_root, blocked).await;
+    let blocked_notices = drain_for_person(&mut watch, 800).await;
+    assert_eq!(
+        blocked_notices.len(),
+        1,
+        "expected exactly 1 Blocked notification: {blocked_notices:?}"
+    );
+    assert!(blocked_notices[0].2.contains("staging credentials"));
+
+    // Another Processing status -> 0 notifications.
+    desk.status(
+        "s-copilot",
+        dst_root,
+        StatusPayload::new(StatusState::Processing),
+    )
+    .await;
+    let proc2_notices = drain_for_person(&mut watch, 350).await;
+    assert!(proc2_notices.is_empty(), "{proc2_notices:?}");
+
+    // Final non-provisional Answer -> relayed across destination & origin, deduplicated to 1 Completed notice.
+    desk.answer("s-copilot", dst_root, "Shipped v0.4.1 cleanly.")
+        .await;
+    let completed_notices = drain_for_person(&mut watch, 1000).await;
+    assert_eq!(
+        completed_notices.len(),
+        1,
+        "expected exactly 1 deduplicated Completed notification: {completed_notices:?}"
+    );
+    assert!(completed_notices[0].2.contains("Shipped v0.4.1 cleanly."));
+
+    // Inbox includes the sponsored thread for alice until she reads it.
+    let sponsored_inbox: senate_bridge::ipc::InboxReply = desk
+        .ipc(Request::Inbox {
+            session: senate_bridge::ipc::SessionSelector::default(),
+            committee: Some(CommitteeId::new("refund-v2").unwrap()),
+            agent: None,
+            all: false,
+        })
+        .await;
+    assert!(
+        sponsored_inbox.threads.iter().any(|t| {
+            t.root == dst_root && t.is_sponsored_by(&senate_core::Name::new("alice").unwrap())
+        }),
+        "expected sponsored thread {dst_root} in refund-v2 inbox: {:?}",
+        sponsored_inbox.threads
+    );
+
+    // Unrelated non-sponsored task (forwarded by secretary without authorize) -> 0 notices.
+    let other_req: SendReply = desk
+        .ipc(Request::Send {
+            session: Laptop::session("s-codex"),
+            kind: SayKind::Request,
+            to: Vec::new(),
+            at: Some(senate_core::Locator::parse_short("refund-v2::copilot").unwrap()),
+            body: "Unrelated agent check".into(),
+            refs: None,
+            id: None,
+        })
+        .await;
+    on_the_desk(&desk, other_req.posted.seq).await;
+    let _: Forwarded = desk
+        .ipc(Request::Forward {
+            session: Laptop::session("s-claude"),
+            committee: ledger(),
+            seq: other_req.posted.seq,
+            authorize: false,
+            note: None,
+            id: None,
+        })
+        .await;
+    let push2 = copilot.wait_for("Unrelated agent check").await;
+    // Drain the initial Speaker-desk arrival notice before checking downstream task execution.
+    let _ = drain_for_person(&mut watch, 300).await;
+    let other_root = thread_of(&push2, "Unrelated agent check");
+    desk.status(
+        "s-copilot",
+        other_root,
+        StatusPayload::new(StatusState::Processing),
+    )
+    .await;
+    let mut other_blocked = StatusPayload::new(StatusState::Suspended);
+    other_blocked.reason = Some("unrelated pause".into());
+    desk.status("s-copilot", other_root, other_blocked).await;
+    desk.answer("s-copilot", other_root, "Unrelated done.")
+        .await;
+    let unrelated_notices = drain_for_person(&mut watch, 800).await;
+    assert!(
+        unrelated_notices.is_empty(),
+        "unrelated non-sponsored task must trigger 0 notices: {unrelated_notices:?}"
+    );
+
+    desk.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_acceptance_and_downstream_mirror_e2e() {
+    use senate_bridge::ipc::{DeskDecision, DeskOutcome};
+    use senate_core::api::{ThreadsPage, threads_path};
+    use senate_core::{ArtifactRef, CommissionBucket, StatusPayload, StatusState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut desk, _claude, copilot, _codex) = alices_machine(dir.path()).await;
+    let live = desk.senate();
+    let url = live.url.clone();
+    let token = live.token.clone();
+    let hub = live.daemon.hub.clone();
+
+    let origin_req: SendReply = desk
+        .ipc(Request::Send {
+            session: Laptop::session("s-codex"),
+            kind: SayKind::Request,
+            to: Vec::new(),
+            at: Some(senate_core::Locator::parse_short("refund-v2::copilot").unwrap()),
+            body: "Ship W3 staged deploy".into(),
+            refs: None,
+            id: None,
+        })
+        .await;
+    on_the_desk(&desk, origin_req.posted.seq).await;
+    let origin_evt = hub
+        .get(&ledger(), origin_req.posted.seq)
+        .await
+        .unwrap()
+        .unwrap();
+    let outcome: DeskOutcome = desk
+        .ipc(Request::DeskDecide {
+            committee: ledger(),
+            seq: origin_req.posted.seq,
+            item_id: origin_evt.id,
+            id: senate_core::EventId::new(),
+            decision: DeskDecision::ForwardAndAuthorize {
+                note: Some("deploy and await acceptance".into()),
+            },
+        })
+        .await;
+    assert!(matches!(outcome, DeskOutcome::Delivered { .. }));
+    let push = copilot.wait_for("Ship W3 staged deploy").await;
+    let dst_root = thread_of(&push, "Ship W3 staged deploy");
+
+    // Step 1: Progress with steps + phase + artifacts on downstream -> reflected in origin linked_downstream.
+    let mut progress = StatusPayload::new(StatusState::Processing);
+    progress.phase = Some("canary-rollout".into());
+    progress.steps = Some(vec![
+        senate_core::Step {
+            id: "s1".into(),
+            label: "build".into(),
+            done: true,
+        },
+        senate_core::Step {
+            id: "s2".into(),
+            label: "verify".into(),
+            done: false,
+        },
+    ]);
+    progress.artifacts = vec![ArtifactRef {
+        label: "commit".into(),
+        value: "792bbadf".into(),
+    }];
+    desk.status("s-copilot", dst_root, progress).await;
+
+    let orig_page: ThreadsPage = reqwest::Client::new()
+        .get(format!(
+            "{url}{}?include_discussions=true",
+            threads_path(&ledger())
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mirror = orig_page
+        .threads
+        .iter()
+        .find(|t| t.root == origin_req.posted.seq)
+        .and_then(|t| t.linked_downstream.as_ref())
+        .expect("origin thread must mirror downstream progress");
+    assert_eq!(mirror.committee, committee());
+    assert_eq!(mirror.root, dst_root);
+    assert_eq!(mirror.phase.as_deref(), Some("canary-rollout"));
+    assert_eq!(mirror.steps_done, 1);
+    assert_eq!(mirror.steps_total, 2);
+    assert_eq!(mirror.artifacts.len(), 1);
+
+    // Step 2: Downstream delivers answer AND marks awaiting_acceptance=true -> stays unsettled in PendingAcceptance.
+    desk.answer(
+        "s-copilot",
+        dst_root,
+        "Canary live on staging; ready for verification.",
+    )
+    .await;
+    let mut handoff = StatusPayload::new(StatusState::Active);
+    handoff.phase = Some("staging-verified".into());
+    handoff.next_owner = Some(senate_core::Address::senior(
+        &senate_core::Name::new("alice").unwrap(),
+    ));
+    handoff.awaiting_acceptance = true;
+    desk.status("s-copilot", dst_root, handoff).await;
+
+    let dst_inbox: senate_bridge::ipc::InboxReply = desk
+        .ipc(Request::Inbox {
+            session: senate_bridge::ipc::SessionSelector::default(),
+            committee: Some(committee()),
+            agent: None,
+            all: true,
+        })
+        .await;
+    let dst_summary = dst_inbox
+        .threads
+        .iter()
+        .find(|t| t.root == dst_root)
+        .unwrap();
+    assert!(!dst_summary.is_settled());
+    assert_eq!(
+        dst_summary.commission_bucket(dst_summary.updated),
+        CommissionBucket::PendingAcceptance
+    );
+    assert_eq!(dst_summary.phase.as_deref(), Some("staging-verified"));
+
+    // Control: normal answer without awaiting_acceptance settles cleanly.
+    hub.append(
+        NewEvent::new(
+            committee(),
+            Kind::Question,
+            Address::senior(&senate_core::Name::new("alice").unwrap()),
+            "Normal control question",
+        )
+        .to(Address::senator(&path("copilot"))),
+    )
+    .await
+    .unwrap();
+    let ctrl_push = copilot.wait_for("Normal control question").await;
+    let ctrl_root = thread_of(&ctrl_push, "Normal control question");
+    desk.answer("s-copilot", ctrl_root, "Normal answer.").await;
+    let ctrl_board = hub.tasks(&committee()).await.unwrap();
+    let ctrl_summary = ctrl_board.get(ctrl_root).unwrap();
+    assert!(ctrl_summary.is_settled());
+
+    // Step 3: Explicit acceptance/archive closes PendingAcceptance.
+    let mut accept = StatusPayload::new(StatusState::Archived);
+    accept.reason = Some("Accepted and closed".into());
+    let _: senate_bridge::ipc::Posted = desk
+        .ipc(Request::Task {
+            session: senate_bridge::ipc::SessionSelector::default(),
+            thread: dst_root,
+            status: accept,
+            id: None,
+            committee: Some(committee()),
+            agent: None,
+            as_person: true,
+        })
+        .await;
+    let closed_board = hub.tasks(&committee()).await.unwrap();
+    let closed_summary = closed_board.get(dst_root).unwrap();
+    assert!(!closed_summary.awaiting_acceptance);
+    assert_eq!(closed_summary.waits(), None);
+
     desk.stop().await;
 }

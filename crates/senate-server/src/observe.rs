@@ -725,6 +725,7 @@ async fn committee_view(
                     include_discussions: true,
                     ..Default::default()
                 },
+                |_| false,
             )
             .await
             .map_err(not_ready)?;
@@ -749,8 +750,13 @@ async fn committee_view(
                 continue;
             }
             let seq = wire_seq(thread.root)?;
-            if matches!(thread.waits(), Some(senate_core::task::WaitsOn::Person))
-                && let Some(owner) = &thread.owner
+            if matches!(
+                thread.waits(),
+                Some(
+                    senate_core::task::WaitsOn::Person
+                        | senate_core::task::WaitsOn::Acceptance { .. }
+                )
+            ) && let Some(owner) = &thread.owner
                 && seated.contains(&owner.agent)
             {
                 waiting_on_person.insert(owner.agent.to_string());
@@ -768,7 +774,10 @@ async fn committee_view(
                 state: thread_state(thread.state),
                 waits_on: match thread.waits() {
                     Some(senate_core::task::WaitsOn::Agents) => public::WaitsOn::Agents,
-                    Some(senate_core::task::WaitsOn::Person) => public::WaitsOn::Person,
+                    Some(
+                        senate_core::task::WaitsOn::Person
+                        | senate_core::task::WaitsOn::Acceptance { .. },
+                    ) => public::WaitsOn::Person,
                     None => public::WaitsOn::None,
                 },
                 link: link(id, Target::Thread(committee.to_string(), seq)),

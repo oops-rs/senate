@@ -181,7 +181,87 @@ import SenateCore
 
     @Test func theSidebarHeadsWithInboxApprovalsAndHistory() async throws {
         let store = store()
-        #expect(store.sections == [.inbox, .approvals, .history])
+        #expect(store.sections == [.inbox, .commissions, .conferences, .approvals, .history])
+    }
+
+    @Test func conferencesOpenPostStartAndAdjournWithDeepLinks() async throws {
+        let store = store()
+        let confId = "conf-01testconference00000000"
+        let summary = ConferenceSummaryView(
+            id: confId, topic: "Release sync", convener: "[senator::alice]",
+            state: "convening", stateLabel: "Convening",
+            seats: [
+                ConferenceSeatView(target: "senate::chair", committee: "senate", status: "seated",
+                                   statusLabel: "Seated", participant: "[senator::bob]",
+                                   delegatedBy: nil, ephemeral: false),
+                ConferenceSeatView(target: "audit::chair", committee: "audit", status: "absent",
+                                   statusLabel: "Absent", participant: nil,
+                                   delegatedBy: nil, ephemeral: false),
+            ],
+            linkedThreadsCount: 0, round: 0, agentHopsRemaining: 1,
+            createdAt: Date(), adjournedAt: nil, report: nil
+        )
+        core.conferences[confId] = ConferenceDetailView(summary: summary, events: [])
+        var s = online()
+        s.conferences = [summary]
+        core.push(s)
+        try await until(store) { $0.state.conferences.count == 1 }
+        #expect(store.count(.conferences) == 1)
+
+        // Deep link `senate://conference/<id>` routes to `.conference(id)`.
+        let parsed = parseAppLink(url: "senate://conference/\(confId)")
+        #expect(parsed?.route == .conference(id: confId))
+
+        await store.loadConference(confId)
+        #expect(store.conference?.summary.state == nil) // requires place == .conference(confId)
+        store.select(.conference(confId))
+        try await until(store) { $0.conference?.summary.id == confId }
+
+        await store.startConference(confId)
+        #expect(store.conference?.summary.state == "in_session")
+
+        store.conferenceDrafts[confId] = "Ready to ship"
+        await store.sendConferenceMessage(confId)
+        #expect(store.conferenceDrafts[confId] == nil)
+        #expect(store.conference?.events.last?.body == "Ready to ship")
+
+        await store.adjournConference(confId, summary: "Shipped v2", decisions: ["Freeze API"])
+        #expect(store.conference?.summary.state == "adjourned")
+        #expect(store.conference?.summary.report?.summary == "Shipped v2")
+    }
+
+    @Test func commissionsCountExcludesInProgressAndOpensAuthoritativeThread() async throws {
+        let store = store()
+        var s = online()
+        s.commissions = [
+            CommissionThread(
+                committee: "refund-v2", root: 12, updated: 14, title: "Blocked task",
+                bucket: "blocked", bucketLabel: "Blocked", state: "suspended", stateLabel: "Suspended",
+                owner: "[senator::copilot]", summaryLine: "Needs rate limit decision",
+                unread: false, since: Date(), originLabel: "from ledger #4",
+                phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, linkedDownstream: nil
+            ),
+            CommissionThread(
+                committee: "refund-v2", root: 15, updated: 18, title: "Completed task",
+                bucket: "completed_unread", bucketLabel: "Completed", state: "active", stateLabel: "Active",
+                owner: nil, summaryLine: "Shipped", unread: true, since: Date(), originLabel: nil,
+                phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, linkedDownstream: nil
+            ),
+            CommissionThread(
+                committee: "ledger", root: 19, updated: 19, title: "Working task",
+                bucket: "in_progress", bucketLabel: "In progress", state: "processing", stateLabel: "Processing",
+                owner: nil, summaryLine: nil, unread: false, since: Date(), originLabel: nil,
+                phase: "build", artifacts: [ArtifactItem(label: "commit", value: "abc1234")],
+                nextOwner: nil, awaitingAcceptance: false, linkedDownstream: nil
+            ),
+        ]
+        core.push(s)
+        try await until(store) { $0.state.commissions.count == 3 }
+        #expect(store.count(.commissions) == 2)
+        store.openThread(committee: "refund-v2", root: 12)
+        #expect(store.place == .thread("refund-v2:12"))
+        await store.accept(committee: "refund-v2", root: 15)
+        #expect(core.calls.contains("accept refund-v2 15"))
     }
 
     @Test func openingAThreadFromANotificationSelectsIt() async throws {
@@ -210,7 +290,7 @@ import SenateCore
         let store = store()
         core.threadView = ThreadView(
             committee: "refund-v2", root: 140, title: "Reviewed; fine by me.", state: nil, stateLabel: nil,
-            kindLabel: "note", events: [])
+            kindLabel: "note", phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, events: [])
         core.push(online())
         try await until(store) { $0.state.online }
         store.openThread(committee: "refund-v2", root: 140)

@@ -232,6 +232,7 @@ fn offline_roles(paths: &Paths, config: &BridgeConfig) -> Option<RolesReply> {
             speaker: speaker.id,
             kind,
             desk,
+            execution_proxies: Vec::new(),
             built_in: None,
         }),
         uplink,
@@ -1197,6 +1198,7 @@ mod tests {
                 speaker: "/acme::senator::alice".parse().unwrap(),
                 kind: senate_core::SenatorKind::Person,
                 desk: vec![name("claude"), name("codex")],
+                execution_proxies: Vec::new(),
                 built_in: None,
             }),
             present: present.iter().map(|p| name(p)).collect(),
@@ -1280,6 +1282,7 @@ mod tests {
             speaker: "senator::alice".parse().unwrap(),
             kind: senate_core::SenatorKind::Person,
             desk: Vec::new(),
+            execution_proxies: Vec::new(),
             built_in: None,
         };
         assert_eq!(
@@ -1292,6 +1295,7 @@ mod tests {
             speaker: "senator::claude".parse().unwrap(),
             kind: senate_core::SenatorKind::Agent,
             desk: vec!["claude".parse().unwrap()],
+            execution_proxies: Vec::new(),
             built_in: None,
         };
         assert_eq!(

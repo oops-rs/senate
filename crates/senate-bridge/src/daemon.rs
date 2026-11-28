@@ -135,7 +135,7 @@ use senate_core::{
     Address, BranchNaming, Brief, CheckpointFiles, CheckpointPayload, CheckpointTrigger,
     CommitteeId, DutyPayload, Event, EventId, Kind, Locale, Locator, Name, NewEvent,
     PROPOSAL_DECISION, People, Refs, SenatePath, SenatorName, Seq, SpeakerSeat, StatusPayload,
-    TaskOwner, TriagePayload, TriageVerdict, is_provisional, meta, needs_triage,
+    StatusState, TaskOwner, TriagePayload, TriageVerdict, is_provisional, meta, needs_triage,
 };
 use serde::Serialize;
 use tokio::sync::{Notify, RwLock, RwLockReadGuard, broadcast, watch};
@@ -539,6 +539,8 @@ pub(crate) struct Shared {
     /// Whether a Speaker judges roots on this Senate, as `/v1/me` last said;
     /// until it has said, as if it does.
     triaged: AtomicBool,
+    /// Local explicit opt-in receiver bypass for cross-committee execution auth.
+    unsafe_ignore_execution_auth: AtomicBool,
     /// Who holds this Senate's Speaker's seat, as `/v1/me` last said.
     speaker: Mutex<Option<SpeakerSeat>>,
     pub(crate) store: Arc<Store>,
@@ -619,6 +621,11 @@ pub(crate) struct Shared {
     /// Events already announced to the person (every agent's stream carries
     /// each one): the newest [`ANNOUNCED_CAP`].
     announced_to_person: Mutex<BTreeSet<(CommitteeId, Seq)>>,
+    /// Commission notification signals deduplicated across cross-committee origin + destination.
+    announced_commissions:
+        Mutex<BTreeSet<(CommitteeId, Seq, senate_core::CommissionSignalKind, String)>>,
+    /// Cached root metadata per thread for evaluating `is_sponsored_by`.
+    thread_roots: Mutex<BTreeMap<(CommitteeId, Seq), senate_core::CommissionRoot>>,
     /// Agents whose work on a committee is reassigned to one of mine
     /// ([`routing::Covering`]).
     covering: Mutex<routing::Covering>,
@@ -1173,6 +1180,7 @@ impl Shared {
             store: store.clone(),
             home: common.home.clone(),
         });
+        let unsafe_ignore_execution_auth = config.desk.unsafe_ignore_execution_auth;
         Ok(Arc::new(Shared {
             scope_fixture: common.scope_fixture,
             #[cfg(target_os = "macos")]
@@ -1190,6 +1198,7 @@ impl Shared {
             seating: Mutex::new(seating),
             senate: Mutex::new(None),
             triaged: AtomicBool::new(true),
+            unsafe_ignore_execution_auth: AtomicBool::new(unsafe_ignore_execution_auth),
             speaker: Mutex::new(None),
             config,
             store,
@@ -1239,6 +1248,8 @@ impl Shared {
             watch: common.watch.clone(),
             notifications: common.notifications.clone(),
             announced_to_person: Mutex::new(BTreeSet::new()),
+            announced_commissions: Mutex::new(BTreeSet::new()),
+            thread_roots: Mutex::new(BTreeMap::new()),
             covering: Mutex::new(routing::Covering::new()),
             duties: Mutex::new(BTreeMap::new()),
             index,
@@ -1526,13 +1537,31 @@ impl Shared {
         self.senate_path().map(|p| p.name().clone())
     }
 
+    pub(crate) fn unsafe_ignore_execution_auth(&self) -> bool {
+        self.unsafe_ignore_execution_auth.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn on_set_unsafe_mode(
+        &self,
+        enabled: bool,
+    ) -> Result<crate::ipc::UnsafeModeReply, IpcError> {
+        let config_path = Paths::new(&self.home).config();
+        crate::config::DeskConfig::set_unsafe_ignore_execution_auth(&config_path, enabled)
+            .map_err(IpcError::bad_request)?;
+        self.unsafe_ignore_execution_auth
+            .store(enabled, Ordering::Relaxed);
+        self.publish_status();
+        Ok(crate::ipc::UnsafeModeReply { enabled })
+    }
+
     /// How `agent` reads a pushed event: who the Senate's people are, and
     /// which agents this machine's person runs.
     pub(crate) fn reader(&self, agent: &SenatorName) -> format::Reader {
         let mut own: BTreeSet<SenatorName> = self.served_agents().unwrap_or_default();
         own.extend(self.seated());
         own.insert(agent.clone());
-        let mut reader = format::Reader::new(Address::senator(agent), self.people(), own);
+        let mut reader = format::Reader::new(Address::senator(agent), self.people(), own)
+            .with_unsafe_ignore_execution_auth(self.unsafe_ignore_execution_auth());
         if let Ok(user) = SenatorName::new(self.config.person.clone()) {
             reader = reader.with_user(user);
         }
@@ -2347,7 +2376,9 @@ impl Shared {
         if let Some(dropped) = self.store.ingest(agent, event, directed, cap)? {
             self.note_capped(agent, &event.committee, dropped);
             dirty.notify_one();
-            self.announce_to_person(event);
+            self.note_thread_root_before(event);
+            self.announce_to_person(event).await;
+            self.note_thread_root_after(event);
             if matches!(
                 event.kind,
                 Kind::Question | Kind::Request | Kind::Answer | Kind::Status | Kind::Note
@@ -2379,25 +2410,166 @@ impl Shared {
         Ok(())
     }
 
-    /// Tell the person what is addressed to them: `watch` clients get a
-    /// `for_person` line and, with no client showing notifications itself,
-    /// the desktop gets one notification (coalesced). Each event once,
-    /// whichever agent's stream carried it.
-    fn announce_to_person(&self, event: &Event) {
-        let Some(attention) = senate_core::attention(event, &self.config.person)
-            .or_else(|| self.role_attention(event))
-        else {
+    fn note_thread_root_before(&self, event: &Event) {
+        if event.thread.is_some() {
+            return;
+        }
+        let mut roots = lock(&self.thread_roots);
+        roots.insert(
+            (event.committee.clone(), event.seq),
+            senate_core::CommissionRoot::from_event(event),
+        );
+        while roots.len() > ANNOUNCED_CAP {
+            roots.pop_first();
+        }
+    }
+
+    fn note_thread_root_after(&self, event: &Event) {
+        let Some(root_seq) = event.thread else {
             return;
         };
-        {
-            let mut seen = lock(&self.announced_to_person);
-            if !seen.insert((event.committee.clone(), event.seq)) {
-                return;
+        let mut roots = lock(&self.thread_roots);
+        let Some(root) = roots.get_mut(&(event.committee.clone(), root_seq)) else {
+            return;
+        };
+        match event.kind {
+            Kind::Answer if !senate_core::is_provisional(event) => {
+                root.answered = true;
             }
-            while seen.len() > ANNOUNCED_CAP {
-                seen.pop_first();
+            Kind::Question | Kind::Request | Kind::Note | Kind::Chat
+                if event.from != Address::Speaker =>
+            {
+                root.answered = false;
             }
+            _ => {}
         }
+    }
+
+    async fn commission_root_for(
+        &self,
+        committee: &CommitteeId,
+        root_seq: Seq,
+    ) -> Option<senate_core::CommissionRoot> {
+        if let Some(cached) = lock(&self.thread_roots)
+            .get(&(committee.clone(), root_seq))
+            .cloned()
+        {
+            return Some(cached);
+        }
+        let fetched = tokio::time::timeout(
+            Duration::from_millis(500),
+            self.fetch_event(committee, root_seq),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        let parsed = senate_core::CommissionRoot::from_event(&fetched);
+        let mut roots = lock(&self.thread_roots);
+        roots.insert((committee.clone(), root_seq), parsed.clone());
+        while roots.len() > ANNOUNCED_CAP {
+            roots.pop_first();
+        }
+        Some(parsed)
+    }
+
+    /// Tell the person what is addressed to them or signals a sponsored task's
+    /// blocker/completion: `watch` clients get a `for_person` line and, with no
+    /// client showing notifications itself, the desktop gets one notification
+    /// deduplicated across origin and destination threads.
+    async fn announce_to_person(&self, event: &Event) {
+        let direct = senate_core::attention(event, &self.config.person)
+            .or_else(|| self.role_attention(event));
+        let is_commission_candidate = event.thread.is_some()
+            && ((event.kind == Kind::Answer && !senate_core::is_provisional(event))
+                || (event.kind == Kind::Status
+                    && StatusPayload::of(event)
+                        .is_some_and(|s| s.state == StatusState::Suspended)));
+        let root = if let Some(root_seq) = event.thread.filter(|_| is_commission_candidate) {
+            self.commission_root_for(&event.committee, root_seq).await
+        } else {
+            None
+        };
+        let commission = root.as_ref().and_then(|r| {
+            senate_core::commission_signal(event, r, &self.config.person, r.answered)
+        });
+
+        let (escalated, text, signal) = if let Some(sig) = commission {
+            {
+                let mut comm_seen = lock(&self.announced_commissions);
+                if !comm_seen.insert((
+                    sig.origin_committee.clone(),
+                    sig.origin_root,
+                    sig.kind,
+                    sig.discriminator.clone(),
+                )) {
+                    return;
+                }
+                while comm_seen.len() > ANNOUNCED_CAP {
+                    comm_seen.pop_first();
+                }
+            }
+            {
+                let mut seen = lock(&self.announced_to_person);
+                seen.insert((event.committee.clone(), event.seq));
+                while seen.len() > ANNOUNCED_CAP {
+                    seen.pop_first();
+                }
+            }
+            let escalated = sig.kind == senate_core::CommissionSignalKind::Blocked
+                || direct.as_ref().is_some_and(|a| a.escalated);
+            let text = if !sig.text.trim().is_empty() {
+                sig.text
+            } else {
+                direct.map(|a| a.text).unwrap_or_default()
+            };
+            (escalated, text, Some(sig.kind))
+        } else if let Some(attention) = direct {
+            if event.kind == Kind::Answer && !senate_core::is_provisional(event) {
+                if let Some(relayed_id) = event
+                    .meta
+                    .get(meta::RELAYED_EVENT_ID)
+                    .and_then(|v| v.as_str())
+                {
+                    let mut comm_seen = lock(&self.announced_commissions);
+                    if !comm_seen.insert((
+                        event.committee.clone(),
+                        event.thread.unwrap_or(event.seq),
+                        senate_core::CommissionSignalKind::Completed,
+                        relayed_id.to_owned(),
+                    )) {
+                        return;
+                    }
+                    while comm_seen.len() > ANNOUNCED_CAP {
+                        comm_seen.pop_first();
+                    }
+                } else if let Some(origin) = root.as_ref().and_then(|r| r.origin.as_ref())
+                    && let Some(oc) = origin.locator.committee()
+                {
+                    let mut comm_seen = lock(&self.announced_commissions);
+                    comm_seen.insert((
+                        oc.clone(),
+                        origin.thread,
+                        senate_core::CommissionSignalKind::Completed,
+                        event.id.to_string(),
+                    ));
+                    while comm_seen.len() > ANNOUNCED_CAP {
+                        comm_seen.pop_first();
+                    }
+                }
+            }
+            {
+                let mut seen = lock(&self.announced_to_person);
+                if !seen.insert((event.committee.clone(), event.seq)) {
+                    return;
+                }
+                while seen.len() > ANNOUNCED_CAP {
+                    seen.pop_first();
+                }
+            }
+            (attention.escalated, attention.text, None)
+        } else {
+            return;
+        };
         if let Some(notifications) = &self.notifications {
             // Named as the app names them: aliases as last read, else the
             // short form; never a bracketed id.
@@ -2407,8 +2579,8 @@ impl Shared {
                 &event.from,
                 event.on_behalf_of.as_ref(),
                 &event.kind,
-                attention.escalated,
-                &attention.text,
+                escalated,
+                &text,
                 locale,
                 |m| crate::person::shown(m, Some(&event.committee), aliases.as_ref(), locale),
             );
@@ -2419,9 +2591,15 @@ impl Shared {
         }
         self.publish(WatchEvent::ForPerson {
             news: Box::new(event.clone()),
-            escalated: attention.escalated,
-            text: attention.text,
+            escalated,
+            text,
+            signal,
         });
+        if event.meta.contains_key(meta::CONFERENCE_INVITE)
+            || event.meta.contains_key(meta::CONFERENCE_REPORT)
+        {
+            self.publish(WatchEvent::ConferencesChanged);
+        }
     }
 
     /// Triage verdicts and takeovers off `agent`'s stream (see the module
@@ -3748,7 +3926,11 @@ impl Shared {
                 action,
                 for_,
                 secretary,
-            } => wrap(on_heap(|| self.on_secretaries(&session, action, for_, secretary)).await),
+                expires_at,
+            } => wrap(
+                on_heap(|| self.on_secretaries(&session, action, for_, secretary, expires_at)).await,
+            ),
+            Request::SetUnsafeMode { enabled } => wrap(self.on_set_unsafe_mode(enabled)),
             Request::Roles => wrap(on_heap(|| self.on_roles()).await),
             Request::Waiting { session_id } => wrap(on_heap(|| self.on_waiting(&session_id)).await),
             Request::SessionEnd { session_id, .. } => {
@@ -3783,6 +3965,47 @@ impl Shared {
                 };
                 wrap(on_heap(|| self.on_checkpoint(&session, summary, files, push, id)).await)
             }
+            Request::ConferenceConvene {
+                session,
+                topic,
+                seats,
+                linked_threads,
+            } => wrap(
+                on_heap(|| self.on_conference_convene(&session, topic, seats, linked_threads))
+                    .await,
+            ),
+            Request::ConferenceList { session } => {
+                wrap(on_heap(|| self.on_conference_list(&session)).await)
+            }
+            Request::ConferenceGet { session, id } => {
+                wrap(on_heap(|| self.on_conference_get(&session, id)).await)
+            }
+            Request::ConferenceRsvp {
+                session,
+                id,
+                action,
+            } => wrap(on_heap(|| self.on_conference_rsvp(&session, id, action)).await),
+            Request::ConferenceStart { session, id } => {
+                wrap(on_heap(|| self.on_conference_start(&session, id)).await)
+            }
+            Request::ConferencePost {
+                session,
+                id,
+                body,
+                to,
+            } => wrap(on_heap(|| self.on_conference_post(&session, id, body, to)).await),
+            Request::ConferenceAdjourn {
+                session,
+                id,
+                summary,
+                decisions,
+                action_items,
+            } => wrap(
+                on_heap(|| {
+                    self.on_conference_adjourn(&session, id, summary, decisions, action_items)
+                })
+                .await,
+            ),
             Request::Ask {
                 session,
                 to,
@@ -4346,6 +4569,7 @@ impl Shared {
             queue: self.store.counts().map_err(internal)?,
             speaker: self.speaker_seat(),
             roles: Some(self.roles_now()),
+            unsafe_ignore_execution_auth: self.unsafe_ignore_execution_auth(),
         })
     }
 
@@ -6527,16 +6751,23 @@ impl Shared {
                 reply.agents.iter().any(|a| t.is_for(a))
                     || t.escalated_to.as_ref() == Some(person)
                     || for_person && t.directed_to(person).is_some()
+                    || for_person && t.is_sponsored_by(person)
                     || chairs && t.to.contains(&Address::Chair)
             })
             .collect();
         // What waits on no one is left out and counted, unless asked for.
         // What waits on the person only because they have not seen it is
-        // not settled, whatever the agents' rule says.
+        // not settled, whatever the agents' rule says; sponsored threads stay
+        // listed until their answer is read.
         let mut settled = 0;
         if !all {
             threads.retain(|t| {
-                let waits = t.waits().is_some() || for_person && reply.waits_on_person(t).is_some();
+                let waits = t.waits().is_some()
+                    || for_person && reply.waits_on_person(t).is_some()
+                    || (for_person
+                        && t.is_sponsored_by(person)
+                        && t.commission_bucket(reply.seen_of(t.root))
+                            != senate_core::CommissionBucket::CompletedRead);
                 settled += usize::from(!waits);
                 waits
             });
@@ -6652,6 +6883,7 @@ impl Shared {
                 read_before,
                 read: read_before,
                 redelivered,
+                unsafe_ignore_execution_auth: reader.unsafe_ignore_execution_auth,
             });
         }
         let read = match last {
@@ -6679,6 +6911,7 @@ impl Shared {
             read_before,
             read,
             redelivered,
+            unsafe_ignore_execution_auth: reader.unsafe_ignore_execution_auth,
         })
     }
 
@@ -7017,6 +7250,146 @@ impl Shared {
     ) -> Result<Brief, IpcError> {
         let committee = self.target(selector, committee)?;
         self.api.brief(&committee).await.map_err(server_error)
+    }
+
+    fn conference_actor(&self, selector: &SessionSelector) -> Result<Address, IpcError> {
+        if selector == &SessionSelector::default() {
+            Ok(self.person())
+        } else {
+            let session = self.resolve(selector)?;
+            Ok(Address::senator(&session.agent))
+        }
+    }
+
+    async fn on_conference_convene(
+        &self,
+        selector: &SessionSelector,
+        topic: String,
+        seats: Vec<senate_core::ConferenceSeatInput>,
+        linked_threads: Vec<senate_core::LinkedThread>,
+    ) -> Result<senate_core::ConferenceSummary, IpcError> {
+        let from = self.conference_actor(selector)?;
+        let summary = self
+            .api
+            .convene_conference(&senate_core::CreateConferenceRequest {
+                topic,
+                seats,
+                linked_threads,
+                from: Some(from),
+            })
+            .await
+            .map_err(server_error)?;
+        self.publish(WatchEvent::ConferencesChanged);
+        Ok(summary)
+    }
+
+    async fn on_conference_list(
+        &self,
+        selector: &SessionSelector,
+    ) -> Result<senate_core::ConferenceList, IpcError> {
+        let _ = self.conference_actor(selector)?;
+        self.api.list_conferences().await.map_err(server_error)
+    }
+
+    async fn on_conference_get(
+        &self,
+        selector: &SessionSelector,
+        id: senate_core::ConferenceId,
+    ) -> Result<senate_core::ConferenceDetail, IpcError> {
+        let _ = self.conference_actor(selector)?;
+        self.api.get_conference(&id).await.map_err(server_error)
+    }
+
+    async fn on_conference_rsvp(
+        &self,
+        selector: &SessionSelector,
+        id: senate_core::ConferenceId,
+        mut action: senate_core::ConferenceRsvpAction,
+    ) -> Result<senate_core::ConferenceSummary, IpcError> {
+        let actor = self.conference_actor(selector)?;
+        match &mut action {
+            senate_core::ConferenceRsvpAction::Attend { participant, .. }
+                if participant.is_none() =>
+            {
+                *participant = Some(actor);
+            }
+            senate_core::ConferenceRsvpAction::Delegate { delegated_by, .. }
+                if delegated_by.is_none() =>
+            {
+                *delegated_by = Some(actor);
+            }
+            _ => {}
+        }
+        let summary = self
+            .api
+            .rsvp_conference(&id, &action)
+            .await
+            .map_err(server_error)?;
+        self.publish(WatchEvent::ConferencesChanged);
+        Ok(summary)
+    }
+
+    async fn on_conference_start(
+        &self,
+        selector: &SessionSelector,
+        id: senate_core::ConferenceId,
+    ) -> Result<senate_core::ConferenceSummary, IpcError> {
+        let _ = self.conference_actor(selector)?;
+        let summary = self.api.start_conference(&id).await.map_err(server_error)?;
+        self.publish(WatchEvent::ConferencesChanged);
+        Ok(summary)
+    }
+
+    async fn on_conference_post(
+        &self,
+        selector: &SessionSelector,
+        id: senate_core::ConferenceId,
+        body: String,
+        to: Vec<Address>,
+    ) -> Result<senate_core::PostConferenceEventResponse, IpcError> {
+        let from = self.conference_actor(selector)?;
+        let resp = self
+            .api
+            .post_conference_event(
+                &id,
+                &senate_core::PostConferenceEventRequest {
+                    from,
+                    body,
+                    kind: None,
+                    to,
+                    meta: Default::default(),
+                },
+            )
+            .await
+            .map_err(server_error)?;
+        self.publish(WatchEvent::ConferencesChanged);
+        Ok(resp)
+    }
+
+    async fn on_conference_adjourn(
+        &self,
+        selector: &SessionSelector,
+        id: senate_core::ConferenceId,
+        summary: String,
+        decisions: Vec<String>,
+        action_items: Vec<senate_core::ConferenceActionItem>,
+    ) -> Result<senate_core::ConferenceSummary, IpcError> {
+        let from = self.conference_actor(selector)?;
+        let res = self
+            .api
+            .adjourn_conference(
+                &id,
+                &senate_core::AdjournConferenceRequest {
+                    summary,
+                    decisions,
+                    action_items,
+                    from: Some(from),
+                },
+            )
+            .await
+            .map_err(server_error)?;
+        self.publish(WatchEvent::ConferencesChanged);
+        Ok(res)
     }
 
     fn on_bound(&self, selector: &SessionSelector) -> Result<BoundReply, IpcError> {

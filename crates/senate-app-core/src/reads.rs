@@ -8,7 +8,27 @@ use std::time::SystemTime;
 use senate_bridge::ipc::{DeskItemDetail, DeskOutcome, ThreadReply};
 use senate_core::{Address, Event, Locale, Name};
 
+use crate::state::{ArtifactItem, ConferenceSummaryView, conference_summary_view};
 use crate::text;
+
+/// A multi-party conference room and its isolated room transcript.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct ConferenceDetailView {
+    pub summary: ConferenceSummaryView,
+    pub events: Vec<ThreadEvent>,
+}
+
+pub(crate) fn conference_detail_view(
+    detail: senate_core::ConferenceDetail,
+    person: Option<&Name>,
+    locale: Locale,
+) -> ConferenceDetailView {
+    let me = person.map(Address::senior);
+    ConferenceDetailView {
+        summary: conference_summary_view(&detail.summary, locale),
+        events: thread_events(&detail.events, me.as_ref(), locale),
+    }
+}
 
 /// One thread, root first.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -25,6 +45,10 @@ pub struct ThreadView {
     pub state_label: Option<String>,
     /// What kind its root is, in words.
     pub kind_label: String,
+    pub phase: Option<String>,
+    pub artifacts: Vec<ArtifactItem>,
+    pub next_owner: Option<String>,
+    pub awaiting_acceptance: bool,
     pub events: Vec<ThreadEvent>,
 }
 
@@ -54,6 +78,10 @@ pub struct ThreadEvent {
     pub mine: bool,
     /// A task status (`kind` `status`): what it says, as one activity line.
     pub status: Option<StatusLine>,
+    /// Execution authorization provenance badge (`meta::EXECUTION_AUTH`), when carried.
+    pub execution_auth_badge: Option<String>,
+    /// Execution authorization wire mode (`"direct"` or `"secretary_proxy"`).
+    pub execution_auth_mode: Option<String>,
 }
 
 /// A task status in a thread, as a compact activity line: the state in
@@ -72,6 +100,10 @@ pub struct StatusLine {
     pub reason: Option<String>,
     pub steps: Vec<StatusStep>,
     pub links: Vec<StatusLink>,
+    pub phase: Option<String>,
+    pub artifacts: Vec<ArtifactItem>,
+    pub next_owner: Option<String>,
+    pub awaiting_acceptance: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -90,6 +122,7 @@ pub struct StatusLink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum DeskAction {
     Forward,
+    ForwardAndAuthorize,
     Refuse,
     Answer,
     Close,
@@ -100,6 +133,7 @@ impl From<senate_bridge::ipc::DeskAction> for DeskAction {
         use senate_bridge::ipc::DeskAction as A;
         match action {
             A::Forward => Self::Forward,
+            A::ForwardAndAuthorize => Self::ForwardAndAuthorize,
             A::Refuse => Self::Refuse,
             A::Answer => Self::Answer,
             A::Close => Self::Close,
@@ -111,6 +145,9 @@ impl From<senate_bridge::ipc::DeskAction> for DeskAction {
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum DeskChoice {
     Forward,
+    ForwardAndAuthorize {
+        note: Option<String>,
+    },
     Refuse {
         reason: String,
     },
@@ -128,6 +165,7 @@ impl From<DeskChoice> for senate_bridge::ipc::DeskDecision {
     fn from(choice: DeskChoice) -> Self {
         match choice {
             DeskChoice::Forward => Self::Forward,
+            DeskChoice::ForwardAndAuthorize { note } => Self::ForwardAndAuthorize { note },
             DeskChoice::Refuse { reason } => Self::Refuse { reason },
             DeskChoice::Answer { body } => Self::Answer { body },
             DeskChoice::Close { reason } => Self::Close { reason },
@@ -278,6 +316,12 @@ pub(crate) fn thread_view(reply: ThreadReply, person: Option<&Name>, locale: Loc
         kind_label: root.map_or_else(String::new, |e| text::kind(locale, &e.kind)),
         committee: reply.committee.to_string(),
         root: reply.root.0,
+        phase: summary.and_then(|t| t.phase.clone()),
+        artifacts: summary.map_or_else(Vec::new, |t| crate::state::artifact_items(&t.artifacts)),
+        next_owner: summary
+            .and_then(|t| t.next_owner.as_ref())
+            .map(Address::in_text),
+        awaiting_acceptance: summary.is_some_and(|t| t.awaiting_acceptance),
         events: thread_events(&reply.events, me.as_ref(), locale),
     }
 }
@@ -318,18 +362,31 @@ fn thread_events(events: &[Event], me: Option<&Address>, locale: Locale) -> Vec<
 
 /// What a thread's statuses have said so far: each field as the last
 /// status that set it left it (a status's missing field is no change).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct Task {
     state: Option<senate_core::StatusState>,
     title: Option<String>,
     steps: Vec<(String, bool)>,
     links: Vec<(String, String)>,
+    phase: Option<String>,
+    artifacts: Vec<(String, String)>,
+    next_owner: Option<String>,
+    awaiting_acceptance: bool,
     escalated_to: Option<String>,
     takeover: Option<String>,
 }
 
 impl Task {
     fn after(&self, s: &senate_core::StatusPayload) -> Self {
+        let archives = s.state == senate_core::StatusState::Archived;
+        let escalated_to = if s.withdraw {
+            None
+        } else {
+            s.escalated_to
+                .as_ref()
+                .map(ToString::to_string)
+                .or_else(|| self.escalated_to.clone())
+        };
         Self {
             state: Some(s.state),
             title: s.title.clone().or_else(|| self.title.clone()),
@@ -346,14 +403,30 @@ impl Task {
                         .collect()
                 },
             ),
-            escalated_to: if s.withdraw {
-                None
+            phase: s.phase.clone().or_else(|| self.phase.clone()),
+            artifacts: if s.artifacts.is_empty() {
+                self.artifacts.clone()
             } else {
-                s.escalated_to
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .or_else(|| self.escalated_to.clone())
+                s.artifacts
+                    .iter()
+                    .map(|a| (a.label.clone(), a.value.clone()))
+                    .collect()
             },
+            next_owner: s
+                .next_owner
+                .as_ref()
+                .map(Address::in_text)
+                .or_else(|| self.next_owner.clone()),
+            awaiting_acceptance: if archives {
+                false
+            } else if s.awaiting_acceptance {
+                true
+            } else if s.state == senate_core::StatusState::Processing && escalated_to.is_none() {
+                false
+            } else {
+                self.awaiting_acceptance
+            },
+            escalated_to,
             takeover: s
                 .takeover
                 .as_ref()
@@ -408,12 +481,28 @@ impl Task {
                     url: url.clone(),
                 })
                 .collect(),
+            phase: self.phase.clone(),
+            artifacts: self
+                .artifacts
+                .iter()
+                .map(|(label, value)| ArtifactItem {
+                    label: label.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+            next_owner: self.next_owner.clone(),
+            awaiting_acceptance: self.awaiting_acceptance,
         }
     }
 }
 
 fn thread_event(e: &Event, me: Option<&Address>, locale: Locale) -> ThreadEvent {
     let carried = e.carried();
+    let execution_auth = carried
+        .as_ref()
+        .and_then(|c| c.execution_auth.as_ref())
+        .cloned()
+        .or_else(|| senate_core::ExecutionAuthPayload::of(e));
     ThreadEvent {
         seq: e.seq.0,
         kind: e.kind.as_str().to_string(),
@@ -428,6 +517,8 @@ fn thread_event(e: &Event, me: Option<&Address>, locale: Locale) -> ThreadEvent 
         at: e.ts.into(),
         mine: me.is_some_and(|m| *m == e.from && e.on_behalf_of.is_none()),
         status: None,
+        execution_auth_badge: execution_auth.as_ref().map(|a| a.badge(locale)),
+        execution_auth_mode: execution_auth.as_ref().map(|a| a.mode_wire().to_string()),
     }
 }
 
@@ -848,5 +939,65 @@ mod tests {
         };
         let view = thread_view(reply, None, Locale::En);
         assert_eq!(view.events.len(), 1);
+    }
+
+    #[test]
+    fn thread_view_surfaces_execution_auth_provenance_badge_and_mode() {
+        let alice = SenatorName::new(senate_core::Name::new("alice").unwrap());
+        let bob = senate_core::Name::new("bob").unwrap();
+        let origin = senate_core::Origin {
+            locator: "/senate::commons::senator::bob".parse().unwrap(),
+            thread: Seq(13),
+        };
+        let forwarded = Event {
+            meta: [
+                (senate_core::meta::ORIGIN.to_owned(), origin.value()),
+                (
+                    senate_core::meta::ACTED_BY.to_owned(),
+                    serde_json::json!("alice"),
+                ),
+                (
+                    senate_core::meta::EXECUTION_AUTH.to_owned(),
+                    senate_core::ExecutionAuthPayload {
+                        authorized_by: senate_core::Name::new("alice").unwrap(),
+                        mode: senate_core::ExecutionAuthMode::Direct,
+                        note: Some("in scope".into()),
+                    }
+                    .value(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..event(10, Kind::Request, Address::Speaker, "Please ship it.")
+        };
+        let control = Event {
+            meta: [
+                (senate_core::meta::ORIGIN.to_owned(), origin.value()),
+                (
+                    senate_core::meta::ACTED_BY.to_owned(),
+                    serde_json::json!("bob"),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..event(11, Kind::Request, Address::Speaker, "Plain forward.")
+        };
+        let reply = ThreadReply {
+            committee: CommitteeId::new("refund-v2").unwrap(),
+            root: Seq(10),
+            events: vec![forwarded, control],
+        };
+        let view = thread_view(reply, Some(&bob), Locale::En);
+        assert_eq!(
+            view.events[0].execution_auth_mode.as_deref(),
+            Some("direct")
+        );
+        assert_eq!(
+            view.events[0].execution_auth_badge.as_deref(),
+            Some("authorized by [senator::alice]")
+        );
+        assert_eq!(view.events[1].execution_auth_mode, None);
+        assert_eq!(view.events[1].execution_auth_badge, None);
+        let _ = alice;
     }
 }

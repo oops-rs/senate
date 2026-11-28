@@ -1,6 +1,6 @@
 use crate::{
     Paths,
-    ipc::{DeskReply, Request, SessionSelector},
+    ipc::{DeskReply, Request, SecretariesReply, SecretaryOp, SessionSelector},
 };
 use clap::{Args, Subcommand};
 use senate_core::api::Secretaries;
@@ -95,6 +95,25 @@ enum DeskCmd {
         #[arg(value_parser = parse_seat_name)]
         senators: Vec<SenatorName>,
     },
+    /// Grant an appointed desk secretary authority to attach `SecretaryProxy`
+    /// execution authorization, optionally with a TTL or expiry timestamp.
+    GrantProxy {
+        /// Secretary senator name.
+        #[arg(value_parser = parse_seat_name)]
+        secretary: SenatorName,
+        /// Optional relative TTL such as `30m`, `2h`, `7d`, or `60s`.
+        #[arg(long, conflicts_with = "expires_at")]
+        ttl: Option<String>,
+        /// Optional RFC 3339 UTC/offset expiry timestamp.
+        #[arg(long, conflicts_with = "ttl")]
+        expires_at: Option<String>,
+    },
+    /// Revoke execution proxy authority from a desk secretary.
+    RevokeProxy {
+        /// Secretary senator name.
+        #[arg(value_parser = parse_seat_name)]
+        secretary: SenatorName,
+    },
 }
 
 #[derive(Subcommand)]
@@ -156,10 +175,52 @@ pub(super) fn run(args: Secretary) -> anyhow::Result<()> {
                     "--for does not apply to `secretary desk`: the desk is the Speaker's"
                 );
             }
-            let set = command.map(|DeskCmd::Set { senators }| senators);
-            let reply: DeskReply =
-                runtime(false)?.block_on(daemon_call(&paths, &Request::Desk { set }))?;
-            return print_json(&reply);
+            match command {
+                None => {
+                    let reply: DeskReply = rt_call(&paths, &Request::Desk { set: None })?;
+                    return print_json(&reply);
+                }
+                Some(DeskCmd::Set { senators }) => {
+                    let reply: DeskReply = rt_call(
+                        &paths,
+                        &Request::Desk {
+                            set: Some(senators),
+                        },
+                    )?;
+                    return print_json(&reply);
+                }
+                Some(DeskCmd::GrantProxy {
+                    secretary,
+                    ttl,
+                    expires_at,
+                }) => {
+                    let expires_at = parse_proxy_expiry(ttl.as_deref(), expires_at.as_deref())?;
+                    let reply: SecretariesReply = rt_call(
+                        &paths,
+                        &Request::Secretaries {
+                            session: SessionSelector::default(),
+                            action: SecretaryOp::GrantProxy,
+                            for_: None,
+                            secretary: Some(secretary),
+                            expires_at,
+                        },
+                    )?;
+                    return print_json(&reply);
+                }
+                Some(DeskCmd::RevokeProxy { secretary }) => {
+                    let reply: SecretariesReply = rt_call(
+                        &paths,
+                        &Request::Secretaries {
+                            session: SessionSelector::default(),
+                            action: SecretaryOp::RevokeProxy,
+                            for_: None,
+                            secretary: Some(secretary),
+                            expires_at: None,
+                        },
+                    )?;
+                    return print_json(&reply);
+                }
+            }
         }
         Action::Appoint(member) => {
             return change_member(
@@ -296,4 +357,41 @@ fn ask(paths: &Paths, text: String) -> anyhow::Result<()> {
 fn change_member(paths: &Paths, request: Request) -> anyhow::Result<()> {
     let reply: Secretaries = runtime(false)?.block_on(daemon_call(paths, &request))?;
     print_json(&reply)
+}
+
+fn rt_call<T: serde::de::DeserializeOwned>(paths: &Paths, request: &Request) -> anyhow::Result<T> {
+    runtime(false)?.block_on(daemon_call(paths, request))
+}
+
+fn parse_proxy_expiry(
+    ttl: Option<&str>,
+    expires_at: Option<&str>,
+) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    if let Some(raw) = expires_at {
+        let dt = chrono::DateTime::parse_from_rfc3339(raw)
+            .map_err(|e| anyhow::anyhow!("invalid --expires-at RFC 3339 timestamp: {e}"))?;
+        return Ok(Some(dt.with_timezone(&chrono::Utc)));
+    }
+    let Some(raw) = ttl else {
+        return Ok(None);
+    };
+    let s = raw.trim();
+    if s.len() < 2 {
+        anyhow::bail!("invalid --ttl {raw:?}; use e.g. 30m, 2h, 7d, or 60s");
+    }
+    let (num, unit) = s.split_at(s.len() - 1);
+    let value: i64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid --ttl duration number in {raw:?}"))?;
+    if value <= 0 {
+        anyhow::bail!("--ttl must be positive");
+    }
+    let delta = match unit {
+        "s" | "S" => chrono::Duration::seconds(value),
+        "m" | "M" => chrono::Duration::minutes(value),
+        "h" | "H" => chrono::Duration::hours(value),
+        "d" | "D" => chrono::Duration::days(value),
+        _ => anyhow::bail!("unknown --ttl unit {unit:?}; use s, m, h, or d"),
+    };
+    Ok(Some(chrono::Utc::now() + delta))
 }

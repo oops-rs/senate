@@ -72,7 +72,12 @@ impl Link {
             | Request::Task { .. }
             | Request::Stop { .. }
             | Request::Restore { .. }
-            | Request::Say { .. } => WRITE_TIMEOUT,
+            | Request::Say { .. }
+            | Request::ConferenceConvene { .. }
+            | Request::ConferenceRsvp { .. }
+            | Request::ConferenceStart { .. }
+            | Request::ConferencePost { .. }
+            | Request::ConferenceAdjourn { .. } => WRITE_TIMEOUT,
             // It waits for the agent's checkpoint (90 s at most).
             Request::Pause { .. } => PAUSE_TIMEOUT,
             Request::EnsureSecretary => SPAWN_TIMEOUT,
@@ -615,13 +620,14 @@ impl<S: Sink> Driver<S> {
                 }
             }
             Refresh::Docket => self.refresh_docket().await,
+            Refresh::Conferences => self.refresh_conferences().await,
             Refresh::Aliases => self.refresh_aliases(false).await,
             Refresh::Sessions => self.refresh_sessions().await,
         }
         self.changed();
     }
 
-    /// Read the aliases into [`crate::names`]; unless `force`, only when the
+    /// Read `aliases` once every few minutes unless forced.
     /// last read is older than [`ALIASES_EVERY`]. A failure keeps the old
     /// names (an id is still a correct way to show a seat).
     pub async fn refresh_aliases(&self, force: bool) {
@@ -698,6 +704,19 @@ impl<S: Sink> Driver<S> {
         }
     }
 
+    async fn refresh_conferences(&self) {
+        let request = Request::ConferenceList {
+            session: SessionSelector::default(),
+        };
+        if let Ok(reply) = self
+            .link
+            .call::<senate_core::ConferenceList>(&request)
+            .await
+        {
+            self.model().set_conferences(reply);
+        }
+    }
+
     fn read_failed(&self, what: ReadOf, e: &ClientError) {
         tracing::debug!(?what, "read failed: {e}");
         self.model().last_error = Some(Failure::Read {
@@ -737,6 +756,7 @@ impl<S: Sink> Driver<S> {
             Action::Answer { .. }
             | Action::Take { .. }
             | Action::Close { .. }
+            | Action::Accept { .. }
             | Action::Say { .. } => self.link.call::<Posted>(&request).await.map(to_value),
             Action::MarkRead { .. } => self.link.call::<Value>(&request).await,
             Action::StopSession { .. }
@@ -773,6 +793,17 @@ impl<S: Sink> Driver<S> {
     pub(crate) async fn refresh_desk(&self) {
         self.refresh_docket().await;
         self.changed();
+    }
+
+    pub(crate) async fn refresh_status(&self) {
+        if let Ok(reply) = self
+            .link
+            .call::<senate_bridge::ipc::StatusReply>(&Request::Status)
+            .await
+        {
+            self.model().status = Some(reply);
+            self.changed();
+        }
     }
 
     /// Re-read every inbox of the primary Senate on `committee`, then

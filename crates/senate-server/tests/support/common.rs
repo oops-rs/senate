@@ -56,6 +56,7 @@ pub fn roster() -> RosterConfig {
     RosterConfig {
         speaker: None,
         secretaries: Default::default(),
+        execution_proxies: Default::default(),
         principals: ["alice", "bob", "carol"]
             .into_iter()
             .map(|h| Principal::new(name(h)))

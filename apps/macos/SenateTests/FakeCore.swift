@@ -51,15 +51,17 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     func deskItem(committee: String, seq: UInt64) async throws -> DeskItemView {
         try record("desk-item \(committee) \(seq)")
         let item = ThreadEvent(seq: seq, kind: "request", kindLabel: "Request", by: "tester", via: nil,
-                               to: ["speaker"], body: "Full request", at: Date(), mine: false, status: nil)
+                               to: ["speaker"], body: "Full request", at: Date(), mine: false, status: nil,
+                               executionAuthBadge: nil, executionAuthMode: nil)
         let thread = ThreadView(committee: committee, root: seq, title: "Full request",
-                                state: nil, stateLabel: nil, kindLabel: "Request", events: [item])
+                                state: nil, stateLabel: nil, kindLabel: "Request",
+                                phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, events: [item])
         // As the fake daemon: 60 and 61 a request between committees (all
-        // four), 62 nothing to do here, 63 a question (answer, close).
+        // options), 62 nothing to do here, 63 a question (answer, close).
         let actions: [DeskAction] = switch seq {
         case 62: []
         case 63: [.answer, .close]
-        default: [.forward, .refuse, .answer, .close]
+        default: [.forwardAndAuthorize, .forward, .refuse, .answer, .close]
         }
         return DeskItemView(eventId: "source-item", item: item, thread: thread, origin: nil,
                             destination: seq == 63 ? nil : "payments::senator::ledger",
@@ -70,13 +72,14 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     func deskDecide(committee: String, seq: UInt64, itemId: String, id: String, decision: DeskChoice) async throws -> DeskOutcomeView {
         let word: String = switch decision {
         case .forward: "forward"
+        case .forwardAndAuthorize: "forward-and-authorize"
         case let .refuse(reason): reason
         case .answer: "answer"
         case .close: "close"
         }
         try record("desk-decide \(committee) \(seq) \(id) \(word)")
         let kind: DeskOutcomeKind = switch decision {
-        case .forward: .delivered
+        case .forward, .forwardAndAuthorize: .delivered
         case .refuse: .refused
         case .answer: .answered
         case .close: .closed
@@ -89,6 +92,10 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
                                seq: kind == .answered ? 77 : kind == .closed ? 78 : 75, reason: nil)
     }
     func newDeskActionId() -> String { "desk-test-action" }
+    func setUnsafeIgnoreExecutionAuth(enabled: Bool) async throws -> Bool {
+        try record("set-unsafe \(enabled)")
+        return enabled
+    }
     func decideDeskItem(committee: String, seq: UInt64, itemId: String, id: String, reason: String?) async throws -> DeskOutcomeView {
         try record("desk-decide \(committee) \(seq) \(id) \(reason ?? "forward")")
         return DeskOutcomeView(kind: reason == nil ? .delivered : .refused, delivered: reason == nil,
@@ -232,17 +239,20 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     func take(committee: String, thread: UInt64) async throws {
         try record("take \(committee) \(thread)")
     }
+    func accept(committee: String, thread: UInt64) async throws {
+        try record("accept \(committee) \(thread)")
+    }
     /// Threads the daemon cannot read (deleted, or not the person's).
     var missingThreads: Set<UInt64> = []
     func thread(committee: String, thread: UInt64) async throws -> ThreadView {
         try record("thread \(committee) \(thread)")
         if missingThreads.contains(thread) { throw CoreError.Failed(message: "no thread \(thread)") }
-        return threadView ?? ThreadView(committee: committee, root: thread, title: "", state: nil, stateLabel: nil, kindLabel: "", events: [])
+        return threadView ?? ThreadView(committee: committee, root: thread, title: "", state: nil, stateLabel: nil, kindLabel: "", phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, events: [])
     }
     func threadPeek(committee: String, thread: UInt64) async throws -> ThreadView {
         try record("peek \(committee) \(thread)")
         if missingThreads.contains(thread) { throw CoreError.Failed(message: "no thread \(thread)") }
-        return threadView ?? ThreadView(committee: committee, root: thread, title: "", state: nil, stateLabel: nil, kindLabel: "", events: [])
+        return threadView ?? ThreadView(committee: committee, root: thread, title: "", state: nil, stateLabel: nil, kindLabel: "", phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, events: [])
     }
     var observeGrantList: [ObserveGrantInfo] = []
     func observeEndpoint() async throws -> ObserveEndpoint {
@@ -346,6 +356,73 @@ nonisolated final class FakeCore: AppCoreProtocol, @unchecked Sendable {
     func watchTerminal() -> TerminalCommand {
         TerminalCommand(argv: [], cwd: nil, shellLine: "", appleScript: "")
     }
+
+    var conferences: [String: ConferenceDetailView] = [:]
+
+    func listConferences() async throws -> [ConferenceSummaryView] {
+        try record("conferences-list")
+        return conferences.values.map(\.summary)
+    }
+
+    func conferenceDetail(id: String) async throws -> ConferenceDetailView {
+        try record("conference-detail \(id)")
+        guard let detail = conferences[id] else {
+            throw CoreError.Failed(message: "no conference \(id)")
+        }
+        return detail
+    }
+
+    func conveneConference(topic: String, seats: [String]) async throws -> ConferenceSummaryView {
+        try record("conference-convene \(topic)")
+        let id = "conf-01fake000000000000000000"
+        let summary = ConferenceSummaryView(
+            id: id, topic: topic, convener: "[senator::alice]", state: "convening", stateLabel: "Convening",
+            seats: seats.map {
+                ConferenceSeatView(target: $0, committee: nil, status: "pending", statusLabel: "Pending",
+                                   participant: nil, delegatedBy: nil, ephemeral: false)
+            },
+            linkedThreadsCount: 0, round: 0, agentHopsRemaining: 1, createdAt: Date(), adjournedAt: nil, report: nil)
+        conferences[id] = ConferenceDetailView(summary: summary, events: [])
+        return summary
+    }
+
+    func startConference(id: String) async throws -> ConferenceSummaryView {
+        try record("conference-start \(id)")
+        guard var detail = conferences[id] else {
+            throw CoreError.Failed(message: "no conference \(id)")
+        }
+        detail.summary.state = "in_session"
+        detail.summary.stateLabel = "In Session"
+        conferences[id] = detail
+        return detail.summary
+    }
+
+    func postConferenceMessage(id: String, body: String) async throws -> ConferenceDetailView {
+        try record("conference-post \(id) \(body)")
+        guard var detail = conferences[id] else {
+            throw CoreError.Failed(message: "no conference \(id)")
+        }
+        let seq = UInt64(detail.events.count + 1)
+        detail.events.append(ThreadEvent(
+            seq: seq, kind: "note", kindLabel: "Note", by: "[senator::alice]", via: nil,
+            to: [], body: body, at: Date(), mine: true, status: nil,
+            executionAuthBadge: nil, executionAuthMode: nil))
+        conferences[id] = detail
+        return detail
+    }
+
+    func adjournConference(id: String, summary: String, decisions: [String]) async throws -> ConferenceSummaryView {
+        try record("conference-adjourn \(id) \(summary)")
+        guard var detail = conferences[id] else {
+            throw CoreError.Failed(message: "no conference \(id)")
+        }
+        detail.summary.state = "adjourned"
+        detail.summary.stateLabel = "Adjourned"
+        detail.summary.adjournedAt = Date()
+        detail.summary.report = ConferenceReportView(summary: summary, decisions: decisions, actionItems: [])
+        conferences[id] = detail
+        return detail.summary
+    }
 }
 
 /// A thread waiting on alice (`forPerson`), or only on her agents.
@@ -366,7 +443,7 @@ func thread(
         since: .now, owner: nil, triage: nil, triageLabel: nil, reason: nil, escalatedTo: nil,
         takeover: nil, answered: false, forPerson: forPerson, asker: "[senator::claude]", forAgents: agents, escalated: escalated, toDecide: toDecide ?? (forPerson && escalated), unread: news != nil,
         newsFrom: news.map { _ in "[senator::claude]" }, newsKind: nil, newsKindLabel: nil,
-        newsLine: news
+        newsLine: news, phase: nil, artifacts: [], nextOwner: nil, awaitingAcceptance: false, linkedDownstream: nil
     )
 }
 

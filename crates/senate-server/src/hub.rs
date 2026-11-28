@@ -31,8 +31,8 @@ use ractor::rpc::CallResult;
 use ractor::{ActorRef, MessagingErr};
 use senate_core::alias::{AliasMatch, AliasName, CommitteeAliases, QualifiedAlias};
 use senate_core::api::{
-    ChairInfo, ChildSeat, ChildSenate, CommitteeSeatInfo, Heartbeat, PresencePage, Resolved,
-    Secretaries,
+    ChairInfo, ChildSeat, ChildSenate, CommitteeSeatInfo, ExecutionProxyGrant, Heartbeat,
+    PresencePage, Resolved, Secretaries,
 };
 use senate_core::hub::SCAN_PAGE;
 use senate_core::{
@@ -54,7 +54,9 @@ use crate::registry;
 use crate::rules::check_may_change_state;
 use crate::seats::Seats;
 
+mod conference;
 mod secretary_work;
+pub(crate) use conference::ConferenceError;
 pub(crate) use secretary_work::SecretaryWorkError;
 
 /// Capacity of the process-wide broadcast behind [`Hub::subscribe`]. A
@@ -110,6 +112,7 @@ pub struct ServerHub {
     notes: Vec<String>,
     children: RwLock<BTreeMap<Name, ChildSenate>>,
     aliases: tokio::sync::RwLock<CommitteeAliases>,
+    conference_gate: tokio::sync::Mutex<()>,
     secretary_updates: tokio::sync::Mutex<()>,
     secretary_gate: tokio::sync::Mutex<()>,
     senate: Name,
@@ -298,6 +301,7 @@ impl ServerHub {
             notes,
             children: RwLock::new(children),
             aliases: tokio::sync::RwLock::new(aliases),
+            conference_gate: tokio::sync::Mutex::new(()),
             secretary_updates: tokio::sync::Mutex::new(()),
             secretary_gate: tokio::sync::Mutex::new(()),
             senate,
@@ -425,15 +429,26 @@ impl ServerHub {
         principal: SenatorName,
         secretaries: Vec<SenatorName>,
     ) -> Result<Secretaries, HubError> {
-        let _guard = self.secretary_updates.lock().await;
-        self.write_secretaries(principal, secretaries).await
+        self.set_secretaries_with_proxies(principal, secretaries, None)
+            .await
     }
 
-    /// Add workers to the desk without losing simultaneous appointments.
-    pub(crate) async fn add_secretaries(
+    pub async fn set_secretaries_with_proxies(
+        &self,
+        principal: SenatorName,
+        secretaries: Vec<SenatorName>,
+        execution_proxies: Option<Vec<ExecutionProxyGrant>>,
+    ) -> Result<Secretaries, HubError> {
+        let _guard = self.secretary_updates.lock().await;
+        self.write_secretaries(principal, secretaries, execution_proxies)
+            .await
+    }
+
+    pub(crate) async fn add_secretaries_with_proxies(
         &self,
         principal: SenatorName,
         additions: Vec<SenatorName>,
+        execution_proxies: Option<Vec<ExecutionProxyGrant>>,
     ) -> Result<Secretaries, HubError> {
         let _guard = self.secretary_updates.lock().await;
         let mut secretaries = self.seats.snapshot().secretaries_of(&principal).to_vec();
@@ -442,13 +457,15 @@ impl ServerHub {
                 secretaries.push(secretary);
             }
         }
-        self.write_secretaries(principal, secretaries).await
+        self.write_secretaries(principal, secretaries, execution_proxies)
+            .await
     }
 
     async fn write_secretaries(
         &self,
         principal: SenatorName,
         secretaries: Vec<SenatorName>,
+        execution_proxies: Option<Vec<ExecutionProxyGrant>>,
     ) -> Result<Secretaries, HubError> {
         let mut check = self.seats.snapshot();
         for secretary in &secretaries {
@@ -462,11 +479,26 @@ impl ServerHub {
         check
             .set_secretaries(principal.clone(), secretaries.clone())
             .map_err(|e| HubError::Rejected(e.to_string()))?;
+        let final_proxies = match execution_proxies {
+            Some(grants) => {
+                check
+                    .set_execution_proxies(principal.clone(), grants.clone())
+                    .map_err(|e| HubError::Rejected(e.to_string()))?;
+                grants
+            }
+            None => check.execution_proxies_of(&principal).to_vec(),
+        };
         registry::put_secretaries(self.store.as_ref(), &principal, &secretaries)
             .await
             .map_err(log_error)?;
+        registry::put_execution_proxies(self.store.as_ref(), &principal, &final_proxies)
+            .await
+            .map_err(log_error)?;
         self.seats
-            .update(|roster| roster.set_secretaries(principal, secretaries))
+            .update(|roster| -> Result<(), senate_core::RosterError> {
+                roster.set_secretaries(principal.clone(), secretaries)?;
+                roster.set_execution_proxies(principal, final_proxies)
+            })
             .map_err(|e| HubError::Rejected(e.to_string()))?;
         Ok(self.secretaries())
     }
@@ -1569,6 +1601,10 @@ impl ServerHub {
             .with_meta(
                 meta::ANSWERED_BY,
                 serde_json::Value::String(answered_by.to_string()),
+            )
+            .with_meta(
+                meta::RELAYED_EVENT_ID,
+                serde_json::Value::String(event.id.to_string()),
             );
         relay.to = vec![origin.locator.address().clone()];
         relay.refs = event.refs.clone();
@@ -1601,19 +1637,57 @@ impl ServerHub {
         &self,
         committee: &CommitteeId,
         query: &senate_core::api::ThreadsQuery,
+        can_read_committee: impl Fn(&CommitteeId) -> bool,
     ) -> Result<senate_core::api::ThreadsPage, HubError> {
         let cached = self.folded(&self.discussions, committee).await?;
         let board = &cached.fold.0;
-        let threads = board.committee_threads(
-            query.state,
-            query.include_archived,
-            query.before,
-            query.limit.unwrap_or(41).clamp(1, 101),
-        );
+        let mut threads: Vec<senate_core::ThreadSummary> = board
+            .committee_threads(
+                query.state,
+                query.include_archived,
+                query.before,
+                query.limit.unwrap_or(41).clamp(1, 101),
+            )
+            .into_iter()
+            .cloned()
+            .collect();
+        self.project_linked_downstream(board, &mut threads, can_read_committee)
+            .await;
         Ok(senate_core::api::ThreadsPage {
-            threads: threads.into_iter().cloned().collect(),
+            threads,
             head: board.head(),
         })
+    }
+
+    pub(crate) async fn project_linked_downstream(
+        &self,
+        source_board: &TaskBoard,
+        threads: &mut [senate_core::ThreadSummary],
+        can_read_committee: impl Fn(&CommitteeId) -> bool,
+    ) {
+        let mut cache: HashMap<CommitteeId, TaskBoard> = HashMap::new();
+        for thread in threads {
+            let Some((dst_committee, dst_root)) = source_board.delivered_target(thread.root) else {
+                continue;
+            };
+            if !can_read_committee(dst_committee) {
+                continue;
+            }
+            if !cache.contains_key(dst_committee)
+                && let Ok(board) = self.tasks(dst_committee).await
+            {
+                cache.insert(dst_committee.clone(), board);
+            }
+            if let Some(dst_summary) = cache
+                .get(dst_committee)
+                .and_then(|board| board.get(*dst_root))
+            {
+                thread.linked_downstream = Some(senate_core::LinkedTaskSummary::from_thread(
+                    dst_committee.clone(),
+                    dst_summary,
+                ));
+            }
+        }
     }
 
     pub(crate) async fn count_unanswered_questions(
@@ -1701,7 +1775,9 @@ impl Hub for ServerHub {
     }
 
     async fn committees(&self) -> Result<Vec<CommitteeId>, HubError> {
-        self.store.committees().await.map_err(log_error)
+        let mut committees = self.store.committees().await.map_err(log_error)?;
+        committees.retain(|committee| !senate_core::is_conference_stream(committee));
+        Ok(committees)
     }
 
     async fn roster(&self) -> Result<Roster, HubError> {

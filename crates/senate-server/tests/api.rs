@@ -1920,3 +1920,283 @@ async fn the_asker_archives_its_own_thread_and_nothing_more() {
     );
     server.running.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn pending_acceptance_and_linked_downstream_mirror_lifecycle() {
+    use senate_core::{CommissionBucket, CommitteeId, RosterConfig};
+
+    let origin_c = CommitteeId::new("office").unwrap();
+    let dst_c = CommitteeId::new("feishu-botd").unwrap();
+    let mut cfg_roster = RosterConfig {
+        speaker: Some(path("speaker-bot").into()),
+        secretaries: [(path("alice"), vec![path("secretary-bot")])]
+            .into_iter()
+            .collect(),
+        execution_proxies: Default::default(),
+        principals: vec![
+            senate_core::Principal::new(name("alice")),
+            senate_core::Principal::new(name("bob")),
+            senate_core::Principal::new(name("carol")).with_committees([origin_c.clone()]),
+        ],
+        agents: Vec::new(),
+    };
+    cfg_roster.agents.push(seated("speaker-bot", "alice"));
+    cfg_roster.agents.push(seated("secretary-bot", "alice"));
+    cfg_roster.agents.push(seated("copilot", "bob"));
+
+    let server = TestServer::start_configured(Arc::new(MemoryStore::new()), |c| {
+        c.roster = cfg_roster.clone();
+    })
+    .await;
+
+    // 1. Downstream thread with awaiting_acceptance: true stays unsettled in PendingAcceptance.
+    let dst_root = server
+        .running
+        .hub
+        .append(
+            NewEvent::new(
+                dst_c.clone(),
+                Kind::Request,
+                person_addr("alice"),
+                "Deploy release v0.4.2",
+            )
+            .to(agent_addr("copilot")),
+        )
+        .await
+        .unwrap()
+        .event
+        .seq;
+    let ans = server
+        .running
+        .hub
+        .append(
+            NewEvent::new(
+                dst_c.clone(),
+                Kind::Answer,
+                agent_addr("copilot"),
+                "Deployed to staging; awaiting alice verification.",
+            )
+            .in_thread(dst_root)
+            .to(person_addr("alice")),
+        )
+        .await
+        .unwrap()
+        .event
+        .seq;
+    // Normal control thread settles immediately.
+    let ctrl_root = server
+        .running
+        .hub
+        .append(
+            NewEvent::new(
+                dst_c.clone(),
+                Kind::Question,
+                person_addr("alice"),
+                "Simple ping",
+            )
+            .to(agent_addr("copilot")),
+        )
+        .await
+        .unwrap()
+        .event
+        .seq;
+    server
+        .running
+        .hub
+        .append(
+            NewEvent::new(dst_c.clone(), Kind::Answer, agent_addr("copilot"), "pong")
+                .in_thread(ctrl_root),
+        )
+        .await
+        .unwrap();
+
+    // Post structured awaiting_acceptance status with steps on dst_root.
+    let status_event = NewEvent::new(dst_c.clone(), Kind::Status, agent_addr("copilot"), "")
+        .in_thread(dst_root)
+        .with_meta(
+            meta::STATUS,
+            json!({
+                "state": "active",
+                "phase": "staging-verified",
+                "steps": [
+                    { "id": "build", "label": "build artifact", "done": true },
+                    { "id": "prod", "label": "promote prod", "done": false }
+                ],
+                "artifacts": [{ "label": "tag", "value": "v0.4.2-rc1" }],
+                "next_owner": "senator::alice",
+                "awaiting_acceptance": true
+            }),
+        );
+    server.running.hub.append(status_event).await.unwrap();
+
+    let dst_page: ThreadsPage = server
+        .request(Method::GET, &threads_path(&dst_c), ALICE)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let dst_summary = dst_page
+        .threads
+        .iter()
+        .find(|t| t.root == dst_root)
+        .unwrap();
+    let ctrl_summary = dst_page
+        .threads
+        .iter()
+        .find(|t| t.root == ctrl_root)
+        .unwrap();
+    assert!(ctrl_summary.is_settled(), "control answer must settle");
+    assert!(
+        !dst_summary.is_settled(),
+        "awaiting_acceptance=true must keep thread unsettled: {dst_summary:?}"
+    );
+    assert_eq!(
+        dst_summary.commission_bucket(ans),
+        CommissionBucket::PendingAcceptance
+    );
+
+    // 2. Origin thread with DESK_OUTCOME=Delivered projects linked_downstream.
+    let orig_root = server
+        .running
+        .hub
+        .append(
+            NewEvent::new(
+                origin_c.clone(),
+                Kind::Request,
+                person_addr("alice"),
+                "Forward release task",
+            )
+            .to(agent_addr("secretary-bot")),
+        )
+        .await
+        .unwrap()
+        .event
+        .seq;
+    server
+        .running
+        .hub
+        .append(
+            NewEvent::new(origin_c.clone(), Kind::Note, Address::Speaker, "Forwarded")
+                .in_thread(orig_root)
+                .with_meta(meta::ACTED_BY, json!("secretary-bot"))
+                .with_meta(
+                    meta::DESK_OUTCOME,
+                    json!({
+                        "kind": "delivered",
+                        "destination": "feishu-botd::senator::copilot",
+                        "committee": "feishu-botd",
+                        "seq": dst_root.0
+                    }),
+                ),
+        )
+        .await
+        .unwrap();
+
+    let orig_page: ThreadsPage = server
+        .request(Method::GET, &threads_path(&origin_c), ALICE)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mirror = orig_page
+        .threads
+        .iter()
+        .find(|t| t.root == orig_root)
+        .unwrap()
+        .linked_downstream
+        .as_ref()
+        .expect("authorized caller must receive linked_downstream");
+    assert_eq!(mirror.committee, dst_c);
+    assert_eq!(mirror.root, dst_root);
+    assert_eq!(mirror.phase.as_deref(), Some("staging-verified"));
+    assert_eq!(mirror.steps_done, 1);
+    assert_eq!(mirror.steps_total, 2);
+    assert!(mirror.awaiting_acceptance);
+    assert_eq!(mirror.next_owner.as_ref(), Some(&person_addr("alice")));
+    assert_eq!(mirror.artifacts.len(), 1);
+
+    // include_discussions=true also populates linked_downstream.
+    let disc_page: ThreadsPage = server
+        .request(
+            Method::GET,
+            &format!("{}?include_discussions=true", threads_path(&origin_c)),
+            ALICE,
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        disc_page
+            .threads
+            .iter()
+            .find(|t| t.root == orig_root)
+            .unwrap()
+            .linked_downstream
+            .is_some()
+    );
+
+    // Fail-closed ACL: carol only has read access to `office`, not `feishu-botd`.
+    let carol_dst = server
+        .request(Method::GET, &threads_path(&dst_c), CAROL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(carol_dst.status(), StatusCode::FORBIDDEN);
+    let carol_origin: ThreadsPage = server
+        .request(Method::GET, &threads_path(&origin_c), CAROL)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        carol_origin
+            .threads
+            .iter()
+            .find(|t| t.root == orig_root)
+            .unwrap()
+            .linked_downstream,
+        None,
+        "restricted principal must NOT leak linked_downstream from unauthorized destination committee"
+    );
+
+    // Archiving closes PendingAcceptance on dst_root.
+    let mut accept = StatusPayload::new(StatusState::Archived);
+    accept.reason = Some("Accepted by alice".into());
+    let archive_res = server
+        .post_event(
+            ALICE,
+            &status(&dst_c, person_addr("alice"), dst_root, &accept),
+        )
+        .await;
+    assert_eq!(archive_res.status(), StatusCode::OK);
+    let after_close: ThreadsPage = server
+        .request(
+            Method::GET,
+            &format!("{}?state=archived", threads_path(&dst_c)),
+            ALICE,
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let closed_dst = after_close
+        .threads
+        .iter()
+        .find(|t| t.root == dst_root)
+        .unwrap();
+    assert!(!closed_dst.awaiting_acceptance);
+    assert_eq!(closed_dst.waits(), None);
+
+    server.running.shutdown().await.unwrap();
+}

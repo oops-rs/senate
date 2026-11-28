@@ -405,16 +405,25 @@ struct DeskEntryDetail: View {
         .sharedBackgroundVisibility(.hidden)
         ToolbarSpacer(.flexible)
         if let detail, outcome == nil, actionError == nil,
-           detail.actions.contains(.forward) || detail.actions.contains(.refuse) {
+           detail.actions.contains(.forwardAndAuthorize) || detail.actions.contains(.forward) || detail.actions.contains(.refuse) {
             ToolbarItemGroup(placement: .primaryAction) {
-                if detail.actions.contains(.forward) {
-                Button { Task { await submit(.forward) } } label: {
-                    // Send, not Share's arrow: it goes on to its addressee.
-                    Label(L("desk.forward_title"), systemImage: "paperplane")
+                if detail.actions.contains(.forwardAndAuthorize) {
+                Button { Task { await submit(.forwardAndAuthorize(note: nil)) } } label: {
+                    Label(L("desk.forward_authorize_title"), systemImage: "checkmark.seal.fill")
                 }
                 .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("desk-forward-authorize")
+                .help(L("desk.forward_authorize_title"))
+                .disabled(busy || !store.state.online)
+                }
+                if detail.actions.contains(.forward) {
+                Button { Task { await submit(.forward) } } label: {
+                    // Send, not Share's arrow: it goes on to its addressee without authorizing execution.
+                    Label(L("desk.forward_only_title"), systemImage: "paperplane")
+                }
+                .buttonStyle(.bordered)
                 .accessibilityIdentifier("desk-forward")
-                .help(L("desk.forward_title"))
+                .help(L("desk.forward_only_title"))
                 .disabled(busy || !store.state.online)
                 }
                 if detail.actions.contains(.refuse) {
@@ -458,7 +467,9 @@ struct DeskEntryDetail: View {
     /// would be forwarded to.
     static func title(_ item: DocketEntry, _ detail: DeskItemView? = nil) -> String {
         let at = "\(item.committee) #\(item.seq)"
-        if let detail, detail.actions.contains(.forward), let to = detail.destinationLabel {
+        if let detail,
+           detail.actions.contains(.forward) || detail.actions.contains(.forwardAndAuthorize),
+           let to = detail.destinationLabel {
             return L("desk.title_request_for", to, at)
         }
         let kind = item.kindLabel.prefix(1).uppercased() + item.kindLabel.dropFirst()

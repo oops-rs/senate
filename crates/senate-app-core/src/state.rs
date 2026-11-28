@@ -13,11 +13,13 @@ use senate_bridge::approvals::Approval;
 use senate_bridge::ipc::{SenateDocket, SessionRow, StatusReply, StreamState};
 use senate_bridge::session::Runtime;
 use senate_core::{
-    Address, Awaiting, DocketItem, Kind, Locale, Mention, SenatorName, SpeakerSeat, ThreadSummary,
+    Address, Awaiting, CommissionBucket, ConferenceActionItem, ConferenceReport, ConferenceState,
+    ConferenceSummary, DocketItem, Kind, Locale, Mention, SeatStatus, SenatorName, SpeakerSeat,
+    ThreadSummary,
 };
 use serde::Serialize;
 
-use crate::model::{Model, Waiting, escalated_to_now, presider_of};
+use crate::model::{CommissionEntry, Model, Waiting, escalated_to_now, presider_of};
 use crate::text;
 
 /// The app's whole picture of the daemon.
@@ -38,6 +40,9 @@ pub struct AppState {
     /// Threads waiting on the person, merged across agents, longest waiting
     /// first.
     pub inbox: Vec<InboxThread>,
+    /// Sponsored tasks across committees ("My Commissions" / 「委派追踪」),
+    /// sorted by `Blocked → PendingAcceptance → CompletedUnread → InProgress`.
+    pub commissions: Vec<CommissionThread>,
     /// Pending Codex approvals, oldest first.
     pub approvals: Vec<ApprovalRequest>,
     pub codex: Vec<CodexThreadInfo>,
@@ -52,8 +57,189 @@ pub struct AppState {
     /// last.
     pub groups: Vec<crate::tree::SessionGroup>,
     pub counts: Counts,
+    /// Explicit opt-in receiver bypass for cross-committee execution authorization.
+    pub unsafe_ignore_execution_auth: bool,
+    /// Cross-committee multi-party conferences visible to the user.
+    pub conferences: Vec<ConferenceSummaryView>,
     /// The last failed action or read.
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ConferenceSeatView {
+    pub target: String,
+    pub committee: Option<String>,
+    pub status: String,
+    pub status_label: String,
+    pub participant: Option<String>,
+    pub delegated_by: Option<String>,
+    pub ephemeral: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ConferenceActionItemView {
+    pub description: String,
+    pub owner: Option<String>,
+    pub committee: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ConferenceReportView {
+    pub summary: String,
+    pub decisions: Vec<String>,
+    pub action_items: Vec<ConferenceActionItemView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ConferenceSummaryView {
+    pub id: String,
+    pub topic: String,
+    pub convener: String,
+    pub state: String,
+    pub state_label: String,
+    pub seats: Vec<ConferenceSeatView>,
+    pub linked_threads_count: u32,
+    pub round: u64,
+    pub agent_hops_remaining: u8,
+    pub created_at: SystemTime,
+    pub adjourned_at: Option<SystemTime>,
+    pub report: Option<ConferenceReportView>,
+}
+
+pub(crate) fn conference_summary_view(
+    conf: &ConferenceSummary,
+    locale: Locale,
+) -> ConferenceSummaryView {
+    let (state, state_label) = match conf.state {
+        ConferenceState::Convening => (
+            "convening".to_owned(),
+            match locale {
+                Locale::Zh => "召集中",
+                Locale::En => "Convening",
+            }
+            .to_owned(),
+        ),
+        ConferenceState::InSession => (
+            "in_session".to_owned(),
+            match locale {
+                Locale::Zh => "开会中",
+                Locale::En => "In Session",
+            }
+            .to_owned(),
+        ),
+        ConferenceState::Adjourned => (
+            "adjourned".to_owned(),
+            match locale {
+                Locale::Zh => "已散会",
+                Locale::En => "Adjourned",
+            }
+            .to_owned(),
+        ),
+    };
+    let seats = conf
+        .seats
+        .iter()
+        .map(|s| match &s.status {
+            SeatStatus::Pending => ConferenceSeatView {
+                target: s.target.to_string(),
+                committee: s.committee.as_ref().map(ToString::to_string),
+                status: "pending".to_owned(),
+                status_label: match locale {
+                    Locale::Zh => "待入席",
+                    Locale::En => "Pending",
+                }
+                .to_owned(),
+                participant: None,
+                delegated_by: None,
+                ephemeral: false,
+            },
+            SeatStatus::Absent => ConferenceSeatView {
+                target: s.target.to_string(),
+                committee: s.committee.as_ref().map(ToString::to_string),
+                status: "absent".to_owned(),
+                status_label: match locale {
+                    Locale::Zh => "缺席",
+                    Locale::En => "Absent",
+                }
+                .to_owned(),
+                participant: None,
+                delegated_by: None,
+                ephemeral: false,
+            },
+            SeatStatus::Seated {
+                participant,
+                delegated_by,
+                ephemeral,
+            } => {
+                let is_del = delegated_by.is_some();
+                let (status, status_label) = if is_del {
+                    (
+                        "delegate".to_owned(),
+                        match (locale, *ephemeral) {
+                            (Locale::Zh, true) => "临时代表",
+                            (Locale::Zh, false) => "代表",
+                            (Locale::En, true) => "Ephemeral Delegate",
+                            (Locale::En, false) => "Delegate",
+                        }
+                        .to_owned(),
+                    )
+                } else {
+                    (
+                        "seated".to_owned(),
+                        match locale {
+                            Locale::Zh => "已入席",
+                            Locale::En => "Seated",
+                        }
+                        .to_owned(),
+                    )
+                };
+                ConferenceSeatView {
+                    target: s.target.to_string(),
+                    committee: s.committee.as_ref().map(ToString::to_string),
+                    status,
+                    status_label,
+                    participant: Some(participant.in_text()),
+                    delegated_by: delegated_by.as_ref().map(Address::in_text),
+                    ephemeral: *ephemeral,
+                }
+            }
+        })
+        .collect();
+    let report = conf.report.as_ref().map(conference_report_view);
+    ConferenceSummaryView {
+        id: conf.id.to_string(),
+        topic: conf.topic.clone(),
+        convener: conf.convener.in_text(),
+        state,
+        state_label,
+        seats,
+        linked_threads_count: count(conf.linked_threads.len()),
+        round: conf.floor.round,
+        agent_hops_remaining: conf.floor.agent_hops_remaining,
+        created_at: conf.created_at.into(),
+        adjourned_at: conf.adjourned_at.map(Into::into),
+        report,
+    }
+}
+
+fn conference_report_view(report: &ConferenceReport) -> ConferenceReportView {
+    ConferenceReportView {
+        summary: report.summary.clone(),
+        decisions: report.decisions.clone(),
+        action_items: report
+            .action_items
+            .iter()
+            .map(conference_action_item_view)
+            .collect(),
+    }
+}
+
+fn conference_action_item_view(item: &ConferenceActionItem) -> ConferenceActionItemView {
+    ConferenceActionItemView {
+        description: item.description.clone(),
+        owner: item.owner.as_ref().map(Address::in_text),
+        committee: item.committee.as_ref().map(ToString::to_string),
+    }
 }
 
 /// One hosted session: a terminal this machine runs for a senator.
@@ -292,6 +478,53 @@ pub struct AgentInfo {
     pub inbox: bool,
 }
 
+/// Structured delivery artifact exposed over UniFFI.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ArtifactItem {
+    pub label: String,
+    pub value: String,
+}
+
+/// Read-only downstream status mirror projected from an origin thread.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct LinkedDownstreamView {
+    pub committee: String,
+    pub root: u64,
+    pub state: String,
+    pub state_label: String,
+    pub phase: Option<String>,
+    pub steps_done: u32,
+    pub steps_total: u32,
+    pub escalated_to: Option<String>,
+    pub artifacts: Vec<ArtifactItem>,
+    pub next_owner: Option<String>,
+    pub awaiting_acceptance: bool,
+}
+
+/// A task sponsored by the person (`My Commissions` / 「委派追踪」).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CommissionThread {
+    pub committee: String,
+    pub root: u64,
+    pub updated: u64,
+    pub title: String,
+    /// `"blocked"`, `"pending_acceptance"`, `"completed_unread"`, or `"in_progress"`.
+    pub bucket: String,
+    pub bucket_label: String,
+    pub state: String,
+    pub state_label: String,
+    pub owner: Option<String>,
+    pub summary_line: Option<String>,
+    pub unread: bool,
+    pub since: SystemTime,
+    pub origin_label: Option<String>,
+    pub phase: Option<String>,
+    pub artifacts: Vec<ArtifactItem>,
+    pub next_owner: Option<String>,
+    pub awaiting_acceptance: bool,
+    pub linked_downstream: Option<LinkedDownstreamView>,
+}
+
 /// An open thread waiting on the person. Addresses are bracketed mentions;
 /// enum-valued fields carry the wire spelling and a label.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -350,6 +583,11 @@ pub struct InboxThread {
     pub news_kind_label: Option<String>,
     /// Its first line (an escalation's reason).
     pub news_line: Option<String>,
+    pub phase: Option<String>,
+    pub artifacts: Vec<ArtifactItem>,
+    pub next_owner: Option<String>,
+    pub awaiting_acceptance: bool,
+    pub linked_downstream: Option<LinkedDownstreamView>,
 }
 
 /// A Codex app-server approval request the daemon relays.
@@ -523,6 +761,15 @@ impl AppState {
             agents,
             menu,
             inbox: waiting.iter().map(|w| inbox_thread(w, locale)).collect(),
+            commissions: if model.online {
+                model
+                    .commissions()
+                    .into_iter()
+                    .map(|c| commission_thread(&c, locale))
+                    .collect()
+            } else {
+                Vec::new()
+            },
             approvals: approvals.into_iter().map(Into::into).collect(),
             codex,
             docket,
@@ -533,6 +780,16 @@ impl AppState {
                 Vec::new()
             },
             counts,
+            unsafe_ignore_execution_auth: status.is_some_and(|s| s.unsafe_ignore_execution_auth),
+            conferences: if model.online {
+                model
+                    .conferences
+                    .iter()
+                    .map(|c| conference_summary_view(c, locale))
+                    .collect()
+            } else {
+                Vec::new()
+            },
             last_error: model.last_error.as_ref().map(|f| f.text(locale)),
         }
     }
@@ -811,6 +1068,106 @@ fn asker(w: &Waiting) -> String {
     author(&t.from, t.on_behalf_of.as_ref())
 }
 
+pub(crate) fn artifact_items(items: &[senate_core::ArtifactRef]) -> Vec<ArtifactItem> {
+    items
+        .iter()
+        .map(|a| ArtifactItem {
+            label: a.label.clone(),
+            value: a.value.clone(),
+        })
+        .collect()
+}
+
+fn linked_downstream_view(
+    linked: Option<&senate_core::LinkedTaskSummary>,
+    locale: Locale,
+) -> Option<LinkedDownstreamView> {
+    linked.map(|d| LinkedDownstreamView {
+        committee: d.committee.to_string(),
+        root: d.root.0,
+        state: wire(&d.state),
+        state_label: text::state(locale, d.state).to_string(),
+        phase: d.phase.clone(),
+        steps_done: d.steps_done,
+        steps_total: d.steps_total,
+        escalated_to: d
+            .escalation
+            .as_ref()
+            .map(|e| Address::senior(&e.to).in_text()),
+        artifacts: artifact_items(&d.artifacts),
+        next_owner: d.next_owner.as_ref().map(Address::in_text),
+        awaiting_acceptance: d.awaiting_acceptance,
+    })
+}
+
+pub(crate) fn commission_thread(c: &CommissionEntry, locale: Locale) -> CommissionThread {
+    let t = &c.thread;
+    let bucket = match c.bucket {
+        CommissionBucket::Blocked => "blocked",
+        CommissionBucket::PendingAcceptance => "pending_acceptance",
+        CommissionBucket::CompletedUnread => "completed_unread",
+        CommissionBucket::InProgress => "in_progress",
+        CommissionBucket::CompletedRead => "completed_read",
+    };
+    let bucket_label = match (c.bucket, locale) {
+        (CommissionBucket::Blocked, Locale::Zh) => "阻塞中",
+        (CommissionBucket::Blocked, Locale::En) => "Blocked",
+        (CommissionBucket::PendingAcceptance, Locale::Zh) => "待验收",
+        (CommissionBucket::PendingAcceptance, Locale::En) => "Pending acceptance",
+        (CommissionBucket::CompletedUnread, Locale::Zh) => "已完成",
+        (CommissionBucket::CompletedUnread, Locale::En) => "Completed",
+        (CommissionBucket::InProgress, Locale::Zh) => "推进中",
+        (CommissionBucket::InProgress, Locale::En) => "In progress",
+        (CommissionBucket::CompletedRead, Locale::Zh) => "已完成",
+        (CommissionBucket::CompletedRead, Locale::En) => "Completed",
+    }
+    .to_string();
+    let origin_label = t.origin.as_ref().and_then(|o| {
+        o.locator.committee().map(|oc| match locale {
+            Locale::Zh => format!("来自 {oc} #{}", o.thread.0),
+            Locale::En => format!("from {oc} #{}", o.thread.0),
+        })
+    });
+    let summary_line = match c.bucket {
+        CommissionBucket::Blocked => t
+            .escalation
+            .as_ref()
+            .and_then(|e| e.reason.clone())
+            .or_else(|| t.reason.clone()),
+        CommissionBucket::CompletedUnread | CommissionBucket::CompletedRead => {
+            t.answer_line.clone()
+        }
+        CommissionBucket::PendingAcceptance => t
+            .answer_line
+            .clone()
+            .or_else(|| t.steps.last().map(|s| s.label.clone())),
+        CommissionBucket::InProgress => t.steps.last().map(|s| s.label.clone()),
+    };
+    CommissionThread {
+        committee: c.committee.to_string(),
+        root: t.root.0,
+        updated: t.updated.0,
+        title: t.title.clone(),
+        bucket: bucket.to_string(),
+        bucket_label,
+        state: wire(&t.state),
+        state_label: text::state(locale, t.state).to_string(),
+        owner: t
+            .owner
+            .as_ref()
+            .map(|o| Address::senator(&o.agent).in_text()),
+        summary_line,
+        unread: c.bucket == CommissionBucket::CompletedUnread,
+        since: t.since_ts.into(),
+        origin_label,
+        phase: t.phase.clone(),
+        artifacts: artifact_items(&t.artifacts),
+        next_owner: t.next_owner.as_ref().map(Address::in_text),
+        awaiting_acceptance: t.awaiting_acceptance,
+        linked_downstream: linked_downstream_view(t.linked_downstream.as_ref(), locale),
+    }
+}
+
 pub(crate) fn inbox_thread(w: &Waiting, locale: Locale) -> InboxThread {
     let t: &ThreadSummary = &w.thread;
     let author = Mention::author(&t.from, t.on_behalf_of.as_ref());
@@ -868,6 +1225,11 @@ pub(crate) fn inbox_thread(w: &Waiting, locale: Locale) -> InboxThread {
             }
         }),
         news_line: w.unread.as_ref().map(|d| d.line.clone()),
+        phase: t.phase.clone(),
+        artifacts: artifact_items(&t.artifacts),
+        next_owner: t.next_owner.as_ref().map(Address::in_text),
+        awaiting_acceptance: t.awaiting_acceptance,
+        linked_downstream: linked_downstream_view(t.linked_downstream.as_ref(), locale),
     }
 }
 

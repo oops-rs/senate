@@ -110,6 +110,7 @@ pub(crate) fn roster() -> Roster {
             platform: PLATFORM.into(),
             id: format!("u_{handle}"),
         }],
+        committees: None,
     };
     let seated = |handle: &str| SeatedAgent::new(agent_path(handle), name(handle));
     Roster::new(

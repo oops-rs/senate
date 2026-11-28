@@ -31,8 +31,10 @@ use crate::activity::{ActivityListener, CommitteeThreadPage};
 use crate::link::{Backoff, Driver, Link, Sink};
 use crate::model::{self, Action, Failure, Model, Refresh};
 use crate::names;
-use crate::reads::{self, DeskItemView, DeskOutcomeView, ThreadView};
-use crate::state::{AppState, ApprovalRequest, HostedSession};
+use crate::reads::{self, ConferenceDetailView, DeskItemView, DeskOutcomeView, ThreadView};
+use crate::state::{
+    AppState, ApprovalRequest, ConferenceSummaryView, HostedSession, conference_summary_view,
+};
 use crate::text;
 use crate::timeline::{self, TimelineDelta, TimelinePage};
 
@@ -422,6 +424,16 @@ impl AppCore {
         .await
     }
 
+    /// Accept a delivered task thread awaiting verification and archive/close it.
+    pub async fn accept(&self, committee: String, thread: u64) -> Result<(), CoreError> {
+        let committee = self.committee_id(&committee)?;
+        self.act(Action::Accept {
+            committee,
+            thread: Seq(thread),
+        })
+        .await
+    }
+
     /// Answer an approval request. The first answer wins across the TUI,
     /// the app and any chat platform; a late one fails with the daemon's
     /// reason.
@@ -595,6 +607,19 @@ impl AppCore {
             .on_runtime(|driver| async move { driver.read(&Request::EnsureSecretary).await })
             .await?;
         Ok(s.into())
+    }
+
+    /// Enable or disable the local `[desk].unsafe_ignore_execution_auth` opt-in
+    /// receiver bypass (enabling requires Touch ID / confirmed app call).
+    pub async fn set_unsafe_ignore_execution_auth(&self, enabled: bool) -> Result<bool, CoreError> {
+        let reply: senate_bridge::ipc::UnsafeModeReply = self
+            .on_runtime(move |driver| async move {
+                let reply = driver.read(&Request::SetUnsafeMode { enabled }).await?;
+                tokio::spawn(async move { driver.refresh_status().await });
+                Ok(reply)
+            })
+            .await?;
+        Ok(reply.enabled)
     }
 
     /// A new observer grant for a scene the person allows in this app:
@@ -1108,6 +1133,126 @@ impl AppCore {
         }
     }
 
+    pub async fn list_conferences(&self) -> Result<Vec<ConferenceSummaryView>, CoreError> {
+        let locale = self.locale();
+        let request = Request::ConferenceList {
+            session: SessionSelector::default(),
+        };
+        let reply: senate_core::ConferenceList = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        let driver = self.driver()?;
+        driver.model().set_conferences(reply.clone());
+        Ok(reply
+            .conferences
+            .iter()
+            .map(|c| conference_summary_view(c, locale))
+            .collect())
+    }
+
+    pub async fn conference_detail(&self, id: String) -> Result<ConferenceDetailView, CoreError> {
+        let id = self.conference_id(&id)?;
+        let locale = self.locale();
+        let request = Request::ConferenceGet {
+            session: SessionSelector::default(),
+            id,
+        };
+        let detail: senate_core::ConferenceDetail = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        let person = self
+            .driver()?
+            .model()
+            .senates()
+            .next()
+            .map(|s| s.person.clone());
+        Ok(reads::conference_detail_view(
+            detail,
+            person.as_ref(),
+            locale,
+        ))
+    }
+
+    pub async fn convene_conference(
+        &self,
+        topic: String,
+        seats: Vec<String>,
+    ) -> Result<ConferenceSummaryView, CoreError> {
+        let locale = self.locale();
+        let parsed = seats
+            .into_iter()
+            .map(|raw| {
+                senate_core::Locator::parse_short(&raw)
+                    .map(|target| senate_core::ConferenceSeatInput { target })
+                    .map_err(|e| CoreError::Invalid {
+                        message: e.to_string(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let request = Request::ConferenceConvene {
+            session: SessionSelector::default(),
+            topic,
+            seats: parsed,
+            linked_threads: Vec::new(),
+        };
+        let summary: senate_core::ConferenceSummary = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        Ok(conference_summary_view(&summary, locale))
+    }
+
+    pub async fn start_conference(&self, id: String) -> Result<ConferenceSummaryView, CoreError> {
+        let id = self.conference_id(&id)?;
+        let locale = self.locale();
+        let request = Request::ConferenceStart {
+            session: SessionSelector::default(),
+            id,
+        };
+        let summary: senate_core::ConferenceSummary = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        Ok(conference_summary_view(&summary, locale))
+    }
+
+    pub async fn post_conference_message(
+        &self,
+        id: String,
+        body: String,
+    ) -> Result<ConferenceDetailView, CoreError> {
+        let conf_id = self.conference_id(&id)?;
+        let post_req = Request::ConferencePost {
+            session: SessionSelector::default(),
+            id: conf_id.clone(),
+            body,
+            to: Vec::new(),
+        };
+        let _: senate_core::PostConferenceEventResponse = self
+            .on_runtime(move |driver| async move { driver.read(&post_req).await })
+            .await?;
+        self.conference_detail(conf_id.to_string()).await
+    }
+
+    pub async fn adjourn_conference(
+        &self,
+        id: String,
+        summary: String,
+        decisions: Vec<String>,
+    ) -> Result<ConferenceSummaryView, CoreError> {
+        let id = self.conference_id(&id)?;
+        let locale = self.locale();
+        let request = Request::ConferenceAdjourn {
+            session: SessionSelector::default(),
+            id,
+            summary,
+            decisions,
+            action_items: Vec::new(),
+        };
+        let res: senate_core::ConferenceSummary = self
+            .on_runtime(move |driver| async move { driver.read(&request).await })
+            .await?;
+        Ok(conference_summary_view(&res, locale))
+    }
+
     /// What to run to open a hosted session's terminal: `senate attach
     /// <label>` (Ctrl-] detaches). A prompt Senate cannot answer is decided
     /// there.
@@ -1161,6 +1306,12 @@ impl AppCore {
                 Locale::Zh => format!("会话 {label:?} 无效：{e}"),
                 Locale::En => format!("session {label:?}: {e}"),
             },
+        })
+    }
+
+    fn conference_id(&self, id: &str) -> Result<senate_core::ConferenceId, CoreError> {
+        id.parse().map_err(|e| CoreError::Invalid {
+            message: format!("conference {id:?}: {e}"),
         })
     }
 

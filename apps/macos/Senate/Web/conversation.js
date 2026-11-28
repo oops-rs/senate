@@ -333,6 +333,10 @@
         const head = el("div", "event-head");
         if (!row.mine) head.appendChild(el("span", "by", row.by));
         head.appendChild(el("span", "meta", row.kindLabel + " · " + row.when));
+        if (row.executionAuthBadge) {
+          const cls = row.executionAuthMode === "direct" ? "auth-badge direct" : "auth-badge proxy";
+          head.appendChild(el("span", cls, row.executionAuthBadge));
+        }
         // Words the Speaker's office carried: how they came, under who.
         if (row.via) head.appendChild(el("div", "via", row.via));
         const content = el("div", "event-body");
@@ -374,6 +378,20 @@
             links.appendChild(a);
           }
           r.appendChild(links);
+        }
+        if (s.phase || s.awaitingAcceptance || s.nextOwner) {
+          const metaRow = el("div", "status-meta");
+          if (s.awaitingAcceptance) metaRow.appendChild(el("span", "status-pill acceptance", "pending acceptance"));
+          if (s.phase) metaRow.appendChild(el("span", "status-pill phase", s.phase));
+          if (s.nextOwner) metaRow.appendChild(el("span", "status-owner", "next: " + s.nextOwner));
+          r.appendChild(metaRow);
+        }
+        if (s.artifacts && s.artifacts.length) {
+          const arts = el("div", "status-artifacts");
+          for (const a of s.artifacts) {
+            arts.appendChild(el("span", "status-artifact", a.label + ": " + a.value));
+          }
+          r.appendChild(arts);
         }
         break;
       }

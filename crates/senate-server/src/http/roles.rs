@@ -23,23 +23,29 @@ use super::{
 /// it there. A senator carrying one could pass a message off as the
 /// desk's, or have the server relay a "Speaker's" answer into another
 /// committee's thread.
-const OFFICE_KEYS: [&str; 6] = [
+const OFFICE_KEYS: [&str; 12] = [
     meta::ACTED_BY,
     meta::ORIGIN,
     meta::FORWARDED_TO,
     meta::ANSWERED_BY,
     meta::DESK_PERSON,
     meta::DESK_OUTCOME,
+    meta::EXECUTION_AUTH,
+    meta::RELAYED_EVENT_ID,
+    meta::CONFERENCE_ID,
+    meta::CONFERENCE_INVITE,
+    meta::CONFERENCE_REPORT,
+    meta::CONFERENCE_STATE,
 ];
 
 pub(super) fn reject_office_keys(event: &NewEvent, sender: Sender) -> Result<(), ApiFailure> {
     if sender != Sender::Speaker
-        && [meta::DESK_PERSON, meta::DESK_OUTCOME]
+        && [meta::DESK_PERSON, meta::DESK_OUTCOME, meta::EXECUTION_AUTH]
             .iter()
             .any(|key| event.meta.contains_key(*key))
     {
         return Err(ApiFailure::forbidden(
-            "only the Speaker's office writes desk receipts",
+            "only the Speaker's office writes desk receipts and execution authorizations",
         ));
     }
     if sender != Sender::Senator {
@@ -420,6 +426,7 @@ pub(super) async fn put_secretaries(
     let senator = state.hub.primary_name(&senator, None).await?;
     let SetSecretaries {
         mut secretaries,
+        mut execution_proxies,
         acted_by,
     } = json_body(body)?;
     let roster = state.hub.roster_now();
@@ -438,6 +445,24 @@ pub(super) async fn put_secretaries(
             Address::senator(&senator)
         )));
     }
+    let is_human = roster
+        .principal(&person.0)
+        .is_some_and(|principal| principal.kind.is_person());
+    if let Some(ref mut grants) = execution_proxies {
+        if !(itself && acted_by.is_none() && is_human) {
+            return Err(ApiFailure::forbidden(
+                "only the human principal in person may grant or revoke execution proxy rights",
+            ));
+        }
+        for grant in grants.iter_mut() {
+            grant.secretary = state.hub.primary_name(&grant.secretary, None).await?;
+            if state.hub.built_in() == Some(&grant.secretary) {
+                return Err(ApiFailure::bad_request(
+                    "the built-in session cannot hold a secretary execution proxy",
+                ));
+            }
+        }
+    }
     // A secretary not seated yet (a daemon-provided one, say) is seated now,
     // run by whoever registers it, when they may act as it.
     for secretary in &secretaries {
@@ -451,9 +476,15 @@ pub(super) async fn put_secretaries(
         }
     }
     let result = if method == axum::http::Method::POST {
-        state.hub.add_secretaries(senator, secretaries).await?
+        state
+            .hub
+            .add_secretaries_with_proxies(senator, secretaries, execution_proxies)
+            .await?
     } else {
-        state.hub.set_secretaries(senator, secretaries).await?
+        state
+            .hub
+            .set_secretaries_with_proxies(senator, secretaries, execution_proxies)
+            .await?
     };
     Ok(Json(result))
 }

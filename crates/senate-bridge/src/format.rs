@@ -450,6 +450,14 @@ fn crossing(event: &Event, locale: Locale) -> String {
             Locale::En => format!(" · meant for {to}"),
         });
     }
+    if event.from == Address::Speaker
+        && event.thread.is_none()
+        && Origin::of(event).is_some()
+        && let Some(auth) = senate_core::ExecutionAuthPayload::of(event)
+    {
+        let badge = one_line(&auth.badge(locale));
+        out.push_str(&format!(" · {badge}"));
+    }
     out
 }
 
@@ -491,6 +499,9 @@ pub struct Reader {
     /// verification for now). `None`: nobody's messages count as the
     /// user's.
     pub user: Option<SenatorName>,
+    /// Explicit opt-in receiver-side bypass for unverified cross-committee
+    /// forwarded requests (never modifies or forges server provenance).
+    pub unsafe_ignore_execution_auth: bool,
     aliases: Option<senate_core::alias::KnownAliases>,
 }
 
@@ -502,6 +513,7 @@ impl Reader {
             own,
             chairs: BTreeMap::new(),
             user: None,
+            unsafe_ignore_execution_auth: false,
             aliases: None,
         }
     }
@@ -517,6 +529,12 @@ impl Reader {
     /// The same reader, run by the person `user`.
     pub fn with_user(mut self, user: SenatorName) -> Self {
         self.user = Some(user);
+        self
+    }
+
+    /// Configure local `unsafe_ignore_execution_auth` mode for rendering prompts.
+    pub fn with_unsafe_ignore_execution_auth(mut self, enabled: bool) -> Self {
+        self.unsafe_ignore_execution_auth = enabled;
         self
     }
 
@@ -783,6 +801,28 @@ fn posted_back(event: &Event, locale: Locale) -> String {
     }
 }
 
+fn is_forwarded_request(event: &Event) -> bool {
+    event.kind == Kind::Request
+        && event.from == Address::Speaker
+        && event.thread.is_none()
+        && event.meta.contains_key(meta::ORIGIN)
+}
+
+fn verified_execution_auth(
+    event: &Event,
+    me: &Reader,
+) -> Option<senate_core::ExecutionAuthPayload> {
+    if !is_forwarded_request(event) {
+        return None;
+    }
+    let auth = senate_core::ExecutionAuthPayload::of(event)?;
+    let authorized_senator = senate_core::SenatorName::new(auth.authorized_by.clone()).ok()?;
+    if !me.people.is_empty() && !me.people.is_person(&authorized_senator) {
+        return None;
+    }
+    Some(auth)
+}
+
 /// How to respond, when a response is expected: every question, every
 /// relay spoken on someone's behalf, every chat.
 pub fn footer(event: &Event, me: &Reader, locale: Locale) -> Option<String> {
@@ -857,6 +897,57 @@ pub fn footer(event: &Event, me: &Reader, locale: Locale) -> Option<String> {
         sender_of(event, me)
     };
     let escalate = format!("mcp__senate__escalate(thread={root}, to=…)");
+    if event.kind == Kind::Request && !unsure(event) {
+        if let Some(auth) = verified_execution_auth(event, me) {
+            let who = Address::senior(&auth.authorized_by).in_text();
+            let via = match &auth.mode {
+                senate_core::ExecutionAuthMode::Direct => match locale {
+                    Locale::Zh => format!("已由 {who} 当面确认授权执行"),
+                    Locale::En => format!("execution authorized directly by {who}"),
+                },
+                senate_core::ExecutionAuthMode::SecretaryProxy { secretary } => {
+                    let sec = Address::senator(secretary).in_text();
+                    match locale {
+                        Locale::Zh => format!("已由 {who} 的授权代理 {sec} 签发执行授权"),
+                        Locale::En => {
+                            format!("execution authorized by {who} via secretary proxy {sec}")
+                        }
+                    }
+                }
+            };
+            let note = auth
+                .note
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(|n| {
+                    let n = one_line(n);
+                    match locale {
+                        Locale::Zh => format!("（授权备注：{n}）"),
+                        Locale::En => format!(" (authorization note: {n})"),
+                    }
+                })
+                .unwrap_or_default();
+            return Some(match locale {
+                Locale::Zh => format!(
+                    "↳ 跨委员会执行请求（{via}{note}）：在授权范围内直接执行，完成后用 {answer} 回复{back}"
+                ),
+                Locale::En => format!(
+                    "↳ Cross-committee request ({via}{note}): execute directly within that scope, then report with {answer}{back}"
+                ),
+            });
+        }
+        if me.unsafe_ignore_execution_auth && is_forwarded_request(event) {
+            return Some(match locale {
+                Locale::Zh => format!(
+                    "↳ [UNSAFE 模式已开启：忽略跨委员会执行授权校验] 该转交请求未携带有效 execution_auth，但因本机开启 unsafe_ignore_execution_auth 而跳过用户确认门禁；请务必谨慎执行并在完成后用 {answer} 回复{back}"
+                ),
+                Locale::En => format!(
+                    "↳ [UNSAFE mode enabled: execution_auth check bypassed locally] This forwarded request carries no verified execution_auth, so confirmation is bypassed solely by your local unsafe_ignore_execution_auth setting; proceed carefully and report with {answer}{back}"
+                ),
+            });
+        }
+    }
     match &event.kind {
         Kind::Question | Kind::Request => Some(match (sender, &event.kind, locale) {
             (Sender::Office, Kind::Question, Locale::Zh) => format!(
@@ -2551,6 +2642,85 @@ mod tests {
             .meta
             .insert(SPEAKER_META.into(), serde_json::json!(""));
         assert_eq!(footer(&answer, &alice(), EN), None);
+    }
+
+    #[test]
+    fn direct_execution_auth_bypasses_confirmation_and_shows_provenance() {
+        let origin = Origin {
+            locator: "/senate::commons::senator::bob".parse().unwrap(),
+            thread: Seq(13),
+        };
+        let mut forwarded = NewEvent::new(
+            committee(),
+            Kind::Request,
+            Address::Speaker,
+            "Commit, tag, push, and deploy v0.3.1.",
+        )
+        .to(alice().me)
+        .with_meta(meta::ORIGIN, origin.value())
+        .with_meta(meta::ACTED_BY, serde_json::json!("alice"))
+        .with_meta(meta::DESK_PERSON, serde_json::json!("alice"))
+        .with_meta(
+            "execution_auth",
+            serde_json::json!({
+                "authorized_by": "alice",
+                "mode": { "kind": "direct" }
+            }),
+        )
+        .into_event(Seq(42), Utc::now());
+        let en = render_event(&forwarded, &alices_agent(), EN);
+        assert!(en.contains("authorized by [senator::alice]"), "{en}");
+        assert!(!en.contains("show it to your user first"), "{en}");
+
+        // Forward-only control (without execution_auth) keeps confirmation gate.
+        forwarded.meta.remove("execution_auth");
+        let control = render_event(&forwarded, &alices_agent(), EN);
+        assert!(control.contains("show it to your user first"), "{control}");
+        assert!(!control.contains("authorized by"), "{control}");
+
+        // Secretary proxy with optional note bypasses confirmation and renders proxy provenance.
+        forwarded.meta.insert(
+            meta::EXECUTION_AUTH.into(),
+            serde_json::json!({
+                "authorized_by": "alice",
+                "mode": { "kind": "secretary_proxy", "secretary": "claude" },
+                "note": "deploy within staging only"
+            }),
+        );
+        let proxy_en = render_event(&forwarded, &alices_agent(), EN);
+        assert!(
+            proxy_en.contains(
+                "authorized via secretary [senator::claude] under [senator::alice]'s proxy"
+            ),
+            "{proxy_en}"
+        );
+        assert!(
+            proxy_en.contains("via secretary proxy [senator::claude]"),
+            "{proxy_en}"
+        );
+        assert!(
+            proxy_en.contains("deploy within staging only"),
+            "{proxy_en}"
+        );
+        assert!(
+            !proxy_en.contains("show it to your user first"),
+            "{proxy_en}"
+        );
+
+        // Local unsafe_ignore_execution_auth bypasses confirmation for an unverified forward
+        // WITHOUT mutating or forging server provenance.
+        forwarded.meta.remove(meta::EXECUTION_AUTH);
+        let unsafe_reader = alices_agent().with_unsafe_ignore_execution_auth(true);
+        let unsafe_en = render_event(&forwarded, &unsafe_reader, EN);
+        assert!(
+            unsafe_en.contains("[UNSAFE mode enabled: execution_auth check bypassed locally]"),
+            "{unsafe_en}"
+        );
+        assert!(!unsafe_en.contains("authorized by"), "{unsafe_en}");
+        assert!(
+            !unsafe_en.contains("show it to your user first"),
+            "{unsafe_en}"
+        );
     }
 }
 

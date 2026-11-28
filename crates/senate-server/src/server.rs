@@ -402,6 +402,16 @@ async fn load_registry(
         }
         Err(e) => tracing::warn!("reading the kept secretaries: {e}"),
     }
+    match registry::execution_proxies(store).await {
+        Ok(grants) => {
+            for (principal, proxies) in grants {
+                if let Err(e) = roster.set_execution_proxies(principal.clone(), proxies) {
+                    tracing::warn!(%principal, "kept execution proxies are not registered again: {e}");
+                }
+            }
+        }
+        Err(e) => tracing::warn!("reading the kept execution proxies: {e}"),
+    }
     match registry::children(store).await {
         Ok(children) => children,
         Err(e) => {

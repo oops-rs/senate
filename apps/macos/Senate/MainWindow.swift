@@ -21,8 +21,15 @@ struct MainWindow: View {
             // Wide enough that nothing in it wraps into a tall column.
             .frame(minWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
             .safeAreaInset(edge: .top, spacing: 0) {
-                if store.state.online, let error = store.shownError {
-                    ErrorBanner(message: error) { store.actionError = nil }
+                VStack(spacing: 0) {
+                    if store.state.online && store.state.unsafeIgnoreExecutionAuth {
+                        UnsafeModeBanner {
+                            Task { _ = await store.setUnsafeIgnoreExecutionAuth(false) }
+                        }
+                    }
+                    if store.state.online, let error = store.shownError {
+                        ErrorBanner(message: error) { store.actionError = nil }
+                    }
                 }
             }
             .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
@@ -49,6 +56,8 @@ struct MainWindow: View {
             if let s = store.session(id) { return s.displayName }
         case let .committee(name):
             return name.isEmpty ? L("sidebar.no_committee") : name
+        case let .conference(id):
+            return store.state.conferences.first(where: { $0.id == id })?.topic ?? L("tab.conferences")
         case .section(.senates):
             return store.state.person ?? Section.senates.title
         case let .section(section):
@@ -112,6 +121,9 @@ struct MainWindow: View {
             case .section(.history): HistoryView(store: store)
             case let .past(id): PastSessionPage(store: store, sessionId: id)
             case .item, .section(.inbox): InboxView(store: store)
+            case .section(.commissions): CommissionsView(store: store)
+            case .section(.conferences): ConferencesView(store: store)
+            case let .conference(id): ConferenceRoomView(store: store, id: id).id(id)
             case .section(.approvals): ApprovalsView(store: store)
             case let .desk(item): DeskEntryDetail(store: store, item: item).id(item.id)
             case .section(.senates): SenatesView(store: store)
@@ -496,6 +508,8 @@ extension CoreStore.Section {
     var title: String {
         switch self {
         case .inbox: L("tab.inbox")
+        case .commissions: L("tab.commissions")
+        case .conferences: L("tab.conferences")
         case .approvals: L("tab.approvals")
         case .senates: L("tab.profile")
         case .history: L("tab.history")
@@ -505,6 +519,8 @@ extension CoreStore.Section {
     var symbol: String {
         switch self {
         case .inbox: "tray"
+        case .commissions: "list.bullet.clipboard"
+        case .conferences: "person.3"
         case .approvals: "checkmark.shield"
         case .senates: "person.crop.circle"
         case .history: "clock.arrow.circlepath"
@@ -787,6 +803,34 @@ enum Profile {
         guard let address = state.senates.first?.serverUrl else { return L("a11y.online") }
         guard let url = URL(string: address), let host = url.host() else { return address }
         return url.port.map { "\(host):\($0)" } ?? host
+    }
+}
+
+/// Persistent warning shown whenever local `[desk].unsafe_ignore_execution_auth`
+/// bypass is enabled.
+private struct UnsafeModeBanner: View {
+    let turnOff: () -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s) {
+            Image(systemName: "shield.slash.fill")
+                .foregroundStyle(Theme.attention)
+                .accessibilityHidden(true)
+            Text(verbatim: L("banner.unsafe_mode"))
+                .font(Theme.Fonts.text)
+                .foregroundStyle(Theme.onSurface)
+                .lineLimit(3)
+            Spacer(minLength: Theme.Space.s)
+            Button(L("banner.unsafe_turn_off"), action: turnOff)
+                .buttonStyle(.pill)
+        }
+        .padding(.horizontal, Theme.Space.l)
+        .padding(.vertical, Theme.Space.s)
+        .background(Theme.attentionContainer, in: RoundedRectangle(cornerRadius: Theme.Radius.card))
+        .frame(maxWidth: Theme.composerWidth)
+        .padding(.horizontal, Theme.Space.xl)
+        .padding(.bottom, Theme.Space.s)
+        .frame(maxWidth: .infinity)
     }
 }
 

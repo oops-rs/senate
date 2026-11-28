@@ -3,6 +3,7 @@
 mod chair_discussion;
 mod chat_sim;
 mod committee_seat;
+mod conference;
 mod error;
 mod roles;
 mod secretary_work;
@@ -121,6 +122,16 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/v1/children/{name}/seats", put(roles::put_child_seats))
         .route("/v1/resolve", get(resolve))
         .route(
+            "/v1/conferences",
+            get(conference::list).post(conference::create),
+        )
+        .route("/v1/conferences/{id}", get(conference::get))
+        .route("/v1/conferences/{id}/rsvp", post(conference::rsvp))
+        .route("/v1/conferences/{id}/start", post(conference::start))
+        .route("/v1/conferences/{id}/events", post(conference::post_event))
+        .route("/v1/conferences/{id}/stream", get(conference::stream))
+        .route("/v1/conferences/{id}/adjourn", post(conference::adjourn))
+        .route(
             "/v1/committees/{committee}/chat/simulate",
             post(chat_sim::simulate),
         )
@@ -185,6 +196,26 @@ impl AppState {
     /// `person` acts as `senator`: themselves, or an agent under their own
     /// name that could sit in this Senate, which is seated if this is its
     /// first contact. Anyone else's, and the built-in session, is 403.
+    fn can_read_committee(&self, person: &Person, committee: &CommitteeId) -> bool {
+        self.hub
+            .roster_now()
+            .can_read_committee(&person.0, committee)
+    }
+
+    fn require_read_committee(
+        &self,
+        person: &Person,
+        committee: &CommitteeId,
+    ) -> Result<(), ApiFailure> {
+        if self.can_read_committee(person, committee) {
+            return Ok(());
+        }
+        Err(ApiFailure::forbidden(format!(
+            "{} may not read committee {committee}",
+            person.0
+        )))
+    }
+
     async fn act_as(&self, person: &Person, senator: &SenatorName) -> Result<(), ApiFailure> {
         self.hub
             .act_as(&person.0, senator)
@@ -254,6 +285,72 @@ impl AppState {
                 "desk_person must name the authenticated human principal",
             ));
         }
+        if let Some(raw_auth) = event.meta.get(meta::EXECUTION_AUTH) {
+            let auth: senate_core::ExecutionAuthPayload = serde_json::from_value(raw_auth.clone())
+                .map_err(|e| {
+                    ApiFailure::bad_request(format!(
+                        "meta.{} is not an execution auth payload: {e}",
+                        meta::EXECUTION_AUTH
+                    ))
+                })?;
+            if event.kind != Kind::Request
+                || event.thread.is_some()
+                || senate_core::Origin::of_new(event).is_none()
+            {
+                return Err(ApiFailure::bad_request(format!(
+                    "meta.{} is only valid on a cross-committee forwarded request root",
+                    meta::EXECUTION_AUTH
+                )));
+            }
+            match &auth.mode {
+                senate_core::ExecutionAuthMode::Direct => {
+                    let is_human = roster
+                        .principal(&person.0)
+                        .is_some_and(|p| p.kind.is_person());
+                    let acted_by_allowed = acted_by.name() == &person.0
+                        || (office.kind == senate_core::SenatorKind::Agent
+                            && office.speaker_here() == Some(&acted_by)
+                            && roster.owner_of(&acted_by) == Some(&person.0));
+                    let desk_matches = event.meta.get(meta::DESK_PERSON).and_then(|v| v.as_str())
+                        == Some(person.0.as_str());
+                    if !is_human
+                        || !acted_by_allowed
+                        || auth.authorized_by != person.0
+                        || !desk_matches
+                    {
+                        return Err(ApiFailure::forbidden(
+                            "direct execution_auth must be issued by the authenticated human principal and match meta.desk_person",
+                        ));
+                    }
+                }
+                senate_core::ExecutionAuthMode::SecretaryProxy { secretary } => {
+                    if &acted_by != secretary {
+                        return Err(ApiFailure::forbidden(
+                            "secretary_proxy execution_auth must be written by the named secretary",
+                        ));
+                    }
+                    if !roster.is_active_execution_proxy(secretary, chrono::Utc::now()) {
+                        return Err(ApiFailure::forbidden(format!(
+                            "{} does not hold an active execution proxy grant",
+                            Address::senator(secretary)
+                        )));
+                    }
+                    let owner_person = office
+                        .desk_owner()
+                        .filter(|owner| {
+                            roster
+                                .principal(owner.name())
+                                .is_some_and(|p| p.kind.is_person())
+                        })
+                        .map(|owner| owner.name());
+                    if owner_person != Some(&auth.authorized_by) {
+                        return Err(ApiFailure::forbidden(
+                            "secretary_proxy authorized_by must match the Speaker's human principal",
+                        ));
+                    }
+                }
+            }
+        }
         event.meta.insert(
             meta::ACTED_BY.into(),
             serde_json::Value::String(acted_by.to_string()),
@@ -297,7 +394,13 @@ impl AppState {
 }
 
 fn committee_id(raw: &str) -> Result<CommitteeId, ApiFailure> {
-    CommitteeId::new(raw).map_err(|e| ApiFailure::bad_request(e.to_string()))
+    let id = CommitteeId::new(raw).map_err(|e| ApiFailure::bad_request(e.to_string()))?;
+    if senate_core::is_conference_stream(&id) {
+        return Err(ApiFailure::forbidden(
+            "conference streams must be accessed via /v1/conferences/{id}",
+        ));
+    }
+    Ok(id)
 }
 
 fn committee_path(path: Result<Path<String>, PathRejection>) -> Result<CommitteeId, ApiFailure> {
@@ -984,11 +1087,12 @@ fn asker_archive(payload: &StatusPayload, asker: &Address) -> Result<(), ApiFail
 
 async fn events(
     State(state): State<AppState>,
-    _person: Person,
+    person: Person,
     path: Result<Path<String>, PathRejection>,
     params: Result<Query<EventsQuery>, QueryRejection>,
 ) -> Result<Json<EventsPage>, ApiFailure> {
     let committee = committee_path(path)?;
+    state.require_read_committee(&person, &committee)?;
     let params = query(params)?;
     let limit = params.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
     let mut events = state.hub.read(&committee, params.after, limit + 1).await?;
@@ -1210,27 +1314,43 @@ async fn latest_checkpoint(
 
 async fn threads(
     State(state): State<AppState>,
-    _person: Person,
+    person: Person,
     path: Result<Path<String>, PathRejection>,
     params: Result<Query<ThreadsQuery>, QueryRejection>,
 ) -> Result<Json<ThreadsPage>, ApiFailure> {
     let committee = committee_path(path)?;
+    state.require_read_committee(&person, &committee)?;
     let params = query(params)?;
     if params.include_discussions && params.agent.is_none() {
         return Ok(Json(
-            state.hub.committee_threads(&committee, &params).await?,
+            state
+                .hub
+                .committee_threads(&committee, &params, |dst| {
+                    state.can_read_committee(&person, dst)
+                })
+                .await?,
         ));
     }
     let board = state.hub.tasks(&committee).await?;
-    let threads = match &params.agent {
-        Some(agent) => board.threads_for(
-            &state.hub.primary_name(agent, Some(&committee)).await?,
-            params.state,
-        ),
-        None => board.threads(params.state),
+    let mut threads: Vec<senate_core::ThreadSummary> = match &params.agent {
+        Some(agent) => board
+            .threads_for(
+                &state.hub.primary_name(agent, Some(&committee)).await?,
+                params.state,
+            )
+            .into_iter()
+            .cloned()
+            .collect(),
+        None => board.threads(params.state).into_iter().cloned().collect(),
     };
+    state
+        .hub
+        .project_linked_downstream(&board, &mut threads, |dst| {
+            state.can_read_committee(&person, dst)
+        })
+        .await;
     Ok(Json(ThreadsPage {
-        threads: threads.into_iter().cloned().collect(),
+        threads,
         head: board.head(),
     }))
 }

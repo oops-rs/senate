@@ -85,6 +85,7 @@ pub mod brief;
 pub mod chair;
 pub mod chat_sim;
 pub mod committee_seat;
+pub mod conference;
 pub mod continuity;
 pub mod docket;
 pub mod duty;
@@ -112,6 +113,16 @@ pub use chair::{ChairFold, ChairPayload, ChairSource};
 pub use committee_seat::{
     ArchiveFold, CommitteeArchive, CommitteeSeatAction, CommitteeSeatChange, CommitteeSeats,
 };
+pub use conference::{
+    AdjournConferenceRequest, CONFERENCE_PREFIX, ConferenceActionItem, ConferenceDetail,
+    ConferenceId, ConferenceInvitePayload, ConferenceList, ConferenceReport,
+    ConferenceReportPayload, ConferenceRsvpAction, ConferenceSeatInput, ConferenceState,
+    ConferenceSummary, CreateConferenceRequest, FloorState, InvitedSeat, LinkedThread,
+    MAX_REPORT_ACTION_ITEMS, MAX_REPORT_DECISIONS, MAX_TOPIC_CHARS, PostConferenceEventRequest,
+    PostConferenceEventResponse, SeatStatus, conference_adjourn_path, conference_events_path,
+    conference_path, conference_rsvp_path, conference_start_path, conference_stream_path,
+    conferences_path, is_conference_stream,
+};
 pub use continuity::{
     AgentPresence, CheckpointFiles, CheckpointPayload, CheckpointRecord, CheckpointTrigger,
     Checkpoints, PresenceBoard, PresencePayload, PresenceState, presence_event, presence_label,
@@ -122,9 +133,9 @@ pub use docket::{
 };
 pub use duty::{DutyFold, DutyPayload};
 pub use event::{
-    BindingAction, BindingPayload, Carried, CarriedHow, Event, GroupRole, Kind, Mirror, NewEvent,
-    PROPOSAL_DECISION, Refs, Source, StatusState, is_companion, is_provisional, is_takeover, meta,
-    thread_participants,
+    BindingAction, BindingPayload, Carried, CarriedHow, Event, ExecutionAuthMode,
+    ExecutionAuthPayload, GroupRole, Kind, Mirror, NewEvent, PROPOSAL_DECISION, Refs, Source,
+    StatusState, is_companion, is_provisional, is_takeover, meta, thread_participants,
 };
 pub use hub::{
     Appended, Hub, HubError, MirrorRef, ReassignRefused, reassign_event, reassign_transition,
@@ -138,9 +149,9 @@ pub use memory::{
 };
 pub use mention::{Found, Mention, MentionParseError};
 pub use roster::{
-    Account, AgentOf, DEFAULT_SENATE_NAME, DelegationPresence, Office, People, Principal,
-    PrincipalKind, ResolveError, Roster, RosterConfig, RosterError, SeatedAgent, SenatorKind,
-    SpeakerName, SpeakerSeat,
+    Account, AgentOf, DEFAULT_SENATE_NAME, DelegationPresence, ExecutionProxyGrant, Office, People,
+    Principal, PrincipalKind, ResolveError, Roster, RosterConfig, RosterError, SeatedAgent,
+    SenatorKind, SpeakerName, SpeakerSeat,
 };
 pub use senate::{KEYWORDS, KeywordError, SenatePath, SenatePathError, check_not_keyword};
 pub use senator::{SenatorName, SenatorNameError};
@@ -150,9 +161,11 @@ pub use surface::{
     Posted, SurfaceError, UnboundMention,
 };
 pub use task::{
-    Attention, Directed, Escalation, Link, OutputLevel, PersonWait, StatusPayload, Step, TaskBoard,
-    TaskOwner, ThreadSummary, TriagePayload, TriageVerdict, WaitsOn, attention, needs_triage,
-    seen_by_author,
+    ArtifactRef, Attention, CommissionBucket, CommissionRoot, CommissionSignal,
+    CommissionSignalKind, Directed, Escalation, Link, LinkedTaskSummary, MAX_ARTIFACT_LABEL_CHARS,
+    MAX_ARTIFACT_VALUE_CHARS, MAX_ARTIFACTS, MAX_PHASE_CHARS, OutputLevel, PersonWait,
+    StatusPayload, Step, TaskBoard, TaskOwner, ThreadSummary, TriagePayload, TriageVerdict,
+    WaitsOn, attention, commission_signal, needs_triage, seen_by_author,
 };
 pub use work::{BranchNaming, DEFAULT_BRANCH_PREFIX, WorkRun, WorkState, is_work_root};
 

@@ -17,7 +17,7 @@
 //! [`Action`] is what the window asks for; [`Action::request`] maps it to the
 //! bridge's own IPC [`Request`], so the wire format stays the bridge's.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
 use senate_bridge::approvals::{Approval, Decision};
@@ -28,8 +28,8 @@ use senate_bridge::ipc::{
 use senate_bridge::session::{Runtime, Session, SessionState};
 use senate_core::alias::AliasName;
 use senate_core::{
-    CommitteeId, Directed, Locale, SenatorName, Seq, SpeakerSeat, StatusPayload, StatusState,
-    ThreadSummary,
+    CommissionBucket, CommitteeId, Directed, Locale, SenatorName, Seq, SpeakerSeat, StatusPayload,
+    StatusState, ThreadSummary,
 };
 
 use crate::text;
@@ -58,6 +58,8 @@ pub enum Refresh {
     /// `docket`: what awaits the Speaker of every Senate one of the
     /// person's agents presides over. Does nothing when none does.
     Docket,
+    /// Multi-party cross-committee conferences.
+    Conferences,
 }
 
 /// Something the user should be told about outside the window.
@@ -200,6 +202,7 @@ pub struct Model {
     pub sessions: Option<SessionsReply>,
     pub last_error: Option<Failure>,
     pub roster: Vec<senate_bridge::ipc::RosterCommittee>,
+    pub conferences: Vec<senate_core::ConferenceSummary>,
     /// Approvals already notified about, so a reconnect does not repeat them.
     notified: BTreeSet<String>,
     /// Hosted prompts already notified about, by session and when it opened.
@@ -226,6 +229,15 @@ pub struct Waiting {
     pub for_person: bool,
 }
 
+/// One thread sponsored by the person (`My Commissions` / 「委派追踪」).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommissionEntry {
+    pub committee: CommitteeId,
+    pub thread: ThreadSummary,
+    pub bucket: CommissionBucket,
+    pub seen: Seq,
+}
+
 impl Model {
     pub fn new(locale: Locale) -> Self {
         Self {
@@ -242,6 +254,7 @@ impl Model {
         self.last_error = None;
         self.approvals.clear();
         self.sessions = None;
+        self.conferences.clear();
     }
 
     /// The daemon cannot be reached (or the stream broke).
@@ -278,6 +291,7 @@ impl Model {
                 fx.refresh.push(Refresh::Roster);
                 fx.refresh.push(Refresh::AllInboxes);
                 fx.refresh.push(Refresh::Docket);
+                fx.refresh.push(Refresh::Conferences);
                 // How agents are named (the driver reads them at most every
                 // few minutes).
                 fx.refresh.push(Refresh::Aliases);
@@ -303,6 +317,7 @@ impl Model {
             // What this machine's agents are comes with the next status.
             WatchEvent::Roles => fx.refresh.extend([Refresh::Roster, Refresh::Docket]),
             WatchEvent::Sessions => fx.refresh.push(Refresh::Sessions),
+            WatchEvent::ConferencesChanged => fx.refresh.push(Refresh::Conferences),
             WatchEvent::Inbox {
                 agent, committee, ..
             } => {
@@ -316,6 +331,7 @@ impl Model {
                 news,
                 escalated,
                 text,
+                signal: _,
             } => {
                 // Named as everywhere in the app: never a bracketed id.
                 let names = crate::names::current();
@@ -341,6 +357,7 @@ impl Model {
                 fx.refresh.push(Refresh::Approvals);
                 fx.refresh.push(Refresh::AllInboxes);
                 fx.refresh.push(Refresh::Docket);
+                fx.refresh.push(Refresh::Conferences);
             }
         }
         fx
@@ -382,6 +399,10 @@ impl Model {
             .into_iter()
             .map(|a| (a.id.clone(), a))
             .collect();
+    }
+
+    pub fn set_conferences(&mut self, list: senate_core::ConferenceList) {
+        self.conferences = list.conferences;
     }
 
     /// A read succeeded: forget its failure, if that is what the error bar
@@ -485,6 +506,73 @@ impl Model {
         self.waiting().len()
     }
 
+    /// Active or unread completed threads sponsored by the person across committees,
+    /// deduplicating origin proxy threads when the authoritative downstream thread
+    /// is present, sorted by `Blocked → PendingAcceptance → CompletedUnread → InProgress`.
+    pub fn commissions(&self) -> Vec<CommissionEntry> {
+        let Some(person) = self
+            .status
+            .as_ref()
+            .map(|s| &s.person)
+            .or_else(|| self.inboxes.values().next().map(|r| &r.person))
+        else {
+            return Vec::new();
+        };
+        let mut by_key: BTreeMap<(CommitteeId, Seq), (ThreadSummary, Seq)> = BTreeMap::new();
+        for ((_, committee), reply) in &self.inboxes {
+            for t in &reply.threads {
+                if !t.is_sponsored_by(person) || t.state == StatusState::Archived {
+                    continue;
+                }
+                let seen = reply.seen_of(t.root);
+                by_key
+                    .entry((committee.clone(), t.root))
+                    .and_modify(|(existing, best_seen)| {
+                        if seen > *best_seen {
+                            *best_seen = seen;
+                        }
+                        if t.updated > existing.updated {
+                            *existing = t.clone();
+                        }
+                    })
+                    .or_insert_with(|| (t.clone(), seen));
+            }
+        }
+        let origin_proxies: HashSet<(CommitteeId, Seq)> = by_key
+            .values()
+            .filter_map(|(t, _)| {
+                let origin = t.origin.as_ref()?;
+                let committee = origin.locator.committee()?.clone();
+                Some((committee, origin.thread))
+            })
+            .collect();
+        let mut out: Vec<CommissionEntry> = by_key
+            .into_iter()
+            .filter(|(key, _)| !origin_proxies.contains(key))
+            .filter_map(|((committee, _), (thread, seen))| {
+                let bucket = thread.commission_bucket(seen);
+                if bucket == CommissionBucket::CompletedRead {
+                    return None;
+                }
+                Some(CommissionEntry {
+                    committee,
+                    thread,
+                    bucket,
+                    seen,
+                })
+            })
+            .collect();
+        out.sort_by_key(|e| {
+            (
+                e.bucket,
+                std::cmp::Reverse(e.thread.updated),
+                e.committee.clone(),
+                e.thread.root,
+            )
+        });
+        out
+    }
+
     /// Items awaiting the Speaker, across the Senates the person presides
     /// over. They wait on the presiding agent, not on the person.
     pub fn docket_items(&self) -> usize {
@@ -535,6 +623,11 @@ pub enum Action {
     },
     /// Archive the thread, as the person.
     Close {
+        committee: CommitteeId,
+        thread: Seq,
+    },
+    /// Accept a delivered thread awaiting verification and archive/close it.
+    Accept {
         committee: CommitteeId,
         thread: Seq,
     },
@@ -632,6 +725,19 @@ impl Action {
                 agent: None,
                 as_person: true,
             },
+            Action::Accept { committee, thread } => {
+                let mut status = StatusPayload::new(StatusState::Archived);
+                status.reason = Some("Accepted and closed".to_string());
+                Request::Task {
+                    session,
+                    thread,
+                    status,
+                    id: None,
+                    committee: Some(committee),
+                    agent: None,
+                    as_person: true,
+                }
+            }
             Action::MarkRead {
                 committee,
                 thread,
@@ -695,6 +801,7 @@ impl Action {
             | Action::Answer { committee, .. }
             | Action::Take { committee, .. }
             | Action::Close { committee, .. }
+            | Action::Accept { committee, .. }
             | Action::MarkRead { committee, .. }
             | Action::Say { committee, .. } => Some(committee),
             Action::Approvals
@@ -730,13 +837,16 @@ fn is_escalated_to(t: &ThreadSummary, person: &senate_core::Name) -> bool {
 /// no one (an older server records neither), and this machine's person is
 /// the one who can act on it.
 fn parked_on(t: &ThreadSummary, person: &senate_core::Name) -> bool {
-    if t.waits() != Some(senate_core::WaitsOn::Person) {
-        return false;
-    }
-    match (escalated_to_now(t), t.takeover.as_ref()) {
-        (Some(to), _) => to == person,
-        (None, Some(by)) => by == person,
-        (None, None) => true,
+    match t.waits() {
+        Some(senate_core::WaitsOn::Acceptance { owner }) => {
+            owner == senate_core::Address::senior(person)
+        }
+        Some(senate_core::WaitsOn::Person) => match (escalated_to_now(t), t.takeover.as_ref()) {
+            (Some(to), _) => to == person,
+            (None, Some(by)) => by == person,
+            (None, None) => true,
+        },
+        _ => false,
     }
 }
 
@@ -872,6 +982,7 @@ mod tests {
             queue: Default::default(),
             speaker: None,
             roles: None,
+            unsafe_ignore_execution_auth: false,
         }
     }
 
@@ -888,6 +999,7 @@ mod tests {
                 speaker: senate_core::SenatorId::of("/senate".parse().unwrap(), path("alice")),
                 kind: senate_core::SenatorKind::Person,
                 desk: vec![path("claude-bd42dec6")],
+                execution_proxies: Vec::new(),
                 built_in: None,
             }),
             ..Default::default()
@@ -900,6 +1012,7 @@ mod tests {
                 speaker: senate_core::SenatorId::here(path("claude")),
                 kind: senate_core::SenatorKind::Agent,
                 desk: Vec::new(),
+                execution_proxies: Vec::new(),
                 built_in: None,
             }),
             ..Default::default()
@@ -939,6 +1052,16 @@ mod tests {
             reopened: false,
             escalation: None,
             directed: Vec::new(),
+            desk_person: None,
+            execution_auth: None,
+            origin: None,
+            answer_seq: None,
+            answer_line: None,
+            phase: None,
+            artifacts: Vec::new(),
+            next_owner: None,
+            awaiting_acceptance: false,
+            linked_downstream: None,
         }
     }
 
@@ -969,6 +1092,7 @@ mod tests {
                 Refresh::Roster,
                 Refresh::AllInboxes,
                 Refresh::Docket,
+                Refresh::Conferences,
                 Refresh::Aliases,
                 Refresh::Sessions
             ]
@@ -1325,6 +1449,7 @@ mod tests {
                 news: Box::new(event),
                 escalated: false,
                 text: text.clone(),
+                signal: None,
             });
             assert_eq!(
                 fx.notices,
@@ -1378,7 +1503,73 @@ mod tests {
                 Refresh::Sessions,
                 Refresh::Approvals,
                 Refresh::AllInboxes,
-                Refresh::Docket
+                Refresh::Docket,
+                Refresh::Conferences,
+            ]
+        );
+    }
+
+    #[test]
+    fn commissions_deduplicate_origin_and_sort_by_bucket() {
+        let mut m = Model::default();
+        m.connected();
+        m.apply(WatchEvent::Status(Box::new(status(&[
+            ("codex", "ledger"),
+            ("copilot", "refund-v2"),
+        ]))));
+        let mut origin_proxy = inbox("codex", "ledger", &[10]);
+        origin_proxy.threads[0].from = senate_core::Address::senior(&Name::new("alice").unwrap());
+        origin_proxy.threads[0].state = StatusState::Processing;
+        m.set_inbox(origin_proxy);
+
+        let mut dst = inbox("copilot", "refund-v2", &[20, 21, 22, 23]);
+        // 20: downstream suspended (and origin_proxy=ledger#10)
+        dst.threads[0].desk_person = Some(Name::new("alice").unwrap());
+        dst.threads[0].state = StatusState::Suspended;
+        dst.threads[0].origin = Some(senate_core::Origin {
+            locator: senate_core::Locator::parse_short("ledger::codex").unwrap(),
+            thread: Seq(10),
+        });
+        // 21: completed unread
+        dst.threads[1].from = senate_core::Address::senior(&Name::new("alice").unwrap());
+        dst.threads[1].state = StatusState::Active;
+        dst.threads[1].answered = true;
+        dst.threads[1].answer_seq = Some(Seq(25));
+        dst.threads[1].updated = Seq(25);
+        // 22: in progress
+        dst.threads[2].execution_auth = Some(senate_core::ExecutionAuthPayload {
+            authorized_by: Name::new("alice").unwrap(),
+            mode: senate_core::ExecutionAuthMode::Direct,
+            note: None,
+        });
+        dst.threads[2].state = StatusState::Processing;
+        // 23: completed read -> omitted
+        dst.threads[3].from = senate_core::Address::senior(&Name::new("alice").unwrap());
+        dst.threads[3].state = StatusState::Active;
+        dst.threads[3].answered = true;
+        dst.threads[3].answer_seq = Some(Seq(26));
+        dst.threads[3].updated = Seq(26);
+        dst.seen.push(senate_bridge::ipc::ThreadSeen {
+            thread: Seq(23),
+            seen: Seq(26),
+        });
+        m.set_inbox(dst);
+
+        let entries = m.commissions();
+        let keys: Vec<(String, u64, CommissionBucket)> = entries
+            .iter()
+            .map(|e| (e.committee.to_string(), e.thread.root.0, e.bucket))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("refund-v2".to_string(), 20, CommissionBucket::Blocked),
+                (
+                    "refund-v2".to_string(),
+                    21,
+                    CommissionBucket::CompletedUnread
+                ),
+                ("refund-v2".to_string(), 22, CommissionBucket::InProgress),
             ]
         );
     }
@@ -1510,5 +1701,71 @@ mod tests {
             script.contains(r#"do script "cd '/a \"b\"' && codex""#),
             "{script}"
         );
+    }
+
+    #[test]
+    fn pending_acceptance_metadata_accept_action_and_thread_view_project_cleanly() {
+        let mut s = StatusPayload::new(StatusState::Active);
+        s.phase = Some("staging-verified".into());
+        s.artifacts = vec![senate_core::ArtifactRef {
+            label: "tag".into(),
+            value: "v0.4.3-rc1".into(),
+        }];
+        s.next_owner = Some(senate_core::Address::senior(&Name::new("alice").unwrap()));
+        s.awaiting_acceptance = true;
+
+        let c = CommitteeId::new("refund-v2").unwrap();
+        let req = senate_core::NewEvent::new(
+            c.clone(),
+            senate_core::Kind::Request,
+            senate_core::Address::senior(&Name::new("alice").unwrap()),
+            "Ship v0.4.3",
+        )
+        .to(senate_core::Address::senator(&path("claude")))
+        .into_event(Seq(10), Utc::now());
+        let st_ev = senate_core::NewEvent::new(
+            c.clone(),
+            senate_core::Kind::Status,
+            senate_core::Address::senator(&path("claude")),
+            "",
+        )
+        .in_thread(Seq(10))
+        .with_meta(senate_core::meta::STATUS, s.value())
+        .into_event(Seq(11), Utc::now());
+
+        let view = crate::reads::thread_view(
+            senate_bridge::ipc::ThreadReply {
+                committee: c.clone(),
+                root: Seq(10),
+                events: vec![req, st_ev],
+            },
+            Some(&Name::new("alice").unwrap()),
+            Locale::En,
+        );
+        assert!(view.awaiting_acceptance);
+        assert_eq!(view.phase.as_deref(), Some("staging-verified"));
+        assert_eq!(view.artifacts.len(), 1);
+        assert_eq!(view.next_owner.as_deref(), Some("[senator::alice]"));
+        let status_ev = view.events.iter().find(|e| e.status.is_some()).unwrap();
+        let status_line = status_ev.status.as_ref().unwrap();
+        assert!(status_line.awaiting_acceptance);
+        assert_eq!(status_line.phase.as_deref(), Some("staging-verified"));
+
+        let req_msg = Action::Accept {
+            committee: c,
+            thread: Seq(10),
+        }
+        .request()
+        .unwrap();
+        match req_msg {
+            Request::Task {
+                status, as_person, ..
+            } => {
+                assert!(as_person);
+                assert_eq!(status.state, StatusState::Archived);
+                assert_eq!(status.reason.as_deref(), Some("Accepted and closed"));
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
     }
 }
